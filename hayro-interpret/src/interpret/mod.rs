@@ -1,5 +1,5 @@
 use crate::FillRule;
-use crate::annotation::resolve_annotation_appearance;
+use crate::annotation::{annotation_is_visible_on_screen, resolve_annotation_appearance};
 use crate::color::ColorSpace;
 use crate::context::Context;
 use crate::convert::{convert_line_cap, convert_line_join};
@@ -17,7 +17,7 @@ use crate::x_object::{ImageXObject, XObject};
 use hayro_syntax::content::TypedIter;
 use hayro_syntax::content::ops::TypedInstruction;
 use hayro_syntax::object::dict::keys::{
-    ACTUAL_TEXT, ALT, ANNOTS, F, LANG, MCID, NAME, OC, OCG, OCMD, TYPE,
+    ACTUAL_TEXT, ALT, ANNOTS, LANG, MCID, NAME, OC, OCG, OCMD, TYPE,
 };
 use hayro_syntax::object::{
     Array, Dict, Name, Object, ObjectIdentifier, String as PdfString, dict_or_stream,
@@ -165,11 +165,8 @@ pub fn interpret_page<'a>(
         && let Some(annot_arr) = page.raw().get::<Array<'_>>(ANNOTS)
     {
         for annot in annot_arr.iter::<Dict<'_>>() {
-            let flags = annot.get::<u32>(F).unwrap_or(0);
-
-            // Invisible, Hidden, and NoView annotations have no screen
-            // presentation. Print is intentionally irrelevant here.
-            if flags & (1 | 2 | 32) != 0 {
+            // Print is intentionally irrelevant for this screen device.
+            if !annotation_is_visible_on_screen(&annot) {
                 continue;
             }
 

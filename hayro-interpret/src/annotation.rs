@@ -1,6 +1,6 @@
 use crate::RectExt;
 use crate::x_object::FormXObject;
-use hayro_syntax::object::dict::keys::{AP, AS, FORMTYPE, N, RECT, RESOURCES, SUBTYPE, TYPE};
+use hayro_syntax::object::dict::keys::{AP, AS, F, FORMTYPE, N, RECT, RESOURCES, SUBTYPE, TYPE};
 use hayro_syntax::object::{Dict, Name, Object, Rect, Stream};
 use kurbo::{Affine, Shape};
 
@@ -35,6 +35,57 @@ pub enum AnnotationAppearanceError {
     /// The appearance Form cannot be mapped to the annotation rectangle with
     /// a finite, non-degenerate transform.
     InvalidAppearanceMapping,
+}
+
+/// Whether an annotation participates in the normal interactive screen view.
+///
+/// `Hidden` and `NoView` always suppress an annotation. `Invisible` suppresses
+/// only an unknown annotation type for which no standard handler exists, as
+/// specified by the PDF annotation-flags table.
+pub fn annotation_is_visible_on_screen(annotation: &Dict<'_>) -> bool {
+    let flags = annotation.get::<u32>(F).unwrap_or(0);
+    if flags & (2 | 32) != 0 {
+        return false;
+    }
+    if flags & 1 == 0 {
+        return true;
+    }
+    annotation
+        .get::<Name<'_>>(SUBTYPE)
+        .is_some_and(|subtype| is_standard_annotation_subtype(subtype.as_ref()))
+}
+
+fn is_standard_annotation_subtype(subtype: &[u8]) -> bool {
+    matches!(
+        subtype,
+        b"Text"
+            | b"Link"
+            | b"FreeText"
+            | b"Line"
+            | b"Square"
+            | b"Circle"
+            | b"Polygon"
+            | b"PolyLine"
+            | b"Highlight"
+            | b"Underline"
+            | b"Squiggly"
+            | b"StrikeOut"
+            | b"Stamp"
+            | b"Caret"
+            | b"Ink"
+            | b"Popup"
+            | b"FileAttachment"
+            | b"Sound"
+            | b"Movie"
+            | b"Widget"
+            | b"Screen"
+            | b"PrinterMark"
+            | b"TrapNet"
+            | b"Watermark"
+            | b"3D"
+            | b"Redact"
+            | b"Projection"
+    )
 }
 
 /// Select the normal appearance stream for an annotation.

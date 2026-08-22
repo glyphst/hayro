@@ -566,15 +566,19 @@ mod tests {
     }
 
     #[test]
-    fn invisible_hidden_and_no_view_annotations_are_not_drawn() {
+    fn annotation_visibility_flags_follow_screen_view_rules() {
         let form = annotation_form(8, "[0 0 10 10]", "[1 0 0 1 0 0]", "0 0 10 10 re f");
         let objects = format!(
             "5 0 obj <</Type/Annot/Subtype/Square/Rect[0 0 10 10]/F 1/AP<</N 8 0 R>>>> endobj\n\
              6 0 obj <</Type/Annot/Subtype/Square/Rect[20 0 30 10]/F 2/AP<</N 8 0 R>>>> endobj\n\
              7 0 obj <</Type/Annot/Subtype/Square/Rect[40 0 50 10]/F 32/AP<</N 8 0 R>>>> endobj\n\
-             9 0 obj <</Type/Annot/Subtype/Square/Rect[60 0 70 10]/AP<</N 8 0 R>>>> endobj\n{form}"
+             9 0 obj <</Type/Annot/Subtype/Square/Rect[60 0 70 10]/AP<</N 8 0 R>>>> endobj\n\
+             10 0 obj <</Type/Annot/Subtype/PrivateThing/Rect[80 0 90 10]/F 1/AP<</N 8 0 R>>>> endobj\n{form}"
         );
-        let device = interpret_bytes(annotation_pdf("5 0 R 6 0 R 7 0 R 9 0 R", &objects), true);
-        assert_eq!(device.form_keys.len(), 1);
+        let device = interpret_bytes(
+            annotation_pdf("5 0 R 6 0 R 7 0 R 9 0 R 10 0 R", &objects),
+            true,
+        );
+        assert_eq!(device.form_keys.len(), 2);
     }
 }

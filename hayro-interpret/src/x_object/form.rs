@@ -391,7 +391,8 @@ mod tests {
     use crate::font::GlyphRun;
     use crate::{
         BlendMode, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterSettings,
-        InterpreterWarning, MarkedContentProperties, MaskType, SoftMask, interpret_page,
+        InterpreterWarning, MarkedContentProperties, MarkedContentProperty,
+        MarkedContentPropertyValue, MaskType, SoftMask, interpret_page,
     };
     use hayro_syntax::Pdf;
     use kurbo::BezPath;
@@ -489,6 +490,22 @@ mod tests {
             String::from_utf8_lossy(page_stream),
             metadata.len(),
             String::from_utf8_lossy(metadata),
+        )
+        .into_bytes()
+    }
+
+    fn marked_content_private_properties_pdf(entries: &str) -> Vec<u8> {
+        let page_stream = b"/Artifact /Layout BDC 0 0 10 10 re f EMC";
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</Properties<</Layout 5 0 R>>>>/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
+             5 0 obj <<{entries}>> endobj\n\
+             trailer <</Root 1 0 R>>\n%%EOF",
+            page_stream.len(),
+            String::from_utf8_lossy(page_stream),
         )
         .into_bytes()
     }
@@ -733,6 +750,75 @@ mod tests {
         let properties = &limited.marked_properties[0];
         assert!(properties.metadata.is_none());
         assert_eq!(properties.unavailable_keys, [b"Metadata".to_vec()]);
+    }
+
+    #[test]
+    fn marked_content_exposes_bounded_producer_defined_values() {
+        let device = interpret_bytes(
+            marked_content_private_properties_pdf(
+                "/PRECISION 5/UNITS(inches)/VP[0.5 -2.25 true null/Glyphst (bytes)]\
+                 /Nested<</Count 9007199254740993/Values[1 2 3]>>",
+            ),
+            false,
+        );
+        let properties = &device.marked_properties[0];
+        assert_eq!(
+            properties.additional_properties,
+            [
+                MarkedContentProperty {
+                    key: b"Nested".to_vec(),
+                    value: MarkedContentPropertyValue::Dictionary(vec![
+                        MarkedContentProperty {
+                            key: b"Count".to_vec(),
+                            value: MarkedContentPropertyValue::Integer(9_007_199_254_740_993),
+                        },
+                        MarkedContentProperty {
+                            key: b"Values".to_vec(),
+                            value: MarkedContentPropertyValue::Array(vec![
+                                MarkedContentPropertyValue::Integer(1),
+                                MarkedContentPropertyValue::Integer(2),
+                                MarkedContentPropertyValue::Integer(3),
+                            ]),
+                        },
+                    ]),
+                },
+                MarkedContentProperty {
+                    key: b"PRECISION".to_vec(),
+                    value: MarkedContentPropertyValue::Integer(5),
+                },
+                MarkedContentProperty {
+                    key: b"UNITS".to_vec(),
+                    value: MarkedContentPropertyValue::String(b"inches".to_vec()),
+                },
+                MarkedContentProperty {
+                    key: b"VP".to_vec(),
+                    value: MarkedContentPropertyValue::Array(vec![
+                        MarkedContentPropertyValue::Real(0.5),
+                        MarkedContentPropertyValue::Real(-2.25),
+                        MarkedContentPropertyValue::Boolean(true),
+                        MarkedContentPropertyValue::Null,
+                        MarkedContentPropertyValue::Name(b"Glyphst".to_vec()),
+                        MarkedContentPropertyValue::String(b"bytes".to_vec()),
+                    ]),
+                },
+            ]
+        );
+        assert!(properties.unavailable_keys.is_empty());
+
+        let limited = interpret_bytes_with_settings(
+            marked_content_private_properties_pdf("/PRECISION 5/UNITS(inches)"),
+            false,
+            InterpreterSettings {
+                max_marked_content_property_bytes: 1,
+                ..InterpreterSettings::default()
+            },
+        );
+        let properties = &limited.marked_properties[0];
+        assert!(properties.additional_properties.is_empty());
+        assert_eq!(
+            properties.unavailable_keys,
+            [b"PRECISION".to_vec(), b"UNITS".to_vec()]
+        );
     }
 
     #[test]

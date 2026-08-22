@@ -3,7 +3,10 @@ use crate::annotation::{annotation_is_visible_on_screen, resolve_annotation_appe
 use crate::color::ColorSpace;
 use crate::context::Context;
 use crate::convert::{convert_line_cap, convert_line_join};
-use crate::device::{Device, MarkedContentMetadata, MarkedContentProperties};
+use crate::device::{
+    Device, MarkedContentMetadata, MarkedContentProperties, MarkedContentProperty,
+    MarkedContentPropertyValue,
+};
 use crate::font::{Font, FontData, FontQuery, StandardFont};
 use crate::interpret::path::{
     close_path, fill_path, fill_path_impl, fill_stroke_path, stroke_path,
@@ -27,6 +30,7 @@ use hayro_syntax::page::{Page, Resources};
 use kurbo::{Affine, Point, Shape};
 use rustc_hash::FxHashMap;
 use smallvec::smallvec;
+use std::mem::size_of;
 use std::sync::Arc;
 
 pub(crate) mod path;
@@ -35,7 +39,123 @@ pub(crate) mod text;
 
 pub use state::ActiveTransferFunction;
 
-fn marked_content_properties(props: &Dict<'_>, max_metadata_bytes: u64) -> MarkedContentProperties {
+const KNOWN_MARKED_CONTENT_KEYS: [&[u8]; 11] = [
+    MCID,
+    ACTUAL_TEXT,
+    ALT,
+    LANG,
+    TYPE,
+    SUBTYPE,
+    NAME,
+    O,
+    BBOX,
+    METADATA,
+    OC,
+];
+
+struct MarkedPropertyBudget {
+    remaining_bytes: u64,
+    max_depth: u32,
+}
+
+impl MarkedPropertyBudget {
+    fn new(max_bytes: u64, max_depth: u32) -> Self {
+        Self {
+            remaining_bytes: max_bytes,
+            max_depth,
+        }
+    }
+
+    fn charge(&mut self, bytes: usize) -> Option<()> {
+        let bytes = u64::try_from(bytes).ok()?;
+        self.remaining_bytes = self.remaining_bytes.checked_sub(bytes)?;
+        Some(())
+    }
+}
+
+fn marked_property_value(
+    object: Object<'_>,
+    depth: u32,
+    budget: &mut MarkedPropertyBudget,
+) -> Option<MarkedContentPropertyValue> {
+    if depth > budget.max_depth {
+        return None;
+    }
+    budget.charge(size_of::<MarkedContentPropertyValue>())?;
+    match object {
+        Object::Null(_) => Some(MarkedContentPropertyValue::Null),
+        Object::Boolean(value) => Some(MarkedContentPropertyValue::Boolean(value)),
+        Object::Number(value) => {
+            if let Some(value) = value.as_i64_exact() {
+                Some(MarkedContentPropertyValue::Integer(value))
+            } else {
+                let value = value.as_f64();
+                value
+                    .is_finite()
+                    .then_some(MarkedContentPropertyValue::Real(value))
+            }
+        }
+        Object::String(value) => {
+            budget.charge(value.as_bytes().len())?;
+            Some(MarkedContentPropertyValue::String(
+                value.as_bytes().to_vec(),
+            ))
+        }
+        Object::Name(value) => {
+            budget.charge(value.as_ref().len())?;
+            Some(MarkedContentPropertyValue::Name(value.as_ref().to_vec()))
+        }
+        Object::Array(array) => {
+            let expected = array.raw_iter().count();
+            let mut values = Vec::with_capacity(expected.min(1024));
+            let mut resolved = array.iter::<Object<'_>>();
+            for _ in 0..expected {
+                values.push(marked_property_value(
+                    resolved.next()?,
+                    depth.saturating_add(1),
+                    budget,
+                )?);
+            }
+            Some(MarkedContentPropertyValue::Array(values))
+        }
+        Object::Dict(dict) => marked_property_dictionary(&dict, depth.saturating_add(1), budget)
+            .map(MarkedContentPropertyValue::Dictionary),
+        // Known metadata streams are retained separately. Arbitrary streams
+        // remain unavailable until their filter and external-file semantics
+        // can be preserved and bounded as a complete value.
+        Object::Stream(_) => None,
+    }
+}
+
+fn marked_property_dictionary(
+    dict: &Dict<'_>,
+    depth: u32,
+    budget: &mut MarkedPropertyBudget,
+) -> Option<Vec<MarkedContentProperty>> {
+    if depth > budget.max_depth {
+        return None;
+    }
+    let mut keys = dict.keys().collect::<Vec<_>>();
+    keys.sort();
+    let mut entries = Vec::with_capacity(keys.len().min(1024));
+    for key in keys {
+        budget.charge(size_of::<MarkedContentProperty>())?;
+        budget.charge(key.as_ref().len())?;
+        let value = dict.get::<Object<'_>>(key.as_ref())?;
+        entries.push(MarkedContentProperty {
+            key: key.as_ref().to_vec(),
+            value: marked_property_value(value, depth, budget)?,
+        });
+    }
+    Some(entries)
+}
+
+fn marked_content_properties(
+    props: &Dict<'_>,
+    max_metadata_bytes: u64,
+    max_property_bytes: u64,
+    max_property_depth: u32,
+) -> MarkedContentProperties {
     let mcid = props.get::<i32>(MCID);
     let actual_text = props
         .get::<PdfString<'_>>(ACTUAL_TEXT)
@@ -100,6 +220,31 @@ fn marked_content_properties(props: &Dict<'_>, max_metadata_bytes: u64) -> Marke
             unavailable_keys.push(key.to_vec());
         }
     }
+    let mut additional_properties = Vec::new();
+    let mut property_budget = MarkedPropertyBudget::new(max_property_bytes, max_property_depth);
+    let mut keys = props.keys().collect::<Vec<_>>();
+    keys.sort();
+    for key in keys {
+        if KNOWN_MARKED_CONTENT_KEYS
+            .iter()
+            .any(|known| key.as_ref() == *known)
+        {
+            continue;
+        }
+        let retained = property_budget
+            .charge(size_of::<MarkedContentProperty>())
+            .and_then(|()| property_budget.charge(key.as_ref().len()))
+            .and_then(|()| props.get::<Object<'_>>(key.as_ref()))
+            .and_then(|value| marked_property_value(value, 0, &mut property_budget));
+        if let Some(value) = retained {
+            additional_properties.push(MarkedContentProperty {
+                key: key.as_ref().to_vec(),
+                value,
+            });
+        } else {
+            unavailable_keys.push(key.as_ref().to_vec());
+        }
+    }
     MarkedContentProperties {
         mcid,
         actual_text,
@@ -111,6 +256,7 @@ fn marked_content_properties(props: &Dict<'_>, max_metadata_bytes: u64) -> Marke
         owner,
         bounding_box,
         metadata,
+        additional_properties,
         unavailable_keys,
     }
 }
@@ -199,6 +345,12 @@ pub struct InterpreterSettings {
     /// Values above this limit remain present in `unavailable_keys`, allowing
     /// retained-scene devices to fail closed before allocating the copy.
     pub max_marked_content_metadata_bytes: u64,
+    /// Maximum bytes retained for producer-defined entries in one
+    /// marked-content property list, including structural accounting.
+    pub max_marked_content_property_bytes: u64,
+    /// Maximum nested array and dictionary depth retained for one
+    /// marked-content property value.
+    pub max_marked_content_property_depth: u32,
 }
 
 impl Default for InterpreterSettings {
@@ -219,6 +371,8 @@ impl Default for InterpreterSettings {
             render_annotations: true,
             preserve_optional_content: false,
             max_marked_content_metadata_bytes: 64 * 1024 * 1024,
+            max_marked_content_property_bytes: 64 * 1024 * 1024,
+            max_marked_content_property_depth: 64,
         }
     }
 }
@@ -562,6 +716,8 @@ pub fn interpret<'a>(
                         marked_content_properties(
                             properties,
                             context.settings.max_marked_content_metadata_bytes,
+                            context.settings.max_marked_content_property_bytes,
+                            context.settings.max_marked_content_property_depth,
                         )
                     })
                     .unwrap_or_default();

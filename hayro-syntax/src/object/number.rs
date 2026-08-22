@@ -56,6 +56,15 @@ impl Number {
         }
     }
 
+    /// Returns the integer value without conversion when this number was
+    /// represented as an integer object.
+    pub fn as_i64_exact(&self) -> Option<i64> {
+        match self.0 {
+            InternalNumber::Integer(value) => Some(value),
+            InternalNumber::Real(_) => None,
+        }
+    }
+
     /// Create a new `Number` from an f32 number.
     pub const fn from_f32(num: f32) -> Self {
         Self(InternalNumber::Real(num as f64))

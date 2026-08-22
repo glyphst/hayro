@@ -14,6 +14,37 @@ pub struct MarkedContentMetadata {
     pub data: Vec<u8>,
 }
 
+/// One additional entry retained from a marked-content property dictionary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkedContentProperty {
+    /// Raw, decoded PDF name bytes used as the dictionary key.
+    pub key: Vec<u8>,
+    /// Resolved semantic value of the entry.
+    pub value: MarkedContentPropertyValue,
+}
+
+/// A bounded, lifetime-independent PDF value retained for producer-defined
+/// marked-content properties.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MarkedContentPropertyValue {
+    /// The PDF null object.
+    Null,
+    /// A PDF boolean.
+    Boolean(bool),
+    /// A PDF integer preserved without floating-point conversion.
+    Integer(i64),
+    /// A finite PDF real number.
+    Real(f64),
+    /// Decrypted PDF string bytes.
+    String(Vec<u8>),
+    /// Raw, decoded PDF name bytes.
+    Name(Vec<u8>),
+    /// An ordered PDF array whose indirect entries have been resolved.
+    Array(Vec<Self>),
+    /// A key-sorted PDF dictionary whose indirect entries have been resolved.
+    Dictionary(Vec<MarkedContentProperty>),
+}
+
 /// Resolved properties attached to a marked-content sequence.
 ///
 /// Text strings remain as decoded PDF-string bytes. Consumers can apply the
@@ -41,7 +72,9 @@ pub struct MarkedContentProperties {
     pub bounding_box: Option<[f64; 4]>,
     /// Exact unfiltered XML metadata attached to the marked-content sequence.
     pub metadata: Option<MarkedContentMetadata>,
-    /// Known property keys that were present but could not be exposed exactly.
+    /// Additional producer-defined entries, sorted by raw PDF name bytes.
+    pub additional_properties: Vec<MarkedContentProperty>,
+    /// Property keys that were present but could not be exposed exactly.
     pub unavailable_keys: Vec<Vec<u8>>,
 }
 

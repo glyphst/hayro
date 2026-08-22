@@ -2,7 +2,7 @@ use crate::font::GlyphRun;
 use crate::x_object::soft_mask::SoftMask;
 use crate::{BlendMode, ClipPath, FillRule, Image};
 use crate::{DrawMode, DrawProps, ImageDrawProps};
-use kurbo::{BezPath, Rect, Shape};
+use kurbo::{Affine, BezPath, Rect, Shape};
 
 /// Resolved properties attached to a marked-content sequence.
 ///
@@ -47,6 +47,19 @@ pub trait Device<'a> {
         props: DrawProps<'a>,
         draw_mode: &DrawMode,
     );
+    /// Record one semantic PDF text run before its visual paint callbacks.
+    ///
+    /// This is called exactly once for each interpreted text run, including
+    /// invisible and clipping-only text. A fill-and-stroke run can produce two
+    /// [`Self::draw_glyph_run`] calls, so text extraction must use this callback
+    /// instead of inferring semantic runs from paint operations.
+    fn record_glyph_run(
+        &mut self,
+        _glyph_run: &GlyphRun<'_, 'a>,
+        _transform: Affine,
+        _visible: bool,
+    ) {
+    }
     /// Draw an image.
     fn draw_image(&mut self, image: Image<'a, '_>, props: ImageDrawProps<'a>);
     /// Pop the last clip path or clip rectangle from the clip stack.

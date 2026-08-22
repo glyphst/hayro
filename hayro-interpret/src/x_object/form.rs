@@ -38,6 +38,7 @@ pub struct FormGroupProperties {
     knockout: bool,
     has_color_space: bool,
     color_space_kind: Option<ColorSpaceKind>,
+    color_space_default_overridden: bool,
 }
 
 impl FormGroupProperties {
@@ -68,6 +69,11 @@ impl FormGroupProperties {
     /// or `DefaultCMYK` resource remaps that direct name.
     pub fn color_space_kind(self) -> Option<ColorSpaceKind> {
         self.color_space_kind
+    }
+
+    /// Whether a default device color-space resource remaps the declared `/CS`.
+    pub fn color_space_is_default_overridden(self) -> bool {
+        self.color_space_default_overridden
     }
 }
 
@@ -124,6 +130,7 @@ impl<'a> FormInvocation<'a> {
             };
             if default_name.is_some_and(|name| resources_contain_color_space(&resources, name)) {
                 properties.color_space_kind = None;
+                properties.color_space_default_overridden = true;
             }
             properties
         });
@@ -277,6 +284,7 @@ impl<'a> FormXObject<'a> {
                         _ => None,
                     },
                 ),
+                color_space_default_overridden: false,
             }
         });
 
@@ -572,6 +580,7 @@ mod tests {
             properties.color_space_kind(),
             Some(ColorSpaceKind::DeviceRgb)
         );
+        assert!(!properties.color_space_is_default_overridden());
         assert!(
             device
                 .group_properties
@@ -592,6 +601,7 @@ mod tests {
         let properties = device.group_properties[0].expect("group properties");
         assert!(properties.has_color_space());
         assert_eq!(properties.color_space_kind(), None);
+        assert!(properties.color_space_is_default_overridden());
     }
 
     #[test]

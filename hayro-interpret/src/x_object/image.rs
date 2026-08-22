@@ -232,12 +232,32 @@ impl<'a> ImageXObject<'a> {
     fn has_mask(&self) -> bool {
         let dict = self.stream.dict();
 
-        dict.contains_key(SMASK_IN_DATA) || dict.contains_key(SMASK) || dict.contains_key(MASK)
+        smask_in_data_has_alpha(dict.get::<u8>(SMASK_IN_DATA))
+            || dict.contains_key(SMASK)
+            || dict.contains_key(MASK)
     }
+}
+
+fn smask_in_data_has_alpha(value: Option<u8>) -> bool {
+    matches!(value, Some(1 | 2))
 }
 
 impl CacheKey for ImageXObject<'_> {
     fn cache_key(&self) -> u128 {
         self.stream.cache_key()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::smask_in_data_has_alpha;
+
+    #[test]
+    fn explicit_zero_smask_in_data_does_not_discard_graphics_state_mask() {
+        assert!(!smask_in_data_has_alpha(None));
+        assert!(!smask_in_data_has_alpha(Some(0)));
+        assert!(smask_in_data_has_alpha(Some(1)));
+        assert!(smask_in_data_has_alpha(Some(2)));
+        assert!(!smask_in_data_has_alpha(Some(3)));
     }
 }

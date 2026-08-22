@@ -378,7 +378,7 @@ mod tests {
     use crate::font::GlyphRun;
     use crate::{
         BlendMode, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterSettings,
-        InterpreterWarning, MaskType, SoftMask, interpret_page,
+        InterpreterWarning, MarkedContentProperties, MaskType, SoftMask, interpret_page,
     };
     use hayro_syntax::Pdf;
     use kurbo::BezPath;
@@ -448,6 +448,30 @@ mod tests {
         .into_bytes()
     }
 
+    fn marked_content_metadata_pdf() -> Vec<u8> {
+        marked_content_metadata_pdf_with_stream("")
+    }
+
+    fn marked_content_metadata_pdf_with_stream(stream_entries: &str) -> Vec<u8> {
+        let page_stream = b"/Artifact /Layout BDC 0 0 10 10 re f EMC";
+        let metadata = b"<x/>";
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</Properties<</Layout 5 0 R>>>>/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
+             5 0 obj <</O/Layout/BBox[-0.25 1.5 20 30]/Metadata 6 0 R>> endobj\n\
+             6 0 obj <</Type/Metadata/Subtype/XML{stream_entries}/Length {}>> stream\n{}\nendstream endobj\n\
+             trailer <</Root 1 0 R>>\n%%EOF",
+            page_stream.len(),
+            String::from_utf8_lossy(page_stream),
+            metadata.len(),
+            String::from_utf8_lossy(metadata),
+        )
+        .into_bytes()
+    }
+
     fn annotation_form(object: u32, bbox: &str, matrix: &str, contents: &str) -> String {
         format!(
             "{object} 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox{bbox}/Matrix{matrix}/Resources<<>>/Length {}>> stream\n{contents}\nendstream endobj",
@@ -463,6 +487,7 @@ mod tests {
         path_transforms: Vec<Affine>,
         group_properties: Vec<Option<FormGroupProperties>>,
         soft_masks: Vec<(MaskType, ColorSpaceKind, Vec<f32>)>,
+        marked_properties: Vec<MarkedContentProperties>,
     }
 
     impl RecordingDevice {
@@ -509,6 +534,14 @@ mod tests {
         fn pop_clip(&mut self) {}
 
         fn pop_transparency_group(&mut self) {}
+
+        fn begin_marked_content_with_properties(
+            &mut self,
+            _: &[u8],
+            properties: MarkedContentProperties,
+        ) {
+            self.marked_properties.push(properties);
+        }
     }
 
     fn interpret(retained: bool) -> RecordingDevice {
@@ -624,6 +657,27 @@ mod tests {
 
         let device = interpret_bytes(luminosity_soft_mask_pdf_with_backdrop(""), false);
         assert_eq!(device.soft_masks[0].2, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn marked_content_exposes_layout_bounds_owner_and_unfiltered_metadata() {
+        let device = interpret_bytes(marked_content_metadata_pdf(), false);
+        assert_eq!(device.marked_properties.len(), 1);
+        let properties = &device.marked_properties[0];
+        assert_eq!(properties.owner.as_deref(), Some(b"Layout".as_slice()));
+        assert_eq!(properties.bounding_box, Some([-0.25, 1.5, 20.0, 30.0]));
+        let metadata = properties.metadata.as_ref().expect("metadata");
+        assert_eq!(metadata.subtype, b"XML");
+        assert_eq!(metadata.data, b"<x/>");
+        assert!(properties.unavailable_keys.is_empty());
+
+        let filtered = interpret_bytes(
+            marked_content_metadata_pdf_with_stream("/Filter/FlateDecode"),
+            false,
+        );
+        let properties = &filtered.marked_properties[0];
+        assert!(properties.metadata.is_none());
+        assert_eq!(properties.unavailable_keys, [b"Metadata".to_vec()]);
     }
 
     #[test]

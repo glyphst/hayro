@@ -5,11 +5,20 @@ use crate::{BlendMode, ClipPath, FillRule, Image};
 use crate::{DrawMode, DrawProps, ImageDrawProps};
 use kurbo::{Affine, BezPath, Rect, Shape};
 
+/// Owned metadata stream attached to a marked-content property list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarkedContentMetadata {
+    /// Raw `/Subtype` name. The currently proven subset is `XML`.
+    pub subtype: Vec<u8>,
+    /// Unfiltered, decrypted metadata stream bytes.
+    pub data: Vec<u8>,
+}
+
 /// Resolved properties attached to a marked-content sequence.
 ///
 /// Text strings remain as decoded PDF-string bytes. Consumers can apply the
 /// PDF text-string encoding rules without retaining syntax-layer lifetimes.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MarkedContentProperties {
     /// Marked-content identifier from the properties dictionary.
     pub mcid: Option<i32>,
@@ -23,6 +32,14 @@ pub struct MarkedContentProperties {
     pub property_type: Option<Vec<u8>>,
     /// Raw `/Name` text string from the properties dictionary.
     pub name: Option<Vec<u8>>,
+    /// Raw attribute-owner `/O` name, when present.
+    pub owner: Option<Vec<u8>>,
+    /// Finite four-number `/BBox` property in its declared coordinate space.
+    pub bounding_box: Option<[f64; 4]>,
+    /// Exact unfiltered XML metadata attached to the marked-content sequence.
+    pub metadata: Option<MarkedContentMetadata>,
+    /// Known property keys that were present but could not be exposed exactly.
+    pub unavailable_keys: Vec<Vec<u8>>,
 }
 
 /// Stable identity and document-default visibility of one optional-content group.

@@ -3,7 +3,7 @@ use crate::annotation::{annotation_is_visible_on_screen, resolve_annotation_appe
 use crate::color::ColorSpace;
 use crate::context::Context;
 use crate::convert::{convert_line_cap, convert_line_join};
-use crate::device::{Device, MarkedContentProperties};
+use crate::device::{Device, MarkedContentMetadata, MarkedContentProperties};
 use crate::font::{Font, FontData, FontQuery, StandardFont};
 use crate::interpret::path::{
     close_path, fill_path, fill_path_impl, fill_stroke_path, stroke_path,
@@ -17,10 +17,11 @@ use crate::x_object::{ImageXObject, XObject};
 use hayro_syntax::content::TypedIter;
 use hayro_syntax::content::ops::TypedInstruction;
 use hayro_syntax::object::dict::keys::{
-    ACTUAL_TEXT, ALT, ANNOTS, LANG, MCID, NAME, OC, OCG, OCMD, TYPE,
+    ACTUAL_TEXT, ALT, ANNOTS, BBOX, F, FILTER, LANG, MCID, METADATA, NAME, O, OC, OCG, OCMD,
+    SUBTYPE, TYPE,
 };
 use hayro_syntax::object::{
-    Array, Dict, Name, Object, ObjectIdentifier, String as PdfString, dict_or_stream,
+    Array, Dict, Name, Object, ObjectIdentifier, Stream, String as PdfString, dict_or_stream,
 };
 use hayro_syntax::page::{Page, Resources};
 use kurbo::{Affine, Point, Shape};
@@ -33,6 +34,77 @@ pub(crate) mod state;
 pub(crate) mod text;
 
 pub use state::ActiveTransferFunction;
+
+fn marked_content_properties(props: &Dict<'_>) -> MarkedContentProperties {
+    let mcid = props.get::<i32>(MCID);
+    let actual_text = props
+        .get::<PdfString<'_>>(ACTUAL_TEXT)
+        .map(|value| value.as_bytes().to_vec());
+    let alternate_text = props
+        .get::<PdfString<'_>>(ALT)
+        .map(|value| value.as_bytes().to_vec());
+    let language = props
+        .get::<PdfString<'_>>(LANG)
+        .map(|value| value.as_bytes().to_vec());
+    let property_type = props
+        .get::<Name<'_>>(TYPE)
+        .map(|value| value.as_ref().to_vec());
+    let name = props
+        .get::<PdfString<'_>>(NAME)
+        .map(|value| value.as_bytes().to_vec());
+    let owner = props
+        .get::<Name<'_>>(O)
+        .map(|value| value.as_ref().to_vec());
+    let bounding_box = props
+        .get::<[f64; 4]>(BBOX)
+        .filter(|values| values.iter().all(|value| value.is_finite()));
+    let metadata = props.get::<Stream<'_>>(METADATA).and_then(|stream| {
+        let dict = stream.dict();
+        let is_metadata = dict
+            .get::<Name<'_>>(TYPE)
+            .is_some_and(|value| value.as_ref() == METADATA);
+        let subtype = dict.get::<Name<'_>>(SUBTYPE)?;
+        if !is_metadata
+            || subtype.as_ref() != b"XML"
+            || dict.contains_key(FILTER)
+            || dict.contains_key(F)
+        {
+            return None;
+        }
+        Some(MarkedContentMetadata {
+            subtype: subtype.as_ref().to_vec(),
+            data: stream.raw_data().into_owned(),
+        })
+    });
+    let mut unavailable_keys = Vec::new();
+    for (key, available) in [
+        (MCID, mcid.is_some()),
+        (ACTUAL_TEXT, actual_text.is_some()),
+        (ALT, alternate_text.is_some()),
+        (LANG, language.is_some()),
+        (TYPE, property_type.is_some()),
+        (NAME, name.is_some()),
+        (O, owner.is_some()),
+        (BBOX, bounding_box.is_some()),
+        (METADATA, metadata.is_some()),
+    ] {
+        if props.contains_key(key) && !available {
+            unavailable_keys.push(key.to_vec());
+        }
+    }
+    MarkedContentProperties {
+        mcid,
+        actual_text,
+        alternate_text,
+        language,
+        property_type,
+        name,
+        owner,
+        bounding_box,
+        metadata,
+        unavailable_keys,
+    }
+}
 
 /// A callback function for resolving font queries.
 ///
@@ -470,24 +542,7 @@ pub fn interpret<'a>(
 
                 let marked_properties = resolved_properties
                     .as_ref()
-                    .map(|props| MarkedContentProperties {
-                        mcid: props.get::<i32>(MCID),
-                        actual_text: props
-                            .get::<PdfString<'_>>(ACTUAL_TEXT)
-                            .map(|value| value.as_bytes().to_vec()),
-                        alternate_text: props
-                            .get::<PdfString<'_>>(ALT)
-                            .map(|value| value.as_bytes().to_vec()),
-                        language: props
-                            .get::<PdfString<'_>>(LANG)
-                            .map(|value| value.as_bytes().to_vec()),
-                        property_type: props
-                            .get::<Name<'_>>(TYPE)
-                            .map(|value| value.as_ref().to_vec()),
-                        name: props
-                            .get::<PdfString<'_>>(NAME)
-                            .map(|value| value.as_bytes().to_vec()),
-                    })
+                    .map(marked_content_properties)
                     .unwrap_or_default();
 
                 device.begin_marked_content_with_properties(bdc.0, marked_properties);

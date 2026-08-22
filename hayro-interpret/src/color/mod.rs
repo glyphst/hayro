@@ -36,6 +36,38 @@ use std::sync::{Arc, OnceLock};
 /// A storage for the components of colors.
 pub type ColorComponents = SmallVec<[f32; 4]>;
 
+/// The semantic family of a PDF color space.
+///
+/// This deliberately exposes only stable classification data. It lets retained
+/// renderers choose a spec-defined conversion without borrowing Hayro's
+/// internal color-space implementation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum ColorSpaceKind {
+    /// The device-dependent single-component gray space.
+    DeviceGray,
+    /// The device-dependent three-component RGB space.
+    DeviceRgb,
+    /// The device-dependent four-component CMYK space.
+    DeviceCmyk,
+    /// A calibrated single-component gray space.
+    CalGray,
+    /// A calibrated three-component RGB space.
+    CalRgb,
+    /// A CIE L*a*b* space.
+    Lab,
+    /// An ICC profile-backed space.
+    IccBased,
+    /// A palette-indexed space.
+    Indexed,
+    /// A single-colorant special space.
+    Separation,
+    /// A multi-colorant special space.
+    DeviceN,
+    /// A colored or uncolored pattern space.
+    Pattern,
+}
+
 #[derive(Clone)]
 pub(super) struct U8Lookup<T>(Arc<OnceLock<Option<Box<[T; 256]>>>>);
 
@@ -299,6 +331,23 @@ impl ColorSpace {
         match self.0.as_ref() {
             ColorSpaceType::Pattern(pattern) => Some(pattern.color_space()),
             _ => None,
+        }
+    }
+
+    /// Return the stable semantic family of this color space.
+    pub fn kind(&self) -> ColorSpaceKind {
+        match self.0.as_ref() {
+            ColorSpaceType::DeviceGray(_) => ColorSpaceKind::DeviceGray,
+            ColorSpaceType::DeviceRgb(_) => ColorSpaceKind::DeviceRgb,
+            ColorSpaceType::DeviceCmyk(_) => ColorSpaceKind::DeviceCmyk,
+            ColorSpaceType::CalGray(_) => ColorSpaceKind::CalGray,
+            ColorSpaceType::CalRgb(_) => ColorSpaceKind::CalRgb,
+            ColorSpaceType::Lab(_) => ColorSpaceKind::Lab,
+            ColorSpaceType::ICCBased(_) => ColorSpaceKind::IccBased,
+            ColorSpaceType::Indexed(_) => ColorSpaceKind::Indexed,
+            ColorSpaceType::Separation(_) => ColorSpaceKind::Separation,
+            ColorSpaceType::DeviceN(_) => ColorSpaceKind::DeviceN,
+            ColorSpaceType::Pattern(_) => ColorSpaceKind::Pattern,
         }
     }
 
@@ -572,6 +621,16 @@ impl Color {
     #[inline]
     pub fn to_rgba(&self) -> AlphaColor {
         self.color_space.to_rgba(&self.components, self.opacity)
+    }
+
+    /// Return the color's original PDF color-space family.
+    pub fn color_space_kind(&self) -> ColorSpaceKind {
+        self.color_space.kind()
+    }
+
+    /// Return the unconverted PDF color components.
+    pub fn components(&self) -> &[f32] {
+        &self.components
     }
 
     /// Create a color from RGBA.

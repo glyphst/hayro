@@ -1,5 +1,5 @@
 use super::form::{FormGroupProperties, FormXObject};
-use crate::color::{Color, ColorComponents, ColorSpace};
+use crate::color::{Color, ColorComponents, ColorSpace, ColorSpaceKind};
 use crate::context::{Context, InterpreterCache};
 use crate::device::Device;
 use crate::function::{Function, TransferFunction};
@@ -40,6 +40,7 @@ struct Repr<'a> {
     transfer_function: Option<TransferFunction>,
     settings: InterpreterSettings,
     background: Color,
+    group_color_space: ColorSpace,
     xref: &'a XRef,
     nesting_depth: u32,
 }
@@ -98,7 +99,7 @@ impl<'a> SoftMask<'a> {
             LUMINOSITY => {
                 let color = dict
                     .get::<ColorComponents>(BC)
-                    .map(|c| Color::new(cs, c, 1.0))
+                    .map(|c| Color::new(cs.clone(), c, 1.0))
                     .unwrap_or(Color::new(ColorSpace::device_gray(), smallvec![0.0], 1.0));
 
                 (MaskType::Luminosity, color)
@@ -123,6 +124,7 @@ impl<'a> SoftMask<'a> {
             settings: context.settings.clone(),
             xref: context.xref,
             background,
+            group_color_space: cs,
             parent_resources,
             nesting_depth,
         })))
@@ -165,6 +167,11 @@ impl<'a> SoftMask<'a> {
     /// The background color against which the mask should be composited.
     pub fn background_color(&self) -> Color {
         self.0.background.clone()
+    }
+
+    /// Return the soft-mask transparency group's blending color-space family.
+    pub fn group_color_space_kind(&self) -> ColorSpaceKind {
+        self.0.group_color_space.kind()
     }
 
     /// Return the transfer function that should be used for the mask.

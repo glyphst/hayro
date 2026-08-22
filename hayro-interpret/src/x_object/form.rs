@@ -326,10 +326,11 @@ fn resources_cache_key(resources: &Resources<'_>) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::ColorSpaceKind;
     use crate::font::GlyphRun;
     use crate::{
         BlendMode, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterSettings,
-        InterpreterWarning, SoftMask, interpret_page,
+        InterpreterWarning, MaskType, SoftMask, interpret_page,
     };
     use hayro_syntax::Pdf;
     use kurbo::BezPath;
@@ -371,6 +372,26 @@ mod tests {
         .into_bytes()
     }
 
+    fn luminosity_soft_mask_pdf() -> Vec<u8> {
+        let page_stream = b"/GS0 gs 0 0 100 100 re f";
+        let mask_stream = b"0.25 0.5 0.75 rg 0 0 100 100 re f";
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</ExtGState<</GS0 5 0 R>>>>/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
+             5 0 obj <</Type/ExtGState/SMask<</S/Luminosity/G 6 0 R/BC[0.1 0.2 0.3]>>>> endobj\n\
+             6 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox[0 0 100 100]/Group<</S/Transparency/I true/K false/CS/DeviceRGB>>/Resources<<>>/Length {}>> stream\n{}\nendstream endobj\n\
+             trailer <</Root 1 0 R>>\n%%EOF",
+            page_stream.len(),
+            String::from_utf8_lossy(page_stream),
+            mask_stream.len(),
+            String::from_utf8_lossy(mask_stream),
+        )
+        .into_bytes()
+    }
+
     fn annotation_form(object: u32, bbox: &str, matrix: &str, contents: &str) -> String {
         format!(
             "{object} 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox{bbox}/Matrix{matrix}/Resources<<>>/Length {}>> stream\n{contents}\nendstream endobj",
@@ -385,16 +406,34 @@ mod tests {
         instance_transforms: Vec<Affine>,
         path_transforms: Vec<Affine>,
         group_properties: Vec<Option<FormGroupProperties>>,
+        soft_masks: Vec<(MaskType, ColorSpaceKind, Vec<f32>)>,
+    }
+
+    impl RecordingDevice {
+        fn record_soft_mask(&mut self, mask: SoftMask<'_>) {
+            self.soft_masks.push((
+                mask.mask_type(),
+                mask.group_color_space_kind(),
+                mask.background_color().components().to_vec(),
+            ));
+        }
     }
 
     impl<'a> Device<'a> for RecordingDevice {
-        fn draw_path(&mut self, _: &BezPath, props: DrawProps<'a>, _: &DrawMode) {
+        fn draw_path(&mut self, _: &BezPath, mut props: DrawProps<'a>, _: &DrawMode) {
             self.path_transforms.push(props.transform);
+            if let Some(mask) = props.soft_mask.take() {
+                self.record_soft_mask(mask);
+            }
         }
 
         fn push_clip_path(&mut self, _: &ClipPath) {}
 
-        fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
+        fn push_transparency_group(&mut self, _: f32, mask: Option<SoftMask<'a>>, _: BlendMode) {
+            if let Some(mask) = mask {
+                self.record_soft_mask(mask);
+            }
+        }
 
         fn draw_glyph_run(&mut self, _: &GlyphRun<'_, 'a>, _: DrawProps<'a>, _: &DrawMode) {}
 
@@ -486,6 +525,25 @@ mod tests {
                 .group_properties
                 .iter()
                 .all(|candidate| *candidate == Some(properties))
+        );
+    }
+
+    #[test]
+    fn soft_masks_expose_group_color_space_and_unconverted_backdrop() {
+        let device = interpret_bytes(luminosity_soft_mask_pdf(), false);
+        assert_eq!(
+            device.soft_masks.len(),
+            1,
+            "path callbacks: {}",
+            device.path_transforms.len()
+        );
+        assert_eq!(
+            device.soft_masks[0],
+            (
+                MaskType::Luminosity,
+                ColorSpaceKind::DeviceRgb,
+                vec![0.1, 0.2, 0.3]
+            )
         );
     }
 

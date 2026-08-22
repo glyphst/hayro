@@ -1,4 +1,4 @@
-use super::form::{FormGroupProperties, FormXObject};
+use super::form::{FormGroupProperties, FormXObject, resources_contain_color_space};
 use crate::color::{Color, ColorComponents, ColorSpace, ColorSpaceKind};
 use crate::context::{Context, InterpreterCache};
 use crate::device::Device;
@@ -41,6 +41,7 @@ struct Repr<'a> {
     settings: InterpreterSettings,
     background: Color,
     group_color_space: ColorSpace,
+    group_color_space_default_overridden: bool,
     xref: &'a XRef,
     nesting_depth: u32,
 }
@@ -91,6 +92,18 @@ impl<'a> SoftMask<'a> {
             group.dict.get::<Dict<'_>>(GROUP)?.get::<Object<'_>>(CS)?,
             &context.interpreter_cache.object_cache,
         )?;
+        let group_resources = Resources::from_parent(
+            group.dict.get::<Dict<'_>>(RESOURCES).unwrap_or_default(),
+            parent_resources.clone(),
+        );
+        let default_name = match cs.kind() {
+            ColorSpaceKind::DeviceGray => Some(DEFAULT_GRAY),
+            ColorSpaceKind::DeviceRgb => Some(DEFAULT_RGB),
+            ColorSpaceKind::DeviceCmyk => Some(DEFAULT_CMYK),
+            _ => None,
+        };
+        let group_color_space_default_overridden =
+            default_name.is_some_and(|name| resources_contain_color_space(&group_resources, name));
         let transfer_function = dict
             .get::<Object<'_>>(TR)
             .and_then(|o| Function::new(&o))
@@ -125,6 +138,7 @@ impl<'a> SoftMask<'a> {
             xref: context.xref,
             background,
             group_color_space: cs,
+            group_color_space_default_overridden,
             parent_resources,
             nesting_depth,
         })))
@@ -172,6 +186,12 @@ impl<'a> SoftMask<'a> {
     /// Return the soft-mask transparency group's blending color-space family.
     pub fn group_color_space_kind(&self) -> ColorSpaceKind {
         self.0.group_color_space.kind()
+    }
+
+    /// Whether a default device-space resource remaps the mask group's direct
+    /// `/CS` name.
+    pub fn group_color_space_is_default_overridden(&self) -> bool {
+        self.0.group_color_space_default_overridden
     }
 
     /// Return the transfer function that should be used for the mask.

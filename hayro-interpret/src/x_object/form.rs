@@ -37,6 +37,7 @@ pub struct FormGroupProperties {
     isolated: bool,
     knockout: bool,
     has_color_space: bool,
+    declared_color_space_kind: Option<ColorSpaceKind>,
     color_space_kind: Option<ColorSpaceKind>,
     color_space_default_overridden: bool,
 }
@@ -60,6 +61,15 @@ impl FormGroupProperties {
     /// Whether the group explicitly declares a blending color space.
     pub fn has_color_space(self) -> bool {
         self.has_color_space
+    }
+
+    /// Direct device-space family named by `/CS` before a default resource is
+    /// applied.
+    ///
+    /// This remains available when [`Self::color_space_kind`] is `None`
+    /// because `DefaultGray`, `DefaultRGB`, or `DefaultCMYK` remaps the name.
+    pub fn declared_color_space_kind(self) -> Option<ColorSpaceKind> {
+        self.declared_color_space_kind
     }
 
     /// Conservatively classified explicit blending color space.
@@ -271,19 +281,22 @@ impl<'a> FormXObject<'a> {
             let is_transparency = group
                 .get::<hayro_syntax::object::Name<'_>>(S)
                 .is_some_and(|name| name.as_ref() == TRANSPARENCY);
+            let color_space_kind =
+                group
+                    .get::<hayro_syntax::object::Name<'_>>(CS)
+                    .and_then(|name| match name.as_ref() {
+                        DEVICE_GRAY | G => Some(ColorSpaceKind::DeviceGray),
+                        DEVICE_RGB | RGB => Some(ColorSpaceKind::DeviceRgb),
+                        DEVICE_CMYK | CMYK => Some(ColorSpaceKind::DeviceCmyk),
+                        _ => None,
+                    });
             FormGroupProperties {
                 is_transparency,
                 isolated: group.get::<bool>(I).unwrap_or(false),
                 knockout: group.get::<bool>(K).unwrap_or(false),
                 has_color_space: group.contains_key(CS),
-                color_space_kind: group.get::<hayro_syntax::object::Name<'_>>(CS).and_then(
-                    |name| match name.as_ref() {
-                        DEVICE_GRAY | G => Some(ColorSpaceKind::DeviceGray),
-                        DEVICE_RGB | RGB => Some(ColorSpaceKind::DeviceRgb),
-                        DEVICE_CMYK | CMYK => Some(ColorSpaceKind::DeviceCmyk),
-                        _ => None,
-                    },
-                ),
+                declared_color_space_kind: color_space_kind,
+                color_space_kind,
                 color_space_default_overridden: false,
             }
         });
@@ -333,7 +346,7 @@ impl<'a> FormXObject<'a> {
     }
 }
 
-fn resources_contain_color_space(resources: &Resources<'_>, name: &[u8]) -> bool {
+pub(super) fn resources_contain_color_space(resources: &Resources<'_>, name: &[u8]) -> bool {
     resources.color_spaces.contains_key(name)
         || resources
             .parent()
@@ -429,6 +442,14 @@ mod tests {
     }
 
     fn luminosity_soft_mask_pdf_with_backdrop(backdrop: &str) -> Vec<u8> {
+        luminosity_soft_mask_pdf_with_options(backdrop, "/DeviceRGB", "")
+    }
+
+    fn luminosity_soft_mask_pdf_with_options(
+        backdrop: &str,
+        color_space: &str,
+        resources: &str,
+    ) -> Vec<u8> {
         let page_stream = b"/GS0 gs 0 0 100 100 re f";
         let mask_stream = b"0.25 0.5 0.75 rg 0 0 100 100 re f";
         format!(
@@ -438,7 +459,7 @@ mod tests {
              3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</ExtGState<</GS0 5 0 R>>>>/Contents 4 0 R>> endobj\n\
              4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
              5 0 obj <</Type/ExtGState/SMask<</S/Luminosity/G 6 0 R{backdrop}>>>> endobj\n\
-             6 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox[0 0 100 100]/Group<</S/Transparency/I true/K false/CS/DeviceRGB>>/Resources<<>>/Length {}>> stream\n{}\nendstream endobj\n\
+             6 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox[0 0 100 100]/Group<</S/Transparency/I true/K false/CS{color_space}>>/Resources<<{resources}>>/Length {}>> stream\n{}\nendstream endobj\n\
              trailer <</Root 1 0 R>>\n%%EOF",
             page_stream.len(),
             String::from_utf8_lossy(page_stream),
@@ -486,7 +507,7 @@ mod tests {
         instance_transforms: Vec<Affine>,
         path_transforms: Vec<Affine>,
         group_properties: Vec<Option<FormGroupProperties>>,
-        soft_masks: Vec<(MaskType, ColorSpaceKind, Vec<f32>)>,
+        soft_masks: Vec<(MaskType, ColorSpaceKind, bool, Vec<f32>)>,
         marked_properties: Vec<MarkedContentProperties>,
     }
 
@@ -495,6 +516,7 @@ mod tests {
             self.soft_masks.push((
                 mask.mask_type(),
                 mask.group_color_space_kind(),
+                mask.group_color_space_is_default_overridden(),
                 mask.background_color().components().to_vec(),
             ));
         }
@@ -633,6 +655,10 @@ mod tests {
         );
         let properties = device.group_properties[0].expect("group properties");
         assert!(properties.has_color_space());
+        assert_eq!(
+            properties.declared_color_space_kind(),
+            Some(ColorSpaceKind::DeviceRgb)
+        );
         assert_eq!(properties.color_space_kind(), None);
         assert!(properties.color_space_is_default_overridden());
     }
@@ -651,12 +677,25 @@ mod tests {
             (
                 MaskType::Luminosity,
                 ColorSpaceKind::DeviceRgb,
+                false,
                 vec![0.1, 0.2, 0.3]
             )
         );
 
         let device = interpret_bytes(luminosity_soft_mask_pdf_with_backdrop(""), false);
-        assert_eq!(device.soft_masks[0].2, vec![0.0, 0.0, 0.0]);
+        assert_eq!(device.soft_masks[0].3, vec![0.0, 0.0, 0.0]);
+
+        let device = interpret_bytes(
+            luminosity_soft_mask_pdf_with_options(
+                "/BC[0.1 0.2 0.3 0.4]",
+                "/DeviceCMYK",
+                "/ColorSpace<</DefaultCMYK/DeviceRGB>>",
+            ),
+            false,
+        );
+        assert_eq!(device.soft_masks[0].1, ColorSpaceKind::DeviceCmyk);
+        assert!(device.soft_masks[0].2);
+        assert_eq!(device.soft_masks[0].3, vec![0.1, 0.2, 0.3, 0.4]);
     }
 
     #[test]

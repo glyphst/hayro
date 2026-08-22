@@ -100,7 +100,7 @@ impl<'a> SoftMask<'a> {
                 let color = dict
                     .get::<ColorComponents>(BC)
                     .map(|c| Color::new(cs.clone(), c, 1.0))
-                    .unwrap_or(Color::new(ColorSpace::device_gray(), smallvec![0.0], 1.0));
+                    .unwrap_or_else(|| Color::new(cs.clone(), cs.initial_color(), 1.0));
 
                 (MaskType::Luminosity, color)
             }

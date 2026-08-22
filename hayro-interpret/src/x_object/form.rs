@@ -373,6 +373,10 @@ mod tests {
     }
 
     fn luminosity_soft_mask_pdf() -> Vec<u8> {
+        luminosity_soft_mask_pdf_with_backdrop("/BC[0.1 0.2 0.3]")
+    }
+
+    fn luminosity_soft_mask_pdf_with_backdrop(backdrop: &str) -> Vec<u8> {
         let page_stream = b"/GS0 gs 0 0 100 100 re f";
         let mask_stream = b"0.25 0.5 0.75 rg 0 0 100 100 re f";
         format!(
@@ -381,7 +385,7 @@ mod tests {
              2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
              3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</ExtGState<</GS0 5 0 R>>>>/Contents 4 0 R>> endobj\n\
              4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
-             5 0 obj <</Type/ExtGState/SMask<</S/Luminosity/G 6 0 R/BC[0.1 0.2 0.3]>>>> endobj\n\
+             5 0 obj <</Type/ExtGState/SMask<</S/Luminosity/G 6 0 R{backdrop}>>>> endobj\n\
              6 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox[0 0 100 100]/Group<</S/Transparency/I true/K false/CS/DeviceRGB>>/Resources<<>>/Length {}>> stream\n{}\nendstream endobj\n\
              trailer <</Root 1 0 R>>\n%%EOF",
             page_stream.len(),
@@ -545,6 +549,9 @@ mod tests {
                 vec![0.1, 0.2, 0.3]
             )
         );
+
+        let device = interpret_bytes(luminosity_soft_mask_pdf_with_backdrop(""), false);
+        assert_eq!(device.soft_masks[0].2, vec![0.0, 0.0, 0.0]);
     }
 
     #[test]

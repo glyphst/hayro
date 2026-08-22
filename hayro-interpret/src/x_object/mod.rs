@@ -3,6 +3,7 @@ mod form;
 mod image;
 pub(crate) mod soft_mask;
 
+pub use form::FormInvocation;
 pub(crate) use form::FormXObject;
 pub(crate) use image::ImageXObject;
 

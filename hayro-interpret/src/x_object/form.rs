@@ -1,15 +1,22 @@
 use super::xobject_oc;
+use crate::cache::CacheKey;
 use crate::context::Context;
 use crate::device::Device;
+use crate::interpret::state::State;
+use crate::util::hash128;
 use crate::{ClipPath, FillRule, interpret};
+use crate::{InterpreterCache, InterpreterSettings};
 use hayro_syntax::content::TypedIter;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
 use hayro_syntax::page::Resources;
+use hayro_syntax::xref::XRef;
 use kurbo::{Affine, Rect, Shape};
 use std::borrow::Cow;
+use std::fmt;
 
+#[derive(Clone)]
 pub(crate) struct FormXObject<'a> {
     pub(crate) decoded: Cow<'a, [u8]>,
     pub(crate) matrix: Affine,
@@ -17,6 +24,164 @@ pub(crate) struct FormXObject<'a> {
     is_transparency_group: bool,
     pub(crate) dict: Dict<'a>,
     resources: Dict<'a>,
+}
+
+/// One invocation of a PDF Form `XObject` with its inherited graphics state.
+///
+/// This value is valid only during the synchronous device callback. It can be
+/// interpreted with the original page transform through [`Self::interpret`],
+/// or normalized into form-local coordinates through [`Self::interpret_local`]
+/// for an owned retained scene.
+pub struct FormInvocation<'a> {
+    form: FormXObject<'a>,
+    resources: Resources<'a>,
+    state: State<'a>,
+    instance_transform: Affine,
+    settings: InterpreterSettings,
+    cache: InterpreterCache<'a>,
+    xref: &'a XRef,
+    nesting_depth: u32,
+    retained_key: u128,
+}
+
+impl fmt::Debug for FormInvocation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FormInvocation")
+            .field("local_bounds", &self.local_bounds())
+            .field("instance_transform", &self.instance_transform)
+            .field("transparency_group", &self.is_transparency_group())
+            .field("retained_key", &self.retained_key)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CacheKey for FormInvocation<'_> {
+    fn cache_key(&self) -> u128 {
+        self.retained_key
+    }
+}
+
+impl<'a> FormInvocation<'a> {
+    fn new(
+        form: &FormXObject<'a>,
+        parent_resources: &Resources<'a>,
+        context: &Context<'a>,
+    ) -> Self {
+        let resources = Resources::from_parent(form.resources.clone(), parent_resources.clone());
+        let state = context.get().clone();
+        let instance_transform = state.ctm;
+        let mut normalized_state = state.clone();
+        normalized_state.ctm = Affine::IDENTITY;
+        normalized_state.clips.clear();
+        let form_key = hash128(&(
+            hash128(form.decoded.as_ref()),
+            form.dict.cache_key(),
+            resources_cache_key(&resources),
+        ));
+        // The complete inherited state determines whether two invocations can
+        // share one locally interpreted visual subscene. Debug formatting is
+        // deterministic for these value types and deliberately excludes the
+        // page-space CTM and external clip stack normalized above.
+        let retained_key = hash128(&(form_key, format!("{normalized_state:?}")));
+        Self {
+            form: form.clone(),
+            resources,
+            state,
+            instance_transform,
+            settings: context.settings.clone(),
+            cache: context.interpreter_cache.clone(),
+            xref: context.xref,
+            nesting_depth: context.nesting_depth(),
+            retained_key,
+        }
+    }
+
+    /// Transform that places the normalized form subscene in its page.
+    pub fn instance_transform(&self) -> Affine {
+        self.instance_transform
+    }
+
+    /// Bounds of the normalized form after applying its `/Matrix` and `/BBox`.
+    pub fn local_bounds(&self) -> Rect {
+        transformed_bbox(self.form.matrix, self.form.bbox)
+    }
+
+    /// Whether the form dictionary declares a transparency group.
+    pub fn is_transparency_group(&self) -> bool {
+        self.form.is_transparency_group
+    }
+
+    /// Whether the invocation inherits a soft mask whose root transform cannot
+    /// yet be normalized independently of the page instance.
+    pub fn has_inherited_soft_mask(&self) -> bool {
+        self.state.graphics_state.soft_mask.is_some()
+    }
+
+    /// Interpret with the original page-space transform.
+    pub fn interpret(&self, device: &mut impl Device<'a>) {
+        self.interpret_with_root(device, self.instance_transform);
+    }
+
+    /// Interpret into normalized form-local coordinates.
+    ///
+    /// The resulting device callbacks include the form `/Matrix` but exclude
+    /// the invocation's outer page transform. Apply [`Self::instance_transform`]
+    /// exactly once when instancing the retained result.
+    pub fn interpret_local(&self, device: &mut impl Device<'a>) {
+        self.interpret_with_root(device, Affine::IDENTITY);
+    }
+
+    fn interpret_with_root(&self, device: &mut impl Device<'a>, root: Affine) {
+        let mut state = self.state.clone();
+        state.ctm = root * self.form.matrix;
+        // The caller's clip stack remains active around the form invocation;
+        // only clips established inside the form belong to its local replay.
+        state.clips.clear();
+        let bounds = transformed_bbox(state.ctm, self.form.bbox);
+        let mut context = Context::new_with(
+            state.ctm,
+            bounds,
+            &self.cache,
+            self.xref,
+            self.settings.clone(),
+            state,
+            self.nesting_depth,
+        );
+
+        if self.form.is_transparency_group {
+            device.push_transparency_group(
+                context.get().graphics_state.non_stroke_alpha,
+                std::mem::take(&mut context.get_mut().graphics_state.soft_mask),
+                std::mem::take(&mut context.get_mut().graphics_state.blend_mode),
+            );
+            context.get_mut().graphics_state.non_stroke_alpha = 1.0;
+            context.get_mut().graphics_state.stroke_alpha = 1.0;
+        }
+
+        device.push_clip_path(&ClipPath {
+            path: context.get().ctm
+                * Rect::new(
+                    self.form.bbox[0] as f64,
+                    self.form.bbox[1] as f64,
+                    self.form.bbox[2] as f64,
+                    self.form.bbox[3] as f64,
+                )
+                .to_path(0.1),
+            fill: FillRule::NonZero,
+        });
+        interpret(
+            TypedIter::new(self.form.decoded.as_ref()),
+            &self.resources,
+            &mut context,
+            device,
+        );
+        device.pop_clip();
+
+        if self.form.is_transparency_group {
+            device.pop_transparency_group();
+        }
+    }
 }
 
 impl<'a> FormXObject<'a> {
@@ -66,56 +231,166 @@ impl<'a> FormXObject<'a> {
             return;
         }
 
-        let iter = TypedIter::new(self.decoded.as_ref());
-
         context.path_mut().truncate(0);
-        context.save_state();
-        context.pre_concat_affine(self.matrix);
-        context.push_root_transform();
-
-        if self.is_transparency_group {
-            device.push_transparency_group(
-                context.get().graphics_state.non_stroke_alpha,
-                std::mem::take(&mut context.get_mut().graphics_state.soft_mask),
-                std::mem::take(&mut context.get_mut().graphics_state.blend_mode),
-            );
-
-            context.get_mut().graphics_state.non_stroke_alpha = 1.0;
-            context.get_mut().graphics_state.stroke_alpha = 1.0;
-        }
-
-        device.push_clip_path(&ClipPath {
-            path: context.get().ctm
-                * Rect::new(
-                    self.bbox[0] as f64,
-                    self.bbox[1] as f64,
-                    self.bbox[2] as f64,
-                    self.bbox[3] as f64,
-                )
-                .to_path(0.1),
-            fill: FillRule::NonZero,
-        });
-
-        interpret(
-            iter,
-            &Resources::from_parent(self.resources.clone(), resources.clone()),
-            context,
-            device,
-        );
-
-        device.pop_clip();
-
-        if self.is_transparency_group {
-            device.pop_transparency_group();
-        }
-
-        context.pop_root_transform();
-        context.restore_state(device);
+        let invocation = FormInvocation::new(self, resources, context);
+        device.draw_form(&invocation);
 
         if has_oc {
             context.ocg_state.end_marked_content();
         }
 
         context.end_nested_interpretation();
+    }
+}
+
+fn transformed_bbox(transform: Affine, bbox: [f32; 4]) -> Rect {
+    (transform
+        * Rect::new(
+            bbox[0] as f64,
+            bbox[1] as f64,
+            bbox[2] as f64,
+            bbox[3] as f64,
+        )
+        .to_path(0.1))
+    .bounding_box()
+}
+
+fn resources_cache_key(resources: &Resources<'_>) -> u128 {
+    let local = hash128(&[
+        resources.ext_g_states.cache_key(),
+        resources.fonts.cache_key(),
+        resources.properties.cache_key(),
+        resources.color_spaces.cache_key(),
+        resources.x_objects.cache_key(),
+        resources.patterns.cache_key(),
+        resources.shadings.cache_key(),
+    ]);
+    hash128(&(
+        local,
+        resources
+            .parent()
+            .map(resources_cache_key)
+            .unwrap_or_default(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::font::GlyphRun;
+    use crate::{
+        BlendMode, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterSettings, SoftMask,
+        interpret_page,
+    };
+    use hayro_syntax::Pdf;
+    use kurbo::BezPath;
+
+    fn form_pdf() -> Vec<u8> {
+        let page_stream = b"q 2 0 0 2 10 20 cm /Fm0 Do Q q 3 0 0 3 30 40 cm /Fm0 Do Q";
+        let form_stream = b"0 0 10 10 re f";
+        format!(
+            "%PDF-1.4\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</XObject<</Fm0 5 0 R>>>>/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
+             5 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox[0 0 10 10]/Matrix[1 0 0 1 3 4]/Resources<<>>/Length {}>> stream\n{}\nendstream endobj\n\
+             trailer <</Root 1 0 R>>\n%%EOF",
+            page_stream.len(),
+            String::from_utf8_lossy(page_stream),
+            form_stream.len(),
+            String::from_utf8_lossy(form_stream),
+        )
+        .into_bytes()
+    }
+
+    #[derive(Default)]
+    struct RecordingDevice {
+        retained: bool,
+        form_keys: Vec<u128>,
+        instance_transforms: Vec<Affine>,
+        path_transforms: Vec<Affine>,
+    }
+
+    impl<'a> Device<'a> for RecordingDevice {
+        fn draw_path(&mut self, _: &BezPath, props: DrawProps<'a>, _: &DrawMode) {
+            self.path_transforms.push(props.transform);
+        }
+
+        fn push_clip_path(&mut self, _: &ClipPath) {}
+
+        fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
+
+        fn draw_glyph_run(&mut self, _: &GlyphRun<'_, 'a>, _: DrawProps<'a>, _: &DrawMode) {}
+
+        fn draw_image(&mut self, _: Image<'a, '_>, _: ImageDrawProps<'a>) {}
+
+        fn draw_form(&mut self, form: &FormInvocation<'a>) {
+            self.form_keys.push(form.cache_key());
+            self.instance_transforms.push(form.instance_transform());
+            if self.retained {
+                form.interpret_local(self);
+            } else {
+                form.interpret(self);
+            }
+        }
+
+        fn pop_clip(&mut self) {}
+
+        fn pop_transparency_group(&mut self) {}
+    }
+
+    fn interpret(retained: bool) -> RecordingDevice {
+        let pdf = Pdf::new(form_pdf()).expect("parse form fixture");
+        let cache = InterpreterCache::new();
+        let mut context = Context::new(
+            Affine::IDENTITY,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            &cache,
+            pdf.xref(),
+            InterpreterSettings::default(),
+        );
+        let mut device = RecordingDevice {
+            retained,
+            ..RecordingDevice::default()
+        };
+        interpret_page(&pdf.pages()[0], &mut context, &mut device);
+        device
+    }
+
+    #[test]
+    fn retained_form_invocations_normalize_outer_transforms_and_share_keys() {
+        let device = interpret(true);
+        assert_eq!(device.form_keys.len(), 2);
+        assert_eq!(device.form_keys[0], device.form_keys[1]);
+        assert_eq!(
+            device.instance_transforms[0].as_coeffs(),
+            [2.0, 0.0, 0.0, 2.0, 10.0, 20.0]
+        );
+        assert_eq!(
+            device.instance_transforms[1].as_coeffs(),
+            [3.0, 0.0, 0.0, 3.0, 30.0, 40.0]
+        );
+        assert_eq!(device.path_transforms.len(), 2);
+        assert!(
+            device
+                .path_transforms
+                .iter()
+                .all(|transform| transform.as_coeffs() == [1.0, 0.0, 0.0, 1.0, 3.0, 4.0])
+        );
+    }
+
+    #[test]
+    fn default_form_interpretation_preserves_page_space_output() {
+        let device = interpret(false);
+        assert_eq!(device.path_transforms.len(), 2);
+        assert_eq!(
+            device.path_transforms[0].as_coeffs(),
+            [2.0, 0.0, 0.0, 2.0, 16.0, 28.0]
+        );
+        assert_eq!(
+            device.path_transforms[1].as_coeffs(),
+            [3.0, 0.0, 0.0, 3.0, 39.0, 52.0]
+        );
     }
 }

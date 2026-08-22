@@ -1,3 +1,4 @@
+use crate::FormInvocation;
 use crate::font::GlyphRun;
 use crate::x_object::soft_mask::SoftMask;
 use crate::{BlendMode, ClipPath, FillRule, Image};
@@ -62,6 +63,18 @@ pub trait Device<'a> {
     }
     /// Draw an image.
     fn draw_image(&mut self, image: Image<'a, '_>, props: ImageDrawProps<'a>);
+    /// Draw one Form `XObject` invocation.
+    ///
+    /// The default preserves Hayro's immediate interpretation behavior. Devices
+    /// that retain scene structure can instead interpret the invocation in its
+    /// normalized local coordinate system and instance it at
+    /// [`FormInvocation::instance_transform`].
+    fn draw_form(&mut self, form: &FormInvocation<'a>)
+    where
+        Self: Sized,
+    {
+        form.interpret(self);
+    }
     /// Pop the last clip path or clip rectangle from the clip stack.
     fn pop_clip(&mut self);
     /// Pop the last transparency group from the blend stack.

@@ -1,5 +1,6 @@
 use super::xobject_oc;
 use crate::cache::CacheKey;
+use crate::color::ColorSpaceKind;
 use crate::context::Context;
 use crate::device::Device;
 use crate::interpret::state::State;
@@ -36,6 +37,7 @@ pub struct FormGroupProperties {
     isolated: bool,
     knockout: bool,
     has_color_space: bool,
+    color_space_kind: Option<ColorSpaceKind>,
 }
 
 impl FormGroupProperties {
@@ -58,6 +60,15 @@ impl FormGroupProperties {
     pub fn has_color_space(self) -> bool {
         self.has_color_space
     }
+
+    /// Conservatively classified explicit blending color space.
+    ///
+    /// `None` means either that the group omits `/CS`, that the color space is
+    /// not a direct device-space name, or that a `DefaultGray`, `DefaultRGB`,
+    /// or `DefaultCMYK` resource remaps that direct name.
+    pub fn color_space_kind(self) -> Option<ColorSpaceKind> {
+        self.color_space_kind
+    }
 }
 
 /// One invocation of a PDF Form `XObject` with its inherited graphics state.
@@ -76,6 +87,7 @@ pub struct FormInvocation<'a> {
     xref: &'a XRef,
     nesting_depth: u32,
     retained_key: u128,
+    group_properties: Option<FormGroupProperties>,
 }
 
 impl fmt::Debug for FormInvocation<'_> {
@@ -103,6 +115,18 @@ impl<'a> FormInvocation<'a> {
         context: &Context<'a>,
     ) -> Self {
         let resources = Resources::from_parent(form.resources.clone(), parent_resources.clone());
+        let group_properties = form.group_properties.map(|mut properties| {
+            let default_name = match properties.color_space_kind {
+                Some(ColorSpaceKind::DeviceGray) => Some(DEFAULT_GRAY),
+                Some(ColorSpaceKind::DeviceRgb) => Some(DEFAULT_RGB),
+                Some(ColorSpaceKind::DeviceCmyk) => Some(DEFAULT_CMYK),
+                _ => None,
+            };
+            if default_name.is_some_and(|name| resources_contain_color_space(&resources, name)) {
+                properties.color_space_kind = None;
+            }
+            properties
+        });
         let state = context.get().clone();
         let instance_transform = state.ctm;
         let mut normalized_state = state.clone();
@@ -128,6 +152,7 @@ impl<'a> FormInvocation<'a> {
             xref: context.xref,
             nesting_depth: context.nesting_depth(),
             retained_key,
+            group_properties,
         }
     }
 
@@ -143,12 +168,12 @@ impl<'a> FormInvocation<'a> {
 
     /// Whether the form dictionary declares a transparency group.
     pub fn is_transparency_group(&self) -> bool {
-        self.form.group_properties.is_some()
+        self.group_properties.is_some()
     }
 
     /// Typed properties from the form's `/Group` dictionary, when present.
     pub fn group_properties(&self) -> Option<FormGroupProperties> {
-        self.form.group_properties
+        self.group_properties
     }
 
     /// Whether the invocation inherits a soft mask whose root transform cannot
@@ -188,7 +213,7 @@ impl<'a> FormInvocation<'a> {
             self.nesting_depth,
         );
 
-        if self.form.group_properties.is_some() {
+        if self.group_properties.is_some() {
             device.push_transparency_group(
                 context.get().graphics_state.non_stroke_alpha,
                 std::mem::take(&mut context.get_mut().graphics_state.soft_mask),
@@ -217,7 +242,7 @@ impl<'a> FormInvocation<'a> {
         );
         device.pop_clip();
 
-        if self.form.group_properties.is_some() {
+        if self.group_properties.is_some() {
             device.pop_transparency_group();
         }
     }
@@ -244,6 +269,14 @@ impl<'a> FormXObject<'a> {
                 isolated: group.get::<bool>(I).unwrap_or(false),
                 knockout: group.get::<bool>(K).unwrap_or(false),
                 has_color_space: group.contains_key(CS),
+                color_space_kind: group.get::<hayro_syntax::object::Name<'_>>(CS).and_then(
+                    |name| match name.as_ref() {
+                        DEVICE_GRAY | G => Some(ColorSpaceKind::DeviceGray),
+                        DEVICE_RGB | RGB => Some(ColorSpaceKind::DeviceRgb),
+                        DEVICE_CMYK | CMYK => Some(ColorSpaceKind::DeviceCmyk),
+                        _ => None,
+                    },
+                ),
             }
         });
 
@@ -290,6 +323,13 @@ impl<'a> FormXObject<'a> {
 
         context.end_nested_interpretation();
     }
+}
+
+fn resources_contain_color_space(resources: &Resources<'_>, name: &[u8]) -> bool {
+    resources.color_spaces.contains_key(name)
+        || resources
+            .parent()
+            .is_some_and(|parent| resources_contain_color_space(parent, name))
 }
 
 fn transformed_bbox(transform: Affine, bbox: [f32; 4]) -> Rect {
@@ -341,6 +381,10 @@ mod tests {
     }
 
     fn form_pdf_with_group(group: &str) -> Vec<u8> {
+        form_pdf_with_group_and_resources(group, "")
+    }
+
+    fn form_pdf_with_group_and_resources(group: &str, resources: &str) -> Vec<u8> {
         let page_stream = b"q 2 0 0 2 10 20 cm /Fm0 Do Q q 3 0 0 3 30 40 cm /Fm0 Do Q";
         let form_stream = b"0 0 10 10 re f";
         format!(
@@ -349,7 +393,7 @@ mod tests {
              2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
              3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</XObject<</Fm0 5 0 R>>>>/Contents 4 0 R>> endobj\n\
              4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
-             5 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox[0 0 10 10]/Matrix[1 0 0 1 3 4]{group}/Resources<<>>/Length {}>> stream\n{}\nendstream endobj\n\
+             5 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox[0 0 10 10]/Matrix[1 0 0 1 3 4]{group}/Resources<<{resources}>>/Length {}>> stream\n{}\nendstream endobj\n\
              trailer <</Root 1 0 R>>\n%%EOF",
             page_stream.len(),
             String::from_utf8_lossy(page_stream),
@@ -524,12 +568,30 @@ mod tests {
         assert!(properties.isolated());
         assert!(!properties.knockout());
         assert!(properties.has_color_space());
+        assert_eq!(
+            properties.color_space_kind(),
+            Some(ColorSpaceKind::DeviceRgb)
+        );
         assert!(
             device
                 .group_properties
                 .iter()
                 .all(|candidate| *candidate == Some(properties))
         );
+    }
+
+    #[test]
+    fn form_group_device_space_reports_default_resource_remapping() {
+        let device = interpret_bytes(
+            form_pdf_with_group_and_resources(
+                "/Group<</S/Transparency/I true/K false/CS/DeviceRGB>>",
+                "/ColorSpace<</DefaultRGB/DeviceGray>>",
+            ),
+            true,
+        );
+        let properties = device.group_properties[0].expect("group properties");
+        assert!(properties.has_color_space());
+        assert_eq!(properties.color_space_kind(), None);
     }
 
     #[test]

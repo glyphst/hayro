@@ -58,5 +58,5 @@ pub use hayro_syntax;
 pub use interpret::*;
 pub use types::*;
 pub use util::{RectExt, TransformExt};
-pub use x_object::FormInvocation;
 pub use x_object::soft_mask::*;
+pub use x_object::{FormGroupProperties, FormInvocation};

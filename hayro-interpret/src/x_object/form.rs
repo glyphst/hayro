@@ -21,9 +21,43 @@ pub(crate) struct FormXObject<'a> {
     pub(crate) decoded: Cow<'a, [u8]>,
     pub(crate) matrix: Affine,
     pub(crate) bbox: [f32; 4],
-    is_transparency_group: bool,
+    pub(crate) group_properties: Option<FormGroupProperties>,
     pub(crate) dict: Dict<'a>,
     resources: Dict<'a>,
+}
+
+/// Typed properties declared by a Form `XObject` `/Group` dictionary.
+///
+/// Consumers that require exact transparency semantics must additionally
+/// require [`Self::is_transparency`] before relying on the remaining values.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FormGroupProperties {
+    is_transparency: bool,
+    isolated: bool,
+    knockout: bool,
+    has_color_space: bool,
+}
+
+impl FormGroupProperties {
+    /// Whether `/S /Transparency` identifies a transparency group.
+    pub fn is_transparency(self) -> bool {
+        self.is_transparency
+    }
+
+    /// Whether the group declares `/I true` isolation.
+    pub fn isolated(self) -> bool {
+        self.isolated
+    }
+
+    /// Whether the group declares `/K true` knockout behavior.
+    pub fn knockout(self) -> bool {
+        self.knockout
+    }
+
+    /// Whether the group explicitly declares a blending color space.
+    pub fn has_color_space(self) -> bool {
+        self.has_color_space
+    }
 }
 
 /// One invocation of a PDF Form `XObject` with its inherited graphics state.
@@ -109,7 +143,12 @@ impl<'a> FormInvocation<'a> {
 
     /// Whether the form dictionary declares a transparency group.
     pub fn is_transparency_group(&self) -> bool {
-        self.form.is_transparency_group
+        self.form.group_properties.is_some()
+    }
+
+    /// Typed properties from the form's `/Group` dictionary, when present.
+    pub fn group_properties(&self) -> Option<FormGroupProperties> {
+        self.form.group_properties
     }
 
     /// Whether the invocation inherits a soft mask whose root transform cannot
@@ -149,7 +188,7 @@ impl<'a> FormInvocation<'a> {
             self.nesting_depth,
         );
 
-        if self.form.is_transparency_group {
+        if self.form.group_properties.is_some() {
             device.push_transparency_group(
                 context.get().graphics_state.non_stroke_alpha,
                 std::mem::take(&mut context.get_mut().graphics_state.soft_mask),
@@ -178,7 +217,7 @@ impl<'a> FormInvocation<'a> {
         );
         device.pop_clip();
 
-        if self.form.is_transparency_group {
+        if self.form.group_properties.is_some() {
             device.pop_transparency_group();
         }
     }
@@ -196,12 +235,22 @@ impl<'a> FormXObject<'a> {
                 .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
         );
         let bbox = dict.get::<[f32; 4]>(BBOX)?;
-        let is_transparency_group = dict.get::<Dict<'_>>(GROUP).is_some();
+        let group_properties = dict.get::<Dict<'_>>(GROUP).map(|group| {
+            let is_transparency = group
+                .get::<hayro_syntax::object::Name<'_>>(S)
+                .is_some_and(|name| name.as_ref() == TRANSPARENCY);
+            FormGroupProperties {
+                is_transparency,
+                isolated: group.get::<bool>(I).unwrap_or(false),
+                knockout: group.get::<bool>(K).unwrap_or(false),
+                has_color_space: group.contains_key(CS),
+            }
+        });
 
         Some(Self {
             decoded,
             matrix,
-            is_transparency_group,
+            group_properties,
             bbox,
             dict: dict.clone(),
             resources,
@@ -286,6 +335,10 @@ mod tests {
     use kurbo::BezPath;
 
     fn form_pdf() -> Vec<u8> {
+        form_pdf_with_group("")
+    }
+
+    fn form_pdf_with_group(group: &str) -> Vec<u8> {
         let page_stream = b"q 2 0 0 2 10 20 cm /Fm0 Do Q q 3 0 0 3 30 40 cm /Fm0 Do Q";
         let form_stream = b"0 0 10 10 re f";
         format!(
@@ -294,7 +347,7 @@ mod tests {
              2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
              3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</XObject<</Fm0 5 0 R>>>>/Contents 4 0 R>> endobj\n\
              4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
-             5 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox[0 0 10 10]/Matrix[1 0 0 1 3 4]/Resources<<>>/Length {}>> stream\n{}\nendstream endobj\n\
+             5 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox[0 0 10 10]/Matrix[1 0 0 1 3 4]{group}/Resources<<>>/Length {}>> stream\n{}\nendstream endobj\n\
              trailer <</Root 1 0 R>>\n%%EOF",
             page_stream.len(),
             String::from_utf8_lossy(page_stream),
@@ -310,6 +363,7 @@ mod tests {
         form_keys: Vec<u128>,
         instance_transforms: Vec<Affine>,
         path_transforms: Vec<Affine>,
+        group_properties: Vec<Option<FormGroupProperties>>,
     }
 
     impl<'a> Device<'a> for RecordingDevice {
@@ -328,6 +382,7 @@ mod tests {
         fn draw_form(&mut self, form: &FormInvocation<'a>) {
             self.form_keys.push(form.cache_key());
             self.instance_transforms.push(form.instance_transform());
+            self.group_properties.push(form.group_properties());
             if self.retained {
                 form.interpret_local(self);
             } else {
@@ -341,7 +396,11 @@ mod tests {
     }
 
     fn interpret(retained: bool) -> RecordingDevice {
-        let pdf = Pdf::new(form_pdf()).expect("parse form fixture");
+        interpret_bytes(form_pdf(), retained)
+    }
+
+    fn interpret_bytes(bytes: Vec<u8>, retained: bool) -> RecordingDevice {
+        let pdf = Pdf::new(bytes).expect("parse form fixture");
         let cache = InterpreterCache::new();
         let mut context = Context::new(
             Affine::IDENTITY,
@@ -377,6 +436,27 @@ mod tests {
                 .path_transforms
                 .iter()
                 .all(|transform| transform.as_coeffs() == [1.0, 0.0, 0.0, 1.0, 3.0, 4.0])
+        );
+        assert!(device.group_properties.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn form_invocations_expose_typed_transparency_group_properties() {
+        let device = interpret_bytes(
+            form_pdf_with_group("/Group<</S/Transparency/I true/K false/CS/DeviceRGB>>"),
+            true,
+        );
+        assert_eq!(device.group_properties.len(), 2);
+        let properties = device.group_properties[0].expect("group properties");
+        assert!(properties.is_transparency());
+        assert!(properties.isolated());
+        assert!(!properties.knockout());
+        assert!(properties.has_color_space());
+        assert!(
+            device
+                .group_properties
+                .iter()
+                .all(|candidate| *candidate == Some(properties))
         );
     }
 

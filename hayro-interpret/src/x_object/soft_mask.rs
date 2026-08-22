@@ -1,4 +1,4 @@
-use super::form::FormXObject;
+use super::form::{FormGroupProperties, FormXObject};
 use crate::color::{Color, ColorComponents, ColorSpace};
 use crate::context::{Context, InterpreterCache};
 use crate::device::Device;
@@ -155,6 +155,11 @@ impl<'a> SoftMask<'a> {
     /// Return the underlying mask type.
     pub fn mask_type(&self) -> MaskType {
         self.0.mask_type
+    }
+
+    /// Typed properties of the transparency-group Form used as the mask source.
+    pub fn group_properties(&self) -> Option<FormGroupProperties> {
+        self.0.group.group_properties
     }
 
     /// The background color against which the mask should be composited.

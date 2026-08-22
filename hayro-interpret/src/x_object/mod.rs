@@ -3,8 +3,8 @@ mod form;
 mod image;
 pub(crate) mod soft_mask;
 
-pub use form::FormInvocation;
 pub(crate) use form::FormXObject;
+pub use form::{FormGroupProperties, FormInvocation};
 pub(crate) use image::ImageXObject;
 
 use crate::WarningSinkFn;

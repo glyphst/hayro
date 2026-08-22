@@ -30,6 +30,9 @@ pub struct MarkedContentProperties {
     pub language: Option<Vec<u8>>,
     /// Raw `/Type` name from the properties dictionary.
     pub property_type: Option<Vec<u8>>,
+    /// Raw `/Subtype` name identifying the application or extension that
+    /// defines the property list.
+    pub property_subtype: Option<Vec<u8>>,
     /// Raw `/Name` text string from the properties dictionary.
     pub name: Option<Vec<u8>>,
     /// Raw attribute-owner `/O` name, when present.

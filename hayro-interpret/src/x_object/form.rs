@@ -482,7 +482,7 @@ mod tests {
              2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
              3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</Properties<</Layout 5 0 R>>>>/Contents 4 0 R>> endobj\n\
              4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
-             5 0 obj <</O/Layout/BBox[-0.25 1.5 20 30]/Metadata 6 0 R>> endobj\n\
+             5 0 obj <</O/Layout/Subtype/Glyphst/BBox[-0.25 1.5 20 30]/Metadata 6 0 R>> endobj\n\
              6 0 obj <</Type/Metadata/Subtype/XML{stream_entries}/Length {}>> stream\n{}\nendstream endobj\n\
              trailer <</Root 1 0 R>>\n%%EOF",
             page_stream.len(),
@@ -704,6 +704,10 @@ mod tests {
         assert_eq!(device.marked_properties.len(), 1);
         let properties = &device.marked_properties[0];
         assert_eq!(properties.owner.as_deref(), Some(b"Layout".as_slice()));
+        assert_eq!(
+            properties.property_subtype.as_deref(),
+            Some(b"Glyphst".as_slice())
+        );
         assert_eq!(properties.bounding_box, Some([-0.25, 1.5, 20.0, 30.0]));
         let metadata = properties.metadata.as_ref().expect("metadata");
         assert_eq!(metadata.subtype, b"XML");

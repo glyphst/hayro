@@ -49,6 +49,9 @@ fn marked_content_properties(props: &Dict<'_>, max_metadata_bytes: u64) -> Marke
     let property_type = props
         .get::<Name<'_>>(TYPE)
         .map(|value| value.as_ref().to_vec());
+    let property_subtype = props
+        .get::<Name<'_>>(SUBTYPE)
+        .map(|value| value.as_ref().to_vec());
     let name = props
         .get::<PdfString<'_>>(NAME)
         .map(|value| value.as_bytes().to_vec());
@@ -87,6 +90,7 @@ fn marked_content_properties(props: &Dict<'_>, max_metadata_bytes: u64) -> Marke
         (ALT, alternate_text.is_some()),
         (LANG, language.is_some()),
         (TYPE, property_type.is_some()),
+        (SUBTYPE, property_subtype.is_some()),
         (NAME, name.is_some()),
         (O, owner.is_some()),
         (BBOX, bounding_box.is_some()),
@@ -102,6 +106,7 @@ fn marked_content_properties(props: &Dict<'_>, max_metadata_bytes: u64) -> Marke
         alternate_text,
         language,
         property_type,
+        property_subtype,
         name,
         owner,
         bounding_box,

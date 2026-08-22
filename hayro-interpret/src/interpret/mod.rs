@@ -16,10 +16,10 @@ use crate::x_object::{FormXObject, ImageXObject, XObject};
 use hayro_syntax::content::TypedIter;
 use hayro_syntax::content::ops::TypedInstruction;
 use hayro_syntax::object::dict::keys::{
-    ACTUAL_TEXT, ALT, ANNOTS, AP, AS, F, LANG, MCID, N, OC, RECT,
+    ACTUAL_TEXT, ALT, ANNOTS, AP, AS, F, LANG, MCID, N, NAME, OC, OCG, OCMD, RECT, TYPE,
 };
 use hayro_syntax::object::{
-    Array, Dict, Name, Object, Rect, Stream, String as PdfString, dict_or_stream,
+    Array, Dict, Name, Object, ObjectIdentifier, Rect, Stream, String as PdfString, dict_or_stream,
 };
 use hayro_syntax::page::{Page, Resources};
 use kurbo::{Affine, Point, Shape};
@@ -104,6 +104,13 @@ pub struct InterpreterSettings {
     /// Note that this feature is currently not fully implemented yet, so some
     /// annotations might be missing.
     pub render_annotations: bool,
+    /// Preserve every optional-content branch and emit owned visibility-expression callbacks.
+    ///
+    /// The default remains `false`, which applies the document's default OCG
+    /// configuration during interpretation for compatibility with existing
+    /// raster devices. Retained-scene devices should enable this and evaluate
+    /// the emitted expressions themselves.
+    pub preserve_optional_content: bool,
 }
 
 impl Default for InterpreterSettings {
@@ -122,6 +129,7 @@ impl Default for InterpreterSettings {
             cmap_resolver: Arc::new(|_| None),
             warning_sink: Arc::new(|_| {}),
             render_annotations: true,
+            preserve_optional_content: false,
         }
     }
 }
@@ -135,6 +143,9 @@ pub enum InterpreterWarning {
     UnsupportedFont,
     /// An image failed to decode.
     ImageDecodeFailure,
+    /// An optional-content membership dictionary could not be converted into
+    /// an owned visibility expression.
+    OptionalContentExpressionFailure,
 }
 
 /// interpret the contents of the page and render them into the device.
@@ -490,10 +501,13 @@ pub fn interpret<'a>(
                 // 1. A Name that references an entry in the Resources/Properties dictionary
                 // 2. An inline dictionary with an OC key
 
-                let resolved_properties = bdc
-                    .1
-                    .clone()
-                    .into_name()
+                let property_name = bdc.1.clone().into_name();
+                let property_ref = property_name
+                    .as_ref()
+                    .and_then(|name| resources.properties.get_ref(name.as_ref()))
+                    .map(ObjectIdentifier::from);
+                let resolved_properties = property_name
+                    .as_ref()
                     .and_then(|name| resources.properties.get::<Dict<'_>>(name.as_ref()))
                     .or_else(|| dict_or_stream(bdc.1).map(|(props, _)| props.clone()));
 
@@ -510,39 +524,64 @@ pub fn interpret<'a>(
                         language: props
                             .get::<PdfString<'_>>(LANG)
                             .map(|value| value.as_bytes().to_vec()),
+                        property_type: props
+                            .get::<Name<'_>>(TYPE)
+                            .map(|value| value.as_ref().to_vec()),
+                        name: props
+                            .get::<PdfString<'_>>(NAME)
+                            .map(|value| value.as_bytes().to_vec()),
                     })
                     .unwrap_or_default();
 
-                let oc = bdc
-                    .1
-                    .clone()
-                    .into_name()
-                    .and_then(|name| {
-                        let r = resources.properties.get_ref(name.as_ref())?;
-                        let d = resources
-                            .properties
-                            .get::<Dict<'_>>(name)
-                            .unwrap_or_default();
-                        Some((d, r))
-                    })
-                    .or_else(|| {
-                        let (props, _) = dict_or_stream(bdc.1)?;
-                        let r = props.get_ref(OC)?;
-                        let d = props.get::<Dict<'_>>(OC).unwrap_or_default();
-                        Some((d, r))
-                    });
-
-                if let Some((dict, oc_ref)) = oc {
-                    context.ocg_state.begin_ocg(&dict, oc_ref.into());
-                } else {
-                    context.ocg_state.begin_marked_content();
-                }
-
                 device.begin_marked_content_with_properties(bdc.0, marked_properties);
+                let membership = resolved_properties.as_ref().and_then(|props| {
+                    if let Some(dict) = props.get::<Dict<'_>>(OC) {
+                        Some((dict, props.get_ref(OC).map(ObjectIdentifier::from)))
+                    } else if props
+                        .get::<Name<'_>>(TYPE)
+                        .is_some_and(|kind| kind.as_ref() == OCG || kind.as_ref() == OCMD)
+                    {
+                        Some((props.clone(), property_ref))
+                    } else {
+                        None
+                    }
+                });
+                let has_membership = membership.is_some();
+                let optional_expression = match membership {
+                    Some((dict, Some(reference))) => {
+                        context.ocg_state.begin_ocg(&dict, reference, context.xref)
+                    }
+                    Some((dict, None))
+                        if dict
+                            .get::<Name<'_>>(TYPE)
+                            .is_some_and(|kind| kind.as_ref() == OCMD) =>
+                    {
+                        context.ocg_state.begin_ocmd(&dict, context.xref)
+                    }
+                    Some(_) => {
+                        context.ocg_state.begin_unresolved_optional_content();
+                        None
+                    }
+                    None => {
+                        context.ocg_state.begin_marked_content();
+                        None
+                    }
+                };
+                if context.settings.preserve_optional_content {
+                    if let Some(expression) = optional_expression.as_ref() {
+                        device.begin_optional_content(expression);
+                    } else if has_membership {
+                        (context.settings.warning_sink)(
+                            InterpreterWarning::OptionalContentExpressionFailure,
+                        );
+                    }
+                }
             }
             TypedInstruction::MarkedContentPointWithProperties(_) => {}
             TypedInstruction::EndMarkedContent(_) => {
-                context.ocg_state.end_marked_content();
+                if context.ocg_state.end_marked_content() {
+                    device.end_optional_content();
+                }
                 device.end_marked_content();
             }
             TypedInstruction::MarkedContentPoint(_) => {}

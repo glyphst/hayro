@@ -89,7 +89,7 @@ impl<'a> Context<'a> {
         let ocg_state = {
             let root_ref = xref.root_id();
             xref.get::<Dict<'_>>(root_ref)
-                .map(|catalog| OcgState::from_catalog(&catalog))
+                .map(|catalog| OcgState::from_catalog(&catalog, settings.preserve_optional_content))
                 .unwrap_or_default()
         };
 

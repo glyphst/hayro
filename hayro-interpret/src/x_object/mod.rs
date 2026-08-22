@@ -60,15 +60,36 @@ impl<'a> XObject<'a> {
     }
 }
 
-fn xobject_oc(dict: &Dict<'_>, context: &mut Context<'_>) -> bool {
+fn xobject_oc<'a>(
+    dict: &Dict<'_>,
+    context: &mut Context<'a>,
+    device: &mut impl Device<'a>,
+) -> bool {
     let Some(oc_dict) = dict.get::<Dict<'_>>(OC) else {
         return false;
     };
 
-    if let Some(oc_ref) = dict.get_ref(OC) {
-        context.ocg_state.begin_ocg(&oc_dict, oc_ref.into());
+    let expression = if let Some(oc_ref) = dict.get_ref(OC) {
+        context
+            .ocg_state
+            .begin_ocg(&oc_dict, oc_ref.into(), context.xref)
+    } else if oc_dict
+        .get::<Name<'_>>(TYPE)
+        .is_some_and(|kind| kind.as_ref() == OCMD)
+    {
+        context.ocg_state.begin_ocmd(&oc_dict, context.xref)
     } else {
-        context.ocg_state.begin_ocmd(&oc_dict);
+        context.ocg_state.begin_unresolved_optional_content();
+        None
+    };
+    if context.settings.preserve_optional_content {
+        if let Some(expression) = expression.as_ref() {
+            device.begin_optional_content(expression);
+        } else {
+            (context.settings.warning_sink)(
+                crate::InterpreterWarning::OptionalContentExpressionFailure,
+            );
+        }
     }
 
     true

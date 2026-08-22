@@ -19,6 +19,34 @@ pub struct MarkedContentProperties {
     pub alternate_text: Option<Vec<u8>>,
     /// Language override associated with the marked content.
     pub language: Option<Vec<u8>>,
+    /// Raw `/Type` name from the properties dictionary.
+    pub property_type: Option<Vec<u8>>,
+    /// Raw `/Name` text string from the properties dictionary.
+    pub name: Option<Vec<u8>>,
+}
+
+/// Stable identity and document-default visibility of one optional-content group.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct OptionalContentGroup {
+    /// PDF object number of the indirect OCG dictionary.
+    pub object_number: i32,
+    /// PDF generation number of the indirect OCG dictionary.
+    pub generation_number: i32,
+    /// Whether the document's default optional-content configuration enables the group.
+    pub initially_visible: bool,
+}
+
+/// Owned boolean visibility expression for an optional-content scope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OptionalContentExpression {
+    /// Visibility follows one optional-content group.
+    Group(OptionalContentGroup),
+    /// Every operand must be visible. An empty conjunction is visible.
+    All(Vec<Self>),
+    /// At least one operand must be visible. An empty disjunction is hidden.
+    Any(Vec<Self>),
+    /// Invert one operand.
+    Not(Box<Self>),
 }
 
 /// A trait for a device that can be used to process PDF drawing instructions.
@@ -100,6 +128,15 @@ pub trait Device<'a> {
     ) {
         self.begin_marked_content(tag, properties.mcid);
     }
+    /// Called before content controlled by an OCG or OCMD visibility expression.
+    ///
+    /// This callback is emitted only when
+    /// [`InterpreterSettings::preserve_optional_content`](crate::InterpreterSettings::preserve_optional_content)
+    /// is enabled. It may nest inside a marked-content callback or directly
+    /// surround an image or Form `XObject` invocation.
+    fn begin_optional_content(&mut self, _expression: &OptionalContentExpression) {}
+    /// Called after a matching [`Self::begin_optional_content`] callback.
+    fn end_optional_content(&mut self) {}
     /// Called at the end of a marked content sequence (EMC).
     fn end_marked_content(&mut self) {}
     /// Return true to stop interpretation at the next operator boundary.

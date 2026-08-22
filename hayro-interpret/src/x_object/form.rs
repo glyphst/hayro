@@ -271,10 +271,10 @@ impl<'a> FormXObject<'a> {
             return;
         }
 
-        let has_oc = xobject_oc(&self.dict, context);
+        let has_oc = xobject_oc(&self.dict, context, device);
         if !context.ocg_state.is_visible() {
-            if has_oc {
-                context.ocg_state.end_marked_content();
+            if has_oc && context.ocg_state.end_marked_content() {
+                device.end_optional_content();
             }
             context.end_nested_interpretation();
             return;
@@ -284,8 +284,8 @@ impl<'a> FormXObject<'a> {
         let invocation = FormInvocation::new(self, resources, context);
         device.draw_form(&invocation);
 
-        if has_oc {
-            context.ocg_state.end_marked_content();
+        if has_oc && context.ocg_state.end_marked_content() {
+            device.end_optional_content();
         }
 
         context.end_nested_interpretation();

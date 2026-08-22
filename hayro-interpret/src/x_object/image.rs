@@ -133,10 +133,10 @@ impl<'a> ImageXObject<'a> {
             return;
         }
 
-        let has_oc = xobject_oc(self.stream.dict(), context);
+        let has_oc = xobject_oc(self.stream.dict(), context, device);
         if !context.ocg_state.is_visible() {
-            if has_oc {
-                context.ocg_state.end_marked_content();
+            if has_oc && context.ocg_state.end_marked_content() {
+                device.end_optional_content();
             }
             return;
         }
@@ -193,8 +193,8 @@ impl<'a> ImageXObject<'a> {
 
         context.restore_state(device);
 
-        if has_oc {
-            context.ocg_state.end_marked_content();
+        if has_oc && context.ocg_state.end_marked_content() {
+            device.end_optional_content();
         }
     }
 

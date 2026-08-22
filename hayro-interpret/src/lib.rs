@@ -51,7 +51,9 @@ pub mod shading;
 pub mod util;
 
 pub use annotation::{
-    AnnotationAppearanceError, annotation_is_visible_on_screen, select_annotation_normal_appearance,
+    AnnotationAppearanceError, LinkBorder, LinkBorderColor, LinkBorderError, LinkBorderGeometry,
+    LinkBorderStyle, annotation_is_visible_on_screen, resolve_link_border,
+    select_annotation_normal_appearance,
 };
 pub use cache::CacheKey;
 pub use context::*;

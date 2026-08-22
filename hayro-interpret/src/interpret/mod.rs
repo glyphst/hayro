@@ -1,5 +1,7 @@
 use crate::FillRule;
-use crate::annotation::{annotation_is_visible_on_screen, resolve_annotation_appearance};
+use crate::annotation::{
+    annotation_is_visible_on_screen, resolve_annotation_appearance, resolve_link_border,
+};
 use crate::color::ColorSpace;
 use crate::context::Context;
 use crate::convert::{convert_line_cap, convert_line_join};
@@ -392,6 +394,8 @@ pub enum InterpreterWarning {
     /// A visible annotation's normal appearance could not be selected or
     /// mapped exactly.
     AnnotationAppearanceFailure(crate::AnnotationAppearanceError),
+    /// A Link annotation's synthesized border could not be resolved exactly.
+    LinkBorderFailure(crate::LinkBorderError),
 }
 
 /// interpret the contents of the page and render them into the device.
@@ -426,7 +430,17 @@ pub fn interpret_page<'a>(
                     context.pop_root_transform();
                     context.restore_state(device);
                 }
-                Ok(None) => {}
+                Ok(None) => match resolve_link_border(&annot) {
+                    Ok(Some(border)) if border.is_visible() => {
+                        device.draw_link_border(&border, context.root_transform());
+                    }
+                    Ok(Some(_) | None) => {}
+                    Err(error) => {
+                        (context.settings.warning_sink)(InterpreterWarning::LinkBorderFailure(
+                            error,
+                        ));
+                    }
+                },
                 Err(error) => (context.settings.warning_sink)(
                     InterpreterWarning::AnnotationAppearanceFailure(error),
                 ),

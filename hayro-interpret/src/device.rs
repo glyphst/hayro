@@ -1,8 +1,8 @@
-use crate::FormInvocation;
 use crate::font::GlyphRun;
 use crate::x_object::soft_mask::SoftMask;
 use crate::{BlendMode, ClipPath, FillRule, Image};
 use crate::{DrawMode, DrawProps, ImageDrawProps};
+use crate::{FormInvocation, LinkBorder};
 use kurbo::{Affine, BezPath, Rect, Shape};
 
 /// Owned metadata stream attached to a marked-content property list.
@@ -156,6 +156,14 @@ pub trait Device<'a> {
     {
         form.interpret(self);
     }
+    /// Draw a synthesized Link annotation border at its exact position in the
+    /// page annotation array.
+    ///
+    /// The border geometry and stroke units remain in PDF default user space;
+    /// `transform` maps that space into the device's page coordinate system.
+    /// An explicit annotation appearance stream takes precedence, so this
+    /// callback is emitted only when no `/AP` entry is present.
+    fn draw_link_border(&mut self, _border: &LinkBorder, _transform: Affine) {}
     /// Pop the last clip path or clip rectangle from the clip stack.
     fn pop_clip(&mut self);
     /// Pop the last transparency group from the blend stack.

@@ -391,8 +391,9 @@ mod tests {
     use crate::font::GlyphRun;
     use crate::{
         BlendMode, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterSettings,
-        InterpreterWarning, MarkedContentProperties, MarkedContentProperty,
-        MarkedContentPropertyValue, MaskType, SoftMask, interpret_page,
+        InterpreterWarning, LinkBorder, LinkBorderColor, LinkBorderGeometry, LinkBorderStyle,
+        MarkedContentProperties, MarkedContentProperty, MarkedContentPropertyValue, MaskType,
+        SoftMask, interpret_page,
     };
     use hayro_syntax::Pdf;
     use kurbo::BezPath;
@@ -526,6 +527,8 @@ mod tests {
         group_properties: Vec<Option<FormGroupProperties>>,
         soft_masks: Vec<(MaskType, ColorSpaceKind, bool, Vec<f32>)>,
         marked_properties: Vec<MarkedContentProperties>,
+        link_borders: Vec<(LinkBorder, Affine)>,
+        events: Vec<&'static str>,
     }
 
     impl RecordingDevice {
@@ -541,6 +544,7 @@ mod tests {
 
     impl<'a> Device<'a> for RecordingDevice {
         fn draw_path(&mut self, _: &BezPath, mut props: DrawProps<'a>, _: &DrawMode) {
+            self.events.push("path");
             self.path_transforms.push(props.transform);
             if let Some(mask) = props.soft_mask.take() {
                 self.record_soft_mask(mask);
@@ -560,6 +564,7 @@ mod tests {
         fn draw_image(&mut self, _: Image<'a, '_>, _: ImageDrawProps<'a>) {}
 
         fn draw_form(&mut self, form: &FormInvocation<'a>) {
+            self.events.push("form");
             self.form_keys.push(form.cache_key());
             self.instance_transforms.push(form.instance_transform());
             self.group_properties.push(form.group_properties());
@@ -568,6 +573,11 @@ mod tests {
             } else {
                 form.interpret(self);
             }
+        }
+
+        fn draw_link_border(&mut self, border: &LinkBorder, transform: Affine) {
+            self.events.push("link-border");
+            self.link_borders.push((border.clone(), transform));
         }
 
         fn pop_clip(&mut self) {}
@@ -912,5 +922,94 @@ mod tests {
             true,
         );
         assert_eq!(device.form_keys.len(), 2);
+    }
+
+    #[test]
+    fn link_borders_preserve_annotation_order_and_typed_visual_parameters() {
+        let appearance = annotation_form(11, "[0 0 10 10]", "[1 0 0 1 0 0]", "0 0 10 10 re f");
+        let objects = format!(
+            "5 0 obj <</Type/Annot/Subtype/Link/Rect[10 20 110 70]/Border[8 6 2[3 2]]/C[0.2 0.4 0.6]/CA 0.5>> endobj\n\
+             6 0 obj <</Type/Annot/Subtype/Link/Rect[120 20 220 70]/Border[0 0 9]/BS<</Type/Border/W 3/S/U/D[4]>>/C[0.1]>> endobj\n\
+             7 0 obj <</Type/Annot/Subtype/Link/Rect[230 20 330 70]/BS<</W 0/S/B>>/C[1 0 0]>> endobj\n\
+             8 0 obj <</Type/Annot/Subtype/Link/Rect[340 20 440 70]/BS<</W 4/S/I>>/C[]>> endobj\n\
+             9 0 obj <</Type/Annot/Subtype/Link/Rect[10 90 110 140]/AP<</N 11 0 R>>/BS 17>> endobj\n\
+             10 0 obj <</Type/Annot/Subtype/Link/Rect[120 90 220 140]/BS<</W 5/S/B>>/C[0.1 0.2 0.3 0.4]>> endobj\n{appearance}"
+        );
+        let device = interpret_bytes(
+            annotation_pdf("5 0 R 9 0 R 6 0 R 10 0 R 7 0 R 8 0 R", &objects),
+            true,
+        );
+
+        assert_eq!(
+            device.events,
+            ["link-border", "form", "path", "link-border", "link-border"]
+        );
+        assert_eq!(device.link_borders.len(), 3);
+        assert_eq!(
+            device.link_borders[0],
+            (
+                LinkBorder {
+                    geometry: LinkBorderGeometry::RoundedRectangle {
+                        rect: Rect::new(10.0, 20.0, 110.0, 70.0),
+                        horizontal_radius: 8.0,
+                        vertical_radius: 6.0,
+                    },
+                    width: 2.0,
+                    style: LinkBorderStyle::Dashed {
+                        dash_array: vec![3.0, 2.0],
+                    },
+                    color: LinkBorderColor::Rgb([0.2, 0.4, 0.6]),
+                    opacity: 0.5,
+                },
+                Affine::IDENTITY,
+            )
+        );
+        assert_eq!(
+            device.link_borders[1].0,
+            LinkBorder {
+                geometry: LinkBorderGeometry::Rectangle {
+                    rect: Rect::new(120.0, 20.0, 220.0, 70.0),
+                },
+                width: 3.0,
+                style: LinkBorderStyle::Underline,
+                color: LinkBorderColor::Gray([0.1]),
+                opacity: 1.0,
+            }
+        );
+        assert_eq!(
+            device.link_borders[2].0,
+            LinkBorder {
+                geometry: LinkBorderGeometry::Rectangle {
+                    rect: Rect::new(120.0, 90.0, 220.0, 140.0),
+                },
+                width: 5.0,
+                style: LinkBorderStyle::Beveled,
+                color: LinkBorderColor::Cmyk([0.1, 0.2, 0.3, 0.4]),
+                opacity: 1.0,
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_link_border_reports_a_structured_warning() {
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let warning_target = warnings.clone();
+        let settings = InterpreterSettings {
+            warning_sink: Arc::new(move |warning| {
+                warning_target.lock().unwrap().push(warning);
+            }),
+            ..InterpreterSettings::default()
+        };
+        let objects = "5 0 obj <</Type/Annot/Subtype/Link/Rect[10 20 110 70]/BS<</W 2/S/D/D[0 0]>>/C[1 0 0]>> endobj";
+        let device =
+            interpret_bytes_with_settings(annotation_pdf("5 0 R", objects), true, settings);
+
+        assert!(device.link_borders.is_empty());
+        assert!(matches!(
+            warnings.lock().unwrap().as_slice(),
+            [InterpreterWarning::LinkBorderFailure(
+                crate::LinkBorderError::InvalidDashArray
+            )]
+        ));
     }
 }

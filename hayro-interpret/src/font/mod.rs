@@ -69,6 +69,32 @@ use hayro_cmap::{BfString, CMap, CMapName, CharacterCollection};
 pub use outline::OutlineFontData;
 pub use standard_font::StandardFont;
 
+/// Direction used by a PDF font's writing mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WritingMode {
+    /// Glyph advances run along the text-space x axis.
+    Horizontal,
+    /// Glyph advances run along the text-space y axis.
+    Vertical,
+}
+
+/// Owned metrics required to reconstruct reader text geometry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextGlyphMetrics {
+    /// Advance in the font's 1,000-unit glyph space.
+    pub advance: [f32; 2],
+    /// Nominal ascent in the font's 1,000-unit glyph space.
+    pub ascent: Option<f32>,
+    /// Nominal descent in the font's 1,000-unit glyph space.
+    pub descent: Option<f32>,
+    /// Horizontal or vertical writing mode.
+    pub writing_mode: WritingMode,
+    /// Font weight when it can be determined without guessing.
+    pub weight: Option<u32>,
+    /// Italic/oblique metadata when it can be determined without guessing.
+    pub is_italic: Option<bool>,
+}
+
 /// A glyph that can be drawn.
 pub enum Glyph<'a> {
     /// A glyph defined by an outline.
@@ -204,6 +230,29 @@ impl OutlineGlyph {
     /// this glyph before drawing the next one.
     pub fn advance_width(&self) -> Option<f32> {
         self.font.glyph_advance_width(self.char_code)
+    }
+
+    /// Metrics needed for nominal selection boxes and semantic text layout.
+    pub fn text_metrics(&self) -> TextGlyphMetrics {
+        let advance = self.font.glyph_advance(self.char_code);
+        let (ascent, descent) = self
+            .font
+            .text_metrics()
+            .map_or((None, None), |(ascent, descent)| {
+                (Some(ascent), Some(descent))
+            });
+        TextGlyphMetrics {
+            advance: [advance.x as f32, advance.y as f32],
+            ascent,
+            descent,
+            writing_mode: if self.font.is_horizontal() {
+                WritingMode::Horizontal
+            } else {
+                WritingMode::Vertical
+            },
+            weight: self.font.weight(),
+            is_italic: self.font.is_italic(),
+        }
     }
 
     /// Get the cache key for this glyph's font.

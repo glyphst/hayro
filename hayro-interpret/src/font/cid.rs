@@ -345,6 +345,13 @@ impl Type0Font {
         }
     }
 
+    pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
+        match &self.font_type {
+            FontType::OpenType(font) => font.text_metrics(),
+            FontType::Cff(_) | FontType::Type1(_) => None,
+        }
+    }
+
     pub(crate) fn code_advance(&self, code: u32) -> Vec2 {
         let cid = self.code_to_cid(code).unwrap_or(0);
         if self.horizontal {

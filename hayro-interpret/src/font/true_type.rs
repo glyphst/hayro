@@ -168,6 +168,13 @@ impl TrueTypeFont {
         }
     }
 
+    pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
+        match &self.kind {
+            Kind::Embedded(font) => font.base_font.text_metrics(),
+            Kind::Standard(font) => font.text_metrics(),
+        }
+    }
+
     pub(crate) fn map_code(&self, code: u8) -> GlyphId {
         match &self.kind {
             Kind::Embedded(e) => e.map_code(code),

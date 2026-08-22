@@ -123,6 +123,27 @@ impl Type1Font {
             Kind::Type1(t) => t.char_code_to_unicode(code).map(BfString::Char),
         }
     }
+
+    pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
+        match &self.1 {
+            Kind::Standard(font) => font.text_metrics(),
+            Kind::Cff(_) | Kind::Type1(_) => None,
+        }
+    }
+
+    pub(crate) fn weight(&self) -> Option<u32> {
+        match &self.1 {
+            Kind::Standard(font) => Some(if font.is_bold() { 700 } else { 400 }),
+            Kind::Cff(_) | Kind::Type1(_) => None,
+        }
+    }
+
+    pub(crate) fn is_italic(&self) -> Option<bool> {
+        match &self.1 {
+            Kind::Standard(font) => Some(font.is_italic()),
+            Kind::Cff(_) | Kind::Type1(_) => None,
+        }
+    }
 }
 
 impl CacheKey for Type1Font {

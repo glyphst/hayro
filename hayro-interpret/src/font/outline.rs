@@ -117,6 +117,47 @@ impl OutlineFont {
         }
     }
 
+    pub(crate) fn glyph_advance(&self, char_code: u32) -> kurbo::Vec2 {
+        match self {
+            Self::Type1(font) => {
+                kurbo::Vec2::new(font.glyph_width(char_code as u8).unwrap_or(0.0) as f64, 0.0)
+            }
+            Self::TrueType(font) => kurbo::Vec2::new(font.glyph_width(char_code as u8) as f64, 0.0),
+            Self::Type0(font) => font.code_advance(char_code),
+        }
+    }
+
+    pub(crate) fn is_horizontal(&self) -> bool {
+        match self {
+            Self::Type1(_) | Self::TrueType(_) => true,
+            Self::Type0(font) => font.is_horizontal(),
+        }
+    }
+
+    pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
+        match self {
+            Self::Type1(font) => font.text_metrics(),
+            Self::TrueType(font) => font.text_metrics(),
+            Self::Type0(font) => font.text_metrics(),
+        }
+    }
+
+    pub(crate) fn weight(&self) -> Option<u32> {
+        match self {
+            Self::Type1(font) => font.weight(),
+            Self::TrueType(font) => font.weight(),
+            Self::Type0(font) => font.weight(),
+        }
+    }
+
+    pub(crate) fn is_italic(&self) -> Option<bool> {
+        match self {
+            Self::Type1(font) => font.is_italic(),
+            Self::TrueType(font) => Some(font.is_italic()),
+            Self::Type0(font) => Some(font.is_italic()),
+        }
+    }
+
     /// Get raw font bytes and metadata.
     ///
     /// Returns None for Type1 fonts and non-embedded TrueType fonts.

@@ -245,6 +245,16 @@ impl OpenTypeFontBlob {
         &self.yoke.as_ref().get().glyph_metrics
     }
 
+    pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
+        let metrics = self
+            .font_ref()
+            .metrics(Size::new(UNITS_PER_EM), LocationRef::default());
+        (metrics.ascent.is_finite()
+            && metrics.descent.is_finite()
+            && metrics.ascent > metrics.descent)
+            .then_some((metrics.ascent, metrics.descent))
+    }
+
     pub(crate) fn glyph_names(&self) -> FxHashMap<String, GlyphId> {
         // Note: We don't call the `glyph_name` method provided by read-fonts because
         // calling it repeatedly is very slow.

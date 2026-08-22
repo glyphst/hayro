@@ -4,6 +4,22 @@ use crate::{BlendMode, ClipPath, FillRule, Image};
 use crate::{DrawMode, DrawProps, ImageDrawProps};
 use kurbo::{BezPath, Rect, Shape};
 
+/// Resolved properties attached to a marked-content sequence.
+///
+/// Text strings remain as decoded PDF-string bytes. Consumers can apply the
+/// PDF text-string encoding rules without retaining syntax-layer lifetimes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MarkedContentProperties {
+    /// Marked-content identifier from the properties dictionary.
+    pub mcid: Option<i32>,
+    /// Replacement text used by accessibility and text extraction.
+    pub actual_text: Option<Vec<u8>>,
+    /// Alternate description associated with the marked content.
+    pub alternate_text: Option<Vec<u8>>,
+    /// Language override associated with the marked content.
+    pub language: Option<Vec<u8>>,
+}
+
 /// A trait for a device that can be used to process PDF drawing instructions.
 pub trait Device<'a> {
     /// Draw a path.
@@ -46,8 +62,24 @@ pub trait Device<'a> {
     /// The tag is the marked content tag (e.g. b"P", b"Span"). The mcid is
     /// the marked content identifier from the properties dict, if present.
     fn begin_marked_content(&mut self, _tag: &[u8], _mcid: Option<i32>) {}
+    /// Called for BDC sequences after resolving inline or named properties.
+    ///
+    /// The default preserves compatibility with devices that only consume an
+    /// MCID. New devices should override this method to retain rich semantic
+    /// properties such as `ActualText`.
+    fn begin_marked_content_with_properties(
+        &mut self,
+        tag: &[u8],
+        properties: MarkedContentProperties,
+    ) {
+        self.begin_marked_content(tag, properties.mcid);
+    }
     /// Called at the end of a marked content sequence (EMC).
     fn end_marked_content(&mut self) {}
+    /// Return true to stop interpretation at the next operator boundary.
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
 
 /// A device that discards all drawing operations.

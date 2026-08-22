@@ -333,6 +333,13 @@ impl StandardFontBlob {
         }
     }
 
+    pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
+        match self {
+            Self::Cff(_) => None,
+            Self::Otf(blob, _) => blob.text_metrics(),
+        }
+    }
+
     pub(crate) fn outline_glyph(&self, glyph: GlyphId) -> BezPath {
         // Standard fonts have empty outlines for these, but in Liberation Sans
         // they are a .notdef rectangle.
@@ -502,5 +509,9 @@ impl StandardKind {
 
     pub(crate) fn is_monospace(&self) -> bool {
         self.base_font.is_monospace()
+    }
+
+    pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
+        self.base_font_blob.text_metrics()
     }
 }

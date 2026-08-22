@@ -2,7 +2,7 @@ use crate::FillRule;
 use crate::color::ColorSpace;
 use crate::context::Context;
 use crate::convert::{convert_line_cap, convert_line_join};
-use crate::device::Device;
+use crate::device::{Device, MarkedContentProperties};
 use crate::font::{Font, FontData, FontQuery, StandardFont};
 use crate::interpret::path::{
     close_path, fill_path, fill_path_impl, fill_stroke_path, stroke_path,
@@ -15,8 +15,12 @@ use crate::util::{OptionLog, RectExt};
 use crate::x_object::{FormXObject, ImageXObject, XObject};
 use hayro_syntax::content::TypedIter;
 use hayro_syntax::content::ops::TypedInstruction;
-use hayro_syntax::object::dict::keys::{ANNOTS, AP, AS, F, MCID, N, OC, RECT};
-use hayro_syntax::object::{Array, Dict, Name, Object, Rect, Stream, dict_or_stream};
+use hayro_syntax::object::dict::keys::{
+    ACTUAL_TEXT, ALT, ANNOTS, AP, AS, F, LANG, MCID, N, OC, RECT,
+};
+use hayro_syntax::object::{
+    Array, Dict, Name, Object, Rect, Stream, String as PdfString, dict_or_stream,
+};
 use hayro_syntax::page::{Page, Resources};
 use kurbo::{Affine, Point, Shape};
 use rustc_hash::FxHashMap;
@@ -234,6 +238,9 @@ pub fn interpret<'a>(
     context.save_state();
 
     while let Some(op) = ops.next() {
+        if device.is_cancelled() {
+            break;
+        }
         match op {
             TypedInstruction::SaveState(_) => context.save_state(),
             TypedInstruction::StrokeColorDeviceRgb(s) => {
@@ -483,7 +490,28 @@ pub fn interpret<'a>(
                 // 1. A Name that references an entry in the Resources/Properties dictionary
                 // 2. An inline dictionary with an OC key
 
-                let mcid = dict_or_stream(bdc.1).and_then(|(props, _)| props.get::<i32>(MCID));
+                let resolved_properties = bdc
+                    .1
+                    .clone()
+                    .into_name()
+                    .and_then(|name| resources.properties.get::<Dict<'_>>(name.as_ref()))
+                    .or_else(|| dict_or_stream(bdc.1).map(|(props, _)| props.clone()));
+
+                let marked_properties = resolved_properties
+                    .as_ref()
+                    .map(|props| MarkedContentProperties {
+                        mcid: props.get::<i32>(MCID),
+                        actual_text: props
+                            .get::<PdfString<'_>>(ACTUAL_TEXT)
+                            .map(|value| value.as_bytes().to_vec()),
+                        alternate_text: props
+                            .get::<PdfString<'_>>(ALT)
+                            .map(|value| value.as_bytes().to_vec()),
+                        language: props
+                            .get::<PdfString<'_>>(LANG)
+                            .map(|value| value.as_bytes().to_vec()),
+                    })
+                    .unwrap_or_default();
 
                 let oc = bdc
                     .1
@@ -510,7 +538,7 @@ pub fn interpret<'a>(
                     context.ocg_state.begin_marked_content();
                 }
 
-                device.begin_marked_content(bdc.0, mcid);
+                device.begin_marked_content_with_properties(bdc.0, marked_properties);
             }
             TypedInstruction::MarkedContentPointWithProperties(_) => {}
             TypedInstruction::EndMarkedContent(_) => {

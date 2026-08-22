@@ -1,4 +1,5 @@
 use crate::FillRule;
+use crate::annotation::resolve_annotation_appearance;
 use crate::color::ColorSpace;
 use crate::context::Context;
 use crate::convert::{convert_line_cap, convert_line_join};
@@ -11,15 +12,15 @@ use crate::interpret::state::{TextStateFont, handle_gs};
 use crate::interpret::text::TextRenderingMode;
 use crate::pattern::{Pattern, ShadingPattern};
 use crate::shading::Shading;
-use crate::util::{OptionLog, RectExt};
-use crate::x_object::{FormXObject, ImageXObject, XObject};
+use crate::util::OptionLog;
+use crate::x_object::{ImageXObject, XObject};
 use hayro_syntax::content::TypedIter;
 use hayro_syntax::content::ops::TypedInstruction;
 use hayro_syntax::object::dict::keys::{
-    ACTUAL_TEXT, ALT, ANNOTS, AP, AS, F, LANG, MCID, N, NAME, OC, OCG, OCMD, RECT, TYPE,
+    ACTUAL_TEXT, ALT, ANNOTS, F, LANG, MCID, NAME, OC, OCG, OCMD, TYPE,
 };
 use hayro_syntax::object::{
-    Array, Dict, Name, Object, ObjectIdentifier, Rect, Stream, String as PdfString, dict_or_stream,
+    Array, Dict, Name, Object, ObjectIdentifier, String as PdfString, dict_or_stream,
 };
 use hayro_syntax::page::{Page, Resources};
 use kurbo::{Affine, Point, Shape};
@@ -146,6 +147,9 @@ pub enum InterpreterWarning {
     /// An optional-content membership dictionary could not be converted into
     /// an owned visibility expression.
     OptionalContentExpressionFailure,
+    /// A visible annotation's normal appearance could not be selected or
+    /// mapped exactly.
+    AnnotationAppearanceFailure(crate::AnnotationAppearanceError),
 }
 
 /// interpret the contents of the page and render them into the device.
@@ -163,76 +167,32 @@ pub fn interpret_page<'a>(
         for annot in annot_arr.iter::<Dict<'_>>() {
             let flags = annot.get::<u32>(F).unwrap_or(0);
 
-            // Annotation should be hidden.
-            if flags & 2 != 0 {
+            // Invisible, Hidden, and NoView annotations have no screen
+            // presentation. Print is intentionally irrelevant here.
+            if flags & (1 | 2 | 32) != 0 {
                 continue;
             }
 
-            if let Some(apx) = appearance_stream(&annot).and_then(|o| FormXObject::new(&o)) {
-                let Some(rect) = annot.get::<Rect>(RECT) else {
-                    continue;
-                };
+            match resolve_annotation_appearance(&annot) {
+                Ok(Some(appearance)) => {
+                    // ISO 32000-2, 12.5.5: concatenate the appearance Form's
+                    // Matrix with the transform mapping its transformed BBox
+                    // onto the annotation Rect. The Form retains its Matrix;
+                    // this outer transform is the annotation instance.
+                    context.save_state();
+                    context.pre_concat_affine(appearance.transform);
+                    context.push_root_transform();
 
-                let annot_rect = rect.to_kurbo();
-                // 12.5.5. Appearance streams
-                // "The algorithm outlined in this subclause shall be used
-                // to map from the coordinate system of the appearance XObject."
-
-                // 1) The appearance’s bounding box (specified by its BBox entry)
-                // shall be transformed, using Matrix, to produce a
-                // quadrilateral with arbitrary orientation. The transformed
-                // appearance box is the smallest upright rectangle that
-                // encompasses this quadrilateral.
-                let transformed_rect = (apx.matrix
-                    * kurbo::Rect::new(
-                        apx.bbox[0] as f64,
-                        apx.bbox[1] as f64,
-                        apx.bbox[2] as f64,
-                        apx.bbox[3] as f64,
-                    )
-                    .to_path(0.1))
-                .bounding_box();
-
-                // 2) A matrix A shall be computed that scales and translates
-                // the transformed appearance box to align with the edges
-                // of the annotation’s rectangle (specified by the Rect entry).
-                // A maps the lower-left corner (the corner with the smallest
-                // x and y coordinates) and the upper-right corner (the
-                // corner with the greatest x and y coordinates) of the
-                // transformed appearance box to the corresponding corners
-                // of the annotation’s rectangle.
-                let affine = Affine::new([
-                    annot_rect.width() / transformed_rect.width(),
-                    0.0,
-                    0.0,
-                    annot_rect.height() / transformed_rect.height(),
-                    annot_rect.x0 - transformed_rect.x0,
-                    annot_rect.y0 - transformed_rect.y0,
-                ]);
-
-                // 3) Matrix shall be concatenated with A to form a matrix
-                // AA that maps from the appearance’s coordinate system to
-                // the annotation’s rectangle in default user space.
-                context.save_state();
-                context.pre_concat_affine(affine);
-                context.push_root_transform();
-
-                apx.draw(resources, context, device);
-                context.pop_root_transform();
-                context.restore_state(device);
+                    appearance.form.draw(resources, context, device);
+                    context.pop_root_transform();
+                    context.restore_state(device);
+                }
+                Ok(None) => {}
+                Err(error) => (context.settings.warning_sink)(
+                    InterpreterWarning::AnnotationAppearanceFailure(error),
+                ),
             }
         }
-    }
-}
-
-fn appearance_stream<'a>(annot: &Dict<'a>) -> Option<Stream<'a>> {
-    match annot.get::<Dict<'_>>(AP)?.get::<Object<'_>>(N)? {
-        Object::Stream(stream) => Some(stream),
-        Object::Dict(states) => annot
-            .get::<Name<'_>>(AS)
-            .and_then(|state| states.get::<Stream<'_>>(state))
-            .or_else(|| states.get::<Stream<'_>>(b"Off")),
-        _ => None,
     }
 }
 

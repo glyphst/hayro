@@ -31,6 +31,7 @@ This crate has one optional feature:
 #[macro_use]
 mod log;
 
+mod annotation;
 mod cache;
 mod context;
 mod convert;
@@ -49,6 +50,7 @@ pub mod pattern;
 pub mod shading;
 pub mod util;
 
+pub use annotation::{AnnotationAppearanceError, select_annotation_normal_appearance};
 pub use cache::CacheKey;
 pub use context::*;
 pub use device::*;

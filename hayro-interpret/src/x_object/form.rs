@@ -328,11 +328,12 @@ mod tests {
     use super::*;
     use crate::font::GlyphRun;
     use crate::{
-        BlendMode, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterSettings, SoftMask,
-        interpret_page,
+        BlendMode, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterSettings,
+        InterpreterWarning, SoftMask, interpret_page,
     };
     use hayro_syntax::Pdf;
     use kurbo::BezPath;
+    use std::sync::{Arc, Mutex};
 
     fn form_pdf() -> Vec<u8> {
         form_pdf_with_group("")
@@ -355,6 +356,26 @@ mod tests {
             String::from_utf8_lossy(form_stream),
         )
         .into_bytes()
+    }
+
+    fn annotation_pdf(annots: &str, objects: &str) -> Vec<u8> {
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 600 700]/Resources<<>>/Annots[{annots}]/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length 0>> stream\n\nendstream endobj\n\
+             {objects}\n\
+             trailer <</Root 1 0 R>>\n%%EOF"
+        )
+        .into_bytes()
+    }
+
+    fn annotation_form(object: u32, bbox: &str, matrix: &str, contents: &str) -> String {
+        format!(
+            "{object} 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox{bbox}/Matrix{matrix}/Resources<<>>/Length {}>> stream\n{contents}\nendstream endobj",
+            contents.len()
+        )
     }
 
     #[derive(Default)]
@@ -400,14 +421,22 @@ mod tests {
     }
 
     fn interpret_bytes(bytes: Vec<u8>, retained: bool) -> RecordingDevice {
+        interpret_bytes_with_settings(bytes, retained, InterpreterSettings::default())
+    }
+
+    fn interpret_bytes_with_settings(
+        bytes: Vec<u8>,
+        retained: bool,
+        settings: InterpreterSettings,
+    ) -> RecordingDevice {
         let pdf = Pdf::new(bytes).expect("parse form fixture");
         let cache = InterpreterCache::new();
         let mut context = Context::new(
             Affine::IDENTITY,
-            Rect::new(0.0, 0.0, 100.0, 100.0),
+            Rect::new(0.0, 0.0, 600.0, 700.0),
             &cache,
             pdf.xref(),
-            InterpreterSettings::default(),
+            settings,
         );
         let mut device = RecordingDevice {
             retained,
@@ -472,5 +501,80 @@ mod tests {
             device.path_transforms[1].as_coeffs(),
             [3.0, 0.0, 0.0, 3.0, 39.0, 52.0]
         );
+    }
+
+    #[test]
+    fn annotation_appearance_maps_a_transformed_nonzero_bbox_exactly() {
+        let form = annotation_form(6, "[10 20 50 80]", "[2 0 0 3 7 11]", "10 20 40 60 re f");
+        let bytes = annotation_pdf(
+            "5 0 R",
+            &format!(
+                "5 0 obj <</Type/Annot/Subtype/Square/Rect[100 200 300 500]/AP<</N 6 0 R>>>> endobj\n{form}"
+            ),
+        );
+        let device = interpret_bytes(bytes, true);
+
+        assert_eq!(device.instance_transforms.len(), 1);
+        let actual = device.instance_transforms[0].as_coeffs();
+        let expected = [2.5, 0.0, 0.0, 5.0 / 3.0, 32.5, 245.0 / 3.0];
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-9, "{actual} != {expected}");
+        }
+        assert_eq!(
+            device.path_transforms[0].as_coeffs(),
+            [2.0, 0.0, 0.0, 3.0, 7.0, 11.0]
+        );
+    }
+
+    #[test]
+    fn annotation_appearance_state_requires_and_uses_as_exactly() {
+        let on = annotation_form(6, "[0 0 10 10]", "[1 0 0 1 0 0]", "0 0 10 10 re f");
+        let off = annotation_form(7, "[0 0 10 10]", "[1 0 0 1 50 0]", "0 0 10 10 re f");
+        let objects = format!(
+            "5 0 obj <</Type/Annot/Subtype/Widget/Rect[10 20 30 40]/AP<</N<</On 6 0 R/Off 7 0 R>>>>/AS/On>> endobj\n{on}\n{off}"
+        );
+        let device = interpret_bytes(annotation_pdf("5 0 R", &objects), true);
+        assert_eq!(device.path_transforms.len(), 1);
+        assert_eq!(
+            device.path_transforms[0].as_coeffs(),
+            Affine::IDENTITY.as_coeffs()
+        );
+
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let warning_target = warnings.clone();
+        let settings = InterpreterSettings {
+            warning_sink: Arc::new(move |warning| {
+                warning_target.lock().unwrap().push(warning);
+            }),
+            ..InterpreterSettings::default()
+        };
+        let objects_without_as = format!(
+            "5 0 obj <</Type/Annot/Subtype/Widget/Rect[10 20 30 40]/AP<</N<</On 6 0 R/Off 7 0 R>>>>>> endobj\n{on}\n{off}"
+        );
+        let device = interpret_bytes_with_settings(
+            annotation_pdf("5 0 R", &objects_without_as),
+            true,
+            settings,
+        );
+        assert!(device.form_keys.is_empty());
+        assert!(matches!(
+            warnings.lock().unwrap().as_slice(),
+            [InterpreterWarning::AnnotationAppearanceFailure(
+                crate::AnnotationAppearanceError::MissingAppearanceState
+            )]
+        ));
+    }
+
+    #[test]
+    fn invisible_hidden_and_no_view_annotations_are_not_drawn() {
+        let form = annotation_form(8, "[0 0 10 10]", "[1 0 0 1 0 0]", "0 0 10 10 re f");
+        let objects = format!(
+            "5 0 obj <</Type/Annot/Subtype/Square/Rect[0 0 10 10]/F 1/AP<</N 8 0 R>>>> endobj\n\
+             6 0 obj <</Type/Annot/Subtype/Square/Rect[20 0 30 10]/F 2/AP<</N 8 0 R>>>> endobj\n\
+             7 0 obj <</Type/Annot/Subtype/Square/Rect[40 0 50 10]/F 32/AP<</N 8 0 R>>>> endobj\n\
+             9 0 obj <</Type/Annot/Subtype/Square/Rect[60 0 70 10]/AP<</N 8 0 R>>>> endobj\n{form}"
+        );
+        let device = interpret_bytes(annotation_pdf("5 0 R 6 0 R 7 0 R 9 0 R", &objects), true);
+        assert_eq!(device.form_keys.len(), 1);
     }
 }

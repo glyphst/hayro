@@ -678,6 +678,18 @@ mod tests {
         let properties = &filtered.marked_properties[0];
         assert!(properties.metadata.is_none());
         assert_eq!(properties.unavailable_keys, [b"Metadata".to_vec()]);
+
+        let limited = interpret_bytes_with_settings(
+            marked_content_metadata_pdf(),
+            false,
+            InterpreterSettings {
+                max_marked_content_metadata_bytes: 3,
+                ..InterpreterSettings::default()
+            },
+        );
+        let properties = &limited.marked_properties[0];
+        assert!(properties.metadata.is_none());
+        assert_eq!(properties.unavailable_keys, [b"Metadata".to_vec()]);
     }
 
     #[test]

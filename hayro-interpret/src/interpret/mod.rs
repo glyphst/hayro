@@ -35,7 +35,7 @@ pub(crate) mod text;
 
 pub use state::ActiveTransferFunction;
 
-fn marked_content_properties(props: &Dict<'_>) -> MarkedContentProperties {
+fn marked_content_properties(props: &Dict<'_>, max_metadata_bytes: u64) -> MarkedContentProperties {
     let mcid = props.get::<i32>(MCID);
     let actual_text = props
         .get::<PdfString<'_>>(ACTUAL_TEXT)
@@ -71,9 +71,13 @@ fn marked_content_properties(props: &Dict<'_>) -> MarkedContentProperties {
         {
             return None;
         }
+        let data = stream.raw_data();
+        if data.len() as u64 > max_metadata_bytes {
+            return None;
+        }
         Some(MarkedContentMetadata {
             subtype: subtype.as_ref().to_vec(),
-            data: stream.raw_data().into_owned(),
+            data: data.into_owned(),
         })
     });
     let mut unavailable_keys = Vec::new();
@@ -184,6 +188,12 @@ pub struct InterpreterSettings {
     /// raster devices. Retained-scene devices should enable this and evaluate
     /// the emitted expressions themselves.
     pub preserve_optional_content: bool,
+    /// Maximum unfiltered metadata bytes copied from one marked-content
+    /// property list.
+    ///
+    /// Values above this limit remain present in `unavailable_keys`, allowing
+    /// retained-scene devices to fail closed before allocating the copy.
+    pub max_marked_content_metadata_bytes: u64,
 }
 
 impl Default for InterpreterSettings {
@@ -203,6 +213,7 @@ impl Default for InterpreterSettings {
             warning_sink: Arc::new(|_| {}),
             render_annotations: true,
             preserve_optional_content: false,
+            max_marked_content_metadata_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -542,7 +553,12 @@ pub fn interpret<'a>(
 
                 let marked_properties = resolved_properties
                     .as_ref()
-                    .map(marked_content_properties)
+                    .map(|properties| {
+                        marked_content_properties(
+                            properties,
+                            context.settings.max_marked_content_metadata_bytes,
+                        )
+                    })
                     .unwrap_or_default();
 
                 device.begin_marked_content_with_properties(bdc.0, marked_properties);

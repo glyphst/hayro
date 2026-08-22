@@ -2,7 +2,8 @@ use crate::font::blob::{CffFontBlob, OpenTypeFontBlob, Type1FontBlob};
 use crate::font::generated::glyph_names;
 use crate::font::standard_font::select_standard_font;
 use crate::font::{
-    FallbackFontQuery, FontFlags, FontQuery, read_to_unicode, stretch_glyph, strip_subset_prefix,
+    FallbackFontQuery, FontFlags, FontQuery, read_to_unicode, resolve_font_text_metrics,
+    stretch_glyph, strip_subset_prefix,
 };
 use crate::{CMapResolverFn, CacheKey, FontResolverFn};
 use hayro_cmap::{BfString, CMap, CharacterCollection, CidFamily, WritingMode};
@@ -36,6 +37,8 @@ pub(crate) struct Type0Font {
     postscript_name: Option<String>,
     /// Font flags from the font descriptor.
     font_flags: Option<FontFlags>,
+    /// Validated nominal ascent and descent in 1,000-unit glyph space.
+    text_metrics: Option<(f32, f32)>,
     /// Whether this font is using a fallback (non-embedded) font.
     fallback: bool,
     /// Whether the `to_unicode` map is a UCS2 `CMap` (CID-indexed) rather than
@@ -94,6 +97,7 @@ impl Type0Font {
                 (blob, true, is_standard)
             }
         };
+        let text_metrics = resolve_font_text_metrics(&font_descriptor, font_type.text_metrics());
 
         let default_width = descendant_font.get::<f32>(DW).unwrap_or(1000.0);
         let dw2 = descendant_font
@@ -151,6 +155,7 @@ impl Type0Font {
             cid_to_gid_map,
             postscript_name,
             font_flags,
+            text_metrics,
             fallback,
             to_unicode_is_cid_indexed,
         })
@@ -346,10 +351,7 @@ impl Type0Font {
     }
 
     pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
-        match &self.font_type {
-            FontType::OpenType(font) => font.text_metrics(),
-            FontType::Cff(_) | FontType::Type1(_) => None,
-        }
+        self.text_metrics
     }
 
     pub(crate) fn code_advance(&self, code: u32) -> Vec2 {
@@ -460,6 +462,14 @@ impl FontType {
         };
 
         Some(parsed)
+    }
+
+    fn text_metrics(&self) -> Option<(f32, f32)> {
+        match self {
+            Self::OpenType(font) => font.text_metrics(),
+            Self::Cff(font) => font.text_metrics(),
+            Self::Type1(font) => font.text_metrics(),
+        }
     }
 }
 

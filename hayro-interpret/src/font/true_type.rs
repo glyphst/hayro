@@ -3,7 +3,7 @@ use crate::font::generated::{glyph_names, mac_os_roman, mac_roman, standard};
 use crate::font::standard_font::StandardKind;
 use crate::font::{
     Encoding, FallbackFontQuery, FontFlags, glyph_name_to_unicode, read_to_unicode,
-    strip_subset_prefix, unicode_from_name,
+    resolve_font_text_metrics, strip_subset_prefix, unicode_from_name,
 };
 use crate::util::OptionLog;
 use crate::{CMapResolverFn, CacheKey, FontResolverFn};
@@ -29,6 +29,7 @@ pub(crate) struct TrueTypeFont {
     cache_key: u128,
     kind: Kind,
     to_unicode: Option<CMap>,
+    text_metrics: Option<(f32, f32)>,
 }
 
 #[derive(Debug)]
@@ -45,12 +46,16 @@ impl TrueTypeFont {
     ) -> Option<Self> {
         let cache_key = dict.cache_key();
         let to_unicode = read_to_unicode(dict, cmap_resolver);
+        let descriptor = dict.get::<Dict<'_>>(FONT_DESC).unwrap_or_default();
 
         if let Some(embedded) = EmbeddedKind::new(dict) {
+            let text_metrics =
+                resolve_font_text_metrics(&descriptor, embedded.base_font.text_metrics());
             return Some(Self {
                 cache_key,
                 kind: Kind::Embedded(embedded),
                 to_unicode,
+                text_metrics,
             });
         }
 
@@ -66,23 +71,24 @@ impl TrueTypeFont {
                 standard_font.as_str()
             );
 
+            let standard =
+                StandardKind::new_with_standard(dict, standard_font, true, font_resolver)?;
+            let text_metrics = resolve_font_text_metrics(&descriptor, standard.text_metrics());
             Some(Self {
                 cache_key,
-                kind: Kind::Standard(StandardKind::new_with_standard(
-                    dict,
-                    standard_font,
-                    true,
-                    font_resolver,
-                )?),
+                kind: Kind::Standard(standard),
                 to_unicode: to_unicode.clone(),
+                text_metrics,
             })
         };
 
         if let Some(standard) = StandardKind::new(dict, font_resolver) {
+            let text_metrics = resolve_font_text_metrics(&descriptor, standard.text_metrics());
             Some(Self {
                 cache_key,
                 kind: Kind::Standard(standard),
                 to_unicode,
+                text_metrics,
             })
         } else {
             fallback()
@@ -169,10 +175,7 @@ impl TrueTypeFont {
     }
 
     pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
-        match &self.kind {
-            Kind::Embedded(font) => font.base_font.text_metrics(),
-            Kind::Standard(font) => font.text_metrics(),
-        }
+        self.text_metrics
     }
 
     pub(crate) fn map_code(&self, code: u8) -> GlyphId {

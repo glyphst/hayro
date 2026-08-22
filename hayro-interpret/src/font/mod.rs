@@ -16,7 +16,7 @@ use bitflags::bitflags;
 use hayro_syntax::object::Name;
 use hayro_syntax::object::dict::keys::SUBTYPE;
 use hayro_syntax::object::dict::keys::*;
-use hayro_syntax::object::{Dict, Stream};
+use hayro_syntax::object::{Dict, Rect, Stream};
 use hayro_syntax::page::Resources;
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, BezPath, Vec2};
@@ -39,6 +39,98 @@ mod type1;
 pub(crate) mod type3;
 
 pub(crate) const UNITS_PER_EM: f32 = 1000.0;
+
+/// Resolve nominal vertical text metrics in PDF's 1,000-unit glyph space.
+///
+/// Explicit descriptor ascent/descent values describe the source font and take
+/// precedence. Metrics from the selected font program are the next-best proven
+/// source, while the descriptor font box is a conservative final source. No
+/// source is clamped or synthesized when its values are invalid.
+pub(crate) fn resolve_font_text_metrics(
+    descriptor: &Dict<'_>,
+    font_metrics: Option<(f32, f32)>,
+) -> Option<(f32, f32)> {
+    descriptor
+        .get::<f32>(ASCENT)
+        .zip(descriptor.get::<f32>(DESCENT))
+        .and_then(|(ascent, descent)| validated_font_text_metrics(ascent, descent))
+        .or_else(|| {
+            font_metrics.and_then(|(ascent, descent)| validated_font_text_metrics(ascent, descent))
+        })
+        .or_else(|| {
+            let bounds = descriptor.get::<Rect>(FONT_BBOX)?;
+            validated_font_text_metrics(bounds.y1 as f32, bounds.y0 as f32)
+        })
+}
+
+fn validated_font_text_metrics(ascent: f32, descent: f32) -> Option<(f32, f32)> {
+    (ascent.is_finite()
+        && descent.is_finite()
+        && ascent > 0.0
+        && descent <= 0.0
+        && ascent > descent)
+        .then_some((ascent, descent))
+}
+
+#[cfg(test)]
+mod text_metrics_tests {
+    use super::{resolve_font_text_metrics, validated_font_text_metrics};
+    use hayro_syntax::object::{Dict, FromBytes};
+
+    #[test]
+    fn descriptor_ascent_and_descent_take_precedence() {
+        let descriptor =
+            Dict::from_bytes(b"<< /Ascent 894 /Descent -246 /FontBBox [0 -10 711 698] >>").unwrap();
+
+        assert_eq!(
+            resolve_font_text_metrics(&descriptor, Some((700.0, -200.0))),
+            Some((894.0, -246.0))
+        );
+    }
+
+    #[test]
+    fn font_program_metrics_precede_the_descriptor_box() {
+        let descriptor = Dict::from_bytes(b"<< /FontBBox [0 -10 711 698] >>").unwrap();
+
+        assert_eq!(
+            resolve_font_text_metrics(&descriptor, Some((700.0, -200.0))),
+            Some((700.0, -200.0))
+        );
+    }
+
+    #[test]
+    fn descriptor_box_is_a_conservative_final_source() {
+        let descriptor = Dict::from_bytes(b"<< /FontBBox [0 -10 711 698] >>").unwrap();
+
+        assert_eq!(
+            resolve_font_text_metrics(&descriptor, None),
+            Some((698.0, -10.0))
+        );
+    }
+
+    #[test]
+    fn invalid_sources_are_rejected_without_synthesis() {
+        let descriptor =
+            Dict::from_bytes(b"<< /Ascent -20 /Descent 40 /FontBBox [0 10 711 10] >>").unwrap();
+
+        assert_eq!(resolve_font_text_metrics(&descriptor, None), None);
+        assert_eq!(validated_font_text_metrics(f32::INFINITY, -200.0), None);
+        assert_eq!(validated_font_text_metrics(700.0, f32::NAN), None);
+        assert_eq!(validated_font_text_metrics(700.0, 20.0), None);
+        assert_eq!(validated_font_text_metrics(0.0, -200.0), None);
+    }
+
+    #[test]
+    fn invalid_descriptor_pair_falls_through_to_font_metrics() {
+        let descriptor =
+            Dict::from_bytes(b"<< /Ascent 0 /Descent 0 /FontBBox [0 -10 711 698] >>").unwrap();
+
+        assert_eq!(
+            resolve_font_text_metrics(&descriptor, Some((700.0, -200.0))),
+            Some((700.0, -200.0))
+        );
+    }
+}
 
 pub(crate) fn stretch_glyph(path: BezPath, expected_width: f32, actual_width: f32) -> BezPath {
     if actual_width != 0.0 && actual_width != expected_width {

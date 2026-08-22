@@ -127,7 +127,8 @@ impl Type1Font {
     pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
         match &self.1 {
             Kind::Standard(font) => font.text_metrics(),
-            Kind::Cff(_) | Kind::Type1(_) => None,
+            Kind::Cff(font) => font.font.text_metrics(),
+            Kind::Type1(font) => font.font.text_metrics(),
         }
     }
 

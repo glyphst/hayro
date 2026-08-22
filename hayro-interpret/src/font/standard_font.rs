@@ -335,7 +335,7 @@ impl StandardFontBlob {
 
     pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
         match self {
-            Self::Cff(_) => None,
+            Self::Cff(blob) => blob.text_metrics(),
             Self::Otf(blob, _) => blob.text_metrics(),
         }
     }

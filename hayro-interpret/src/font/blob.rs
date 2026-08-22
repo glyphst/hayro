@@ -46,6 +46,13 @@ impl Type1FontBlob {
 
         path.take()
     }
+
+    pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
+        let bounds = self.table().bbox();
+        let ascent = bounds.y_max.to_f32();
+        let descent = bounds.y_min.to_f32();
+        (ascent.is_finite() && descent.is_finite() && ascent > descent).then_some((ascent, descent))
+    }
 }
 
 /// A font blob for CFF-based fonts.
@@ -93,6 +100,13 @@ impl CffFontBlob {
 
     pub(crate) fn font(&self) -> &CffFontRef<'_> {
         &self.0.as_ref().get().font
+    }
+
+    pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
+        let bounds = self.font().metadata()?.bbox();
+        let ascent = bounds.y_max.to_f32();
+        let descent = bounds.y_min.to_f32();
+        (ascent.is_finite() && descent.is_finite() && ascent > descent).then_some((ascent, descent))
     }
 
     fn charset(&self) -> Option<&Charset<'_>> {

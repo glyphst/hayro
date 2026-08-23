@@ -49,7 +49,12 @@ impl ShadingFunction {
         }
     }
 
-    pub(crate) fn stitching_bounds(&self) -> StitchingBounds {
+    /// Input-domain boundaries of every nested type 3 stitching function.
+    ///
+    /// Retained renderers use these exact breakpoints when building compact
+    /// color tables so a discontinuous function is not accidentally smoothed
+    /// across a stitching boundary.
+    pub fn stitching_bounds(&self) -> Vec<f32> {
         let mut bounds = StitchingBounds::new();
 
         match self {
@@ -63,7 +68,7 @@ impl ShadingFunction {
 
         bounds.sort_by(f32::total_cmp);
         bounds.dedup_by(|a, b| (*a - *b).abs() <= f32::EPSILON);
-        bounds
+        bounds.into_vec()
     }
 }
 

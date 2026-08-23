@@ -921,10 +921,46 @@ where
     let mut prev_patch_colors: Option<[ColorComponents; 4]> = None;
     let mut patches = vec![];
 
-    while let Some(raw_flag) = reader.read(bpf) {
+    loop {
+        let remaining_bits = reader
+            .data
+            .len()
+            .saturating_mul(8)
+            .saturating_sub(reader.cur_pos());
+        if remaining_bits < usize::from(bpf) {
+            break;
+        }
+        let raw_flag = reader.peak(bpf)?;
         // PDF 32000 specifies that only the least-significant two bits of a
         // 4- or 8-bit patch edge flag are significant.
         let flag = raw_flag & 0b11;
+        let new_points = if flag == 0 {
+            control_points_count
+        } else {
+            control_points_count.saturating_sub(4)
+        };
+        let new_colors = if flag == 0 { 4_usize } else { 2 };
+        let color_components = if has_function { 1 } else { decode.len() / 2 };
+        let record_bits = usize::from(bpf)
+            .saturating_add(
+                new_points
+                    .saturating_mul(2)
+                    .saturating_mul(usize::from(bp_coord)),
+            )
+            .saturating_add(
+                new_colors
+                    .saturating_mul(color_components)
+                    .saturating_mul(usize::from(bp_comp)),
+            );
+        if remaining_bits < record_bits {
+            // The stream itself is byte-sized, while a packed patch record
+            // need not be. Up to seven final padding bits carry no semantics.
+            if remaining_bits < 8 {
+                break;
+            }
+            return None;
+        }
+        let flag = reader.read(bpf)? & 0b11;
         let mut control_points = vec![Point::ZERO; 16]; // Always allocate 16, use subset as needed.
         let mut colors = [smallvec![], smallvec![], smallvec![], smallvec![]];
 

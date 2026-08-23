@@ -928,7 +928,7 @@ mod tests {
     fn link_borders_preserve_annotation_order_and_typed_visual_parameters() {
         let appearance = annotation_form(11, "[0 0 10 10]", "[1 0 0 1 0 0]", "0 0 10 10 re f");
         let objects = format!(
-            "5 0 obj <</Type/Annot/Subtype/Link/Rect[10 20 110 70]/Border[8 6 2[3 2]]/C[0.2 0.4 0.6]/CA 0.5>> endobj\n\
+            "5 0 obj <</Type/Annot/Subtype/Link/Rect[10 20 110 70]/Border[8 6 2[3 2]]/C[0.2 0.4 0.6]>> endobj\n\
              6 0 obj <</Type/Annot/Subtype/Link/Rect[120 20 220 70]/Border[0 0 9]/BS<</Type/Border/W 3/S/U/D[4]>>/C[0.1]>> endobj\n\
              7 0 obj <</Type/Annot/Subtype/Link/Rect[230 20 330 70]/BS<</W 0/S/B>>/C[1 0 0]>> endobj\n\
              8 0 obj <</Type/Annot/Subtype/Link/Rect[340 20 440 70]/BS<</W 4/S/I>>/C[]>> endobj\n\
@@ -959,7 +959,6 @@ mod tests {
                         dash_array: vec![3.0, 2.0],
                     },
                     color: LinkBorderColor::Rgb([0.2, 0.4, 0.6]),
-                    opacity: 0.5,
                 },
                 Affine::IDENTITY,
             )
@@ -973,7 +972,6 @@ mod tests {
                 width: 3.0,
                 style: LinkBorderStyle::Underline,
                 color: LinkBorderColor::Gray([0.1]),
-                opacity: 1.0,
             }
         );
         assert_eq!(
@@ -985,7 +983,6 @@ mod tests {
                 width: 5.0,
                 style: LinkBorderStyle::Beveled,
                 color: LinkBorderColor::Cmyk([0.1, 0.2, 0.3, 0.4]),
-                opacity: 1.0,
             }
         );
     }
@@ -1009,6 +1006,30 @@ mod tests {
             warnings.lock().unwrap().as_slice(),
             [InterpreterWarning::LinkBorderFailure(
                 crate::LinkBorderError::InvalidDashArray
+            )]
+        ));
+    }
+
+    #[test]
+    fn link_border_does_not_assign_markup_opacity_semantics() {
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let warning_target = warnings.clone();
+        let settings = InterpreterSettings {
+            warning_sink: Arc::new(move |warning| {
+                warning_target.lock().unwrap().push(warning);
+            }),
+            ..InterpreterSettings::default()
+        };
+        let objects =
+            "5 0 obj <</Type/Annot/Subtype/Link/Rect[10 20 110 70]/Border[0 0 1]/CA 0.5>> endobj";
+        let device =
+            interpret_bytes_with_settings(annotation_pdf("5 0 R", objects), true, settings);
+
+        assert!(device.link_borders.is_empty());
+        assert!(matches!(
+            warnings.lock().unwrap().as_slice(),
+            [InterpreterWarning::LinkBorderFailure(
+                crate::LinkBorderError::UnsupportedOpacity
             )]
         ));
     }

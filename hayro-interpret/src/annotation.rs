@@ -67,9 +67,9 @@ pub enum LinkBorderError {
     DashArrayLimit,
     /// The annotation `/C` entry is malformed or has invalid components.
     InvalidColor,
-    /// The annotation `/CA` entry is malformed or outside the inclusive
-    /// opacity range from 0 to 1.
-    InvalidOpacity,
+    /// The annotation contains `/CA`, whose opacity semantics are defined for
+    /// markup annotations rather than Link annotations.
+    UnsupportedOpacity,
 }
 
 /// Geometry used to synthesize a Link annotation border in default user
@@ -137,23 +137,23 @@ impl LinkBorderColor {
     /// Create Hayro's typed color while retaining the original PDF device
     /// color family and components.
     #[must_use]
-    pub fn to_color(self, opacity: f32) -> Option<Color> {
+    pub fn to_color(self) -> Option<Color> {
         match self {
             Self::Transparent => None,
             Self::Gray(components) => Some(Color::new(
                 ColorSpace::device_gray(),
                 smallvec![components[0]],
-                opacity,
+                1.0,
             )),
             Self::Rgb(components) => Some(Color::new(
                 ColorSpace::device_rgb(),
                 smallvec![components[0], components[1], components[2]],
-                opacity,
+                1.0,
             )),
             Self::Cmyk(components) => Some(Color::new(
                 ColorSpace::device_cmyk(),
                 smallvec![components[0], components[1], components[2], components[3]],
-                opacity,
+                1.0,
             )),
         }
     }
@@ -170,17 +170,13 @@ pub struct LinkBorder {
     pub style: LinkBorderStyle,
     /// Original direct device color. Transparent means no paint.
     pub color: LinkBorderColor,
-    /// Constant annotation opacity.
-    pub opacity: f32,
 }
 
 impl LinkBorder {
     /// Whether this border contributes any page pixels.
     #[must_use]
     pub fn is_visible(&self) -> bool {
-        self.width > 0.0
-            && self.opacity > 0.0
-            && !matches!(self.color, LinkBorderColor::Transparent)
+        self.width > 0.0 && !matches!(self.color, LinkBorderColor::Transparent)
     }
 }
 
@@ -208,8 +204,14 @@ pub fn resolve_link_border(annotation: &Dict<'_>) -> Result<Option<LinkBorder>, 
     if !finite_rect(rect) || rect.width() <= 0.0 || rect.height() <= 0.0 {
         return Err(LinkBorderError::InvalidRectangle);
     }
+    // `/CA` is an additional entry specific to markup annotations in PDF
+    // 32000-1. Link annotations are not markup annotations, so assigning it an
+    // opacity meaning here would be an undocumented approximation. Keep the
+    // adapter conservative until an extension specification can be identified.
+    if annotation.contains_key(CA) {
+        return Err(LinkBorderError::UnsupportedOpacity);
+    }
     let color = annotation_color(annotation)?;
-    let opacity = annotation_opacity(annotation)?;
 
     let (geometry, width, style) = if annotation.contains_key(BS) {
         let style_dict = annotation
@@ -281,7 +283,6 @@ pub fn resolve_link_border(annotation: &Dict<'_>) -> Result<Option<LinkBorder>, 
         width,
         style,
         color,
-        opacity,
     }))
 }
 
@@ -393,14 +394,6 @@ fn annotation_color(annotation: &Dict<'_>) -> Result<LinkBorderColor, LinkBorder
         [cyan, magenta, yellow, key] => LinkBorderColor::Cmyk([*cyan, *magenta, *yellow, *key]),
         _ => unreachable!(),
     })
-}
-
-fn annotation_opacity(annotation: &Dict<'_>) -> Result<f32, LinkBorderError> {
-    match annotation.get::<Number>(CA) {
-        Some(opacity) => normalized_f32(opacity.as_f64()).ok_or(LinkBorderError::InvalidOpacity),
-        None if annotation.contains_key(CA) => Err(LinkBorderError::InvalidOpacity),
-        None => Ok(1.0),
-    }
 }
 
 fn optional_nonnegative_f32(dict: &Dict<'_>, key: &[u8], default: f32) -> Option<f32> {

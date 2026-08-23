@@ -1,4 +1,7 @@
-use super::decode::{DecodedImage, DecodedMask, decode_image, decode_mask};
+use super::decode::{
+    DecodedCmykImage, DecodedImage, DecodedMask, decode_device_cmyk_image, decode_image,
+    decode_mask,
+};
 use super::xobject_oc;
 use crate::WarningSinkFn;
 use crate::cache::Cache;
@@ -215,6 +218,17 @@ impl<'a> ImageXObject<'a> {
         }
 
         decode_image(self, target_dimension)
+    }
+
+    pub(crate) fn decoded_device_cmyk_image(
+        &self,
+        target_dimension: Option<(u32, u32)>,
+    ) -> Option<DecodedCmykImage> {
+        if self.kind != ImageKind::Image {
+            return None;
+        }
+
+        decode_device_cmyk_image(self, target_dimension)
     }
 
     pub(crate) fn width(&self) -> u32 {

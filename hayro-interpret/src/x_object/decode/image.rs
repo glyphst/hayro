@@ -1,9 +1,9 @@
 use super::mask::decode_mask;
 use super::{DecodeContext, decode_context, decode_u8_samples, fix_image_length, unpack_samples};
-use crate::color::{ColorComponents, ToLuma, ToRgb};
+use crate::color::{ColorComponents, ColorSpaceKind, ToLuma, ToRgb};
 use crate::interpret::state::ActiveTransferFunction;
 use crate::x_object::image::ImageXObject;
-use crate::{ImageData, LumaData, RgbData};
+use crate::{CmykData, ImageData, LumaData, RgbData};
 use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
 use smallvec::SmallVec;
@@ -13,11 +13,23 @@ pub(crate) struct DecodedImage {
     pub(crate) alpha: Option<LumaData>,
 }
 
+pub(crate) struct DecodedCmykImage {
+    pub(crate) image: CmykData,
+    pub(crate) alpha: Option<LumaData>,
+}
+
 pub(crate) fn decode_image(
     obj: &ImageXObject<'_>,
     target_dimension: Option<(u32, u32)>,
 ) -> Option<DecodedImage> {
     ImageDecoder::new(obj, target_dimension)?.decode()
+}
+
+pub(crate) fn decode_device_cmyk_image(
+    obj: &ImageXObject<'_>,
+    target_dimension: Option<(u32, u32)>,
+) -> Option<DecodedCmykImage> {
+    ImageDecoder::new(obj, target_dimension)?.decode_device_cmyk()
 }
 
 struct ImageDecoder<'a, 'b> {
@@ -49,7 +61,58 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
         Some(DecodedImage { image, alpha })
     }
 
+    fn decode_device_cmyk(mut self) -> Option<DecodedCmykImage> {
+        if self.ctx.color_space.kind() != ColorSpaceKind::DeviceCmyk
+            || self.obj.transfer_function.is_some()
+            || self.has_soft_mask_matte()
+        {
+            return None;
+        }
+        let data = self.decode_components()?;
+        let alpha = self.decode_alpha_without_matte();
+        Some(DecodedCmykImage {
+            image: CmykData {
+                data,
+                width: self.ctx.width,
+                height: self.ctx.height,
+                interpolate: self.obj.interpolate,
+                scale_factors: self.ctx.scale_factors,
+            },
+            alpha,
+        })
+    }
+
     fn decode_image(&mut self) -> Option<ImageData> {
+        let mut components = self.decode_components()?;
+
+        if self
+            .obj
+            .transfer_function
+            .as_ref()
+            .is_none_or(|t| matches!(t, ActiveTransferFunction::Single(_)))
+            && self.ctx.color_space.to_luma(&mut components).is_some()
+        {
+            if let Some(transfer_function) = &self.obj.transfer_function {
+                transfer_function.apply_to(&mut components);
+            }
+
+            return Some(ImageData::Luma(LumaData {
+                data: components,
+                width: self.ctx.width,
+                height: self.ctx.height,
+                interpolate: self.obj.interpolate,
+                scale_factors: self.ctx.scale_factors,
+            }));
+        }
+
+        let mut rgb_data = self.convert_to_rgb(components)?;
+
+        self.apply_transfer_function(&mut rgb_data);
+
+        Some(ImageData::Rgb(rgb_data))
+    }
+
+    fn decode_components(&mut self) -> Option<Vec<u8>> {
         let num_components = self.ctx.color_space.num_components() as usize;
 
         // To prevent a panic when calling the `chunks` method.
@@ -86,7 +149,7 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
             None
         };
 
-        let mut components = if let Some(invert) = direct_invert {
+        let components = if let Some(invert) = direct_invert {
             // This is actually the most common case, where the PDF is embedded
             // in such a way where we don't need to decode. In this case,
             // we can use the raw decoded component values directly.
@@ -130,31 +193,7 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
             components
         };
 
-        if self
-            .obj
-            .transfer_function
-            .as_ref()
-            .is_none_or(|t| matches!(t, ActiveTransferFunction::Single(_)))
-            && self.ctx.color_space.to_luma(&mut components).is_some()
-        {
-            if let Some(transfer_function) = &self.obj.transfer_function {
-                transfer_function.apply_to(&mut components);
-            }
-
-            return Some(ImageData::Luma(LumaData {
-                data: components,
-                width: self.ctx.width,
-                height: self.ctx.height,
-                interpolate: self.obj.interpolate,
-                scale_factors: self.ctx.scale_factors,
-            }));
-        }
-
-        let mut rgb_data = self.convert_to_rgb(components)?;
-
-        self.apply_transfer_function(&mut rgb_data);
-
-        Some(ImageData::Rgb(rgb_data))
+        Some(components)
     }
 
     fn convert_to_rgb(&self, mut decoded: Vec<u8>) -> Option<RgbData> {
@@ -194,6 +233,10 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
             return Some(alpha);
         }
 
+        self.decode_alpha_without_matte()
+    }
+
+    fn decode_alpha_without_matte(&mut self) -> Option<LumaData> {
         // If the alpha channel is invalid, return no alpha so the main image can
         // still be returned (see PDFJS-19611).
         let dict = self.obj.stream.dict();
@@ -229,6 +272,14 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
         } else {
             None
         }
+    }
+
+    fn has_soft_mask_matte(&self) -> bool {
+        self.obj
+            .stream
+            .dict()
+            .get::<Stream<'_>>(SMASK)
+            .is_some_and(|mask| mask.dict().contains_key(MATTE))
     }
 
     fn resolve_matte(&self) -> Option<(LumaData, [u8; 3])> {

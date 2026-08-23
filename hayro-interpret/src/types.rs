@@ -87,6 +87,23 @@ impl RasterImage<'_> {
         }
     }
 
+    /// Perform an operation with decoded direct `DeviceCMYK` samples and alpha.
+    ///
+    /// The callback is invoked only when the image resolves directly to
+    /// `DeviceCMYK` and neither a transfer function nor soft-mask matte requires
+    /// modifying the source components. Decode arrays and encoded-image color
+    /// transforms are applied before the normalized eight-bit samples are
+    /// returned. Other image color spaces continue through [`Self::with_rgba`].
+    pub fn with_device_cmyk(
+        &self,
+        func: impl FnOnce(CmykData, Option<LumaData>),
+        target_dimension: Option<(u32, u32)>,
+    ) {
+        if let Some(decoded) = self.0.decoded_device_cmyk_image(target_dimension) {
+            func(decoded.image, decoded.alpha);
+        }
+    }
+
     /// Return the underlying stream object.
     ///
     /// This allows you to get access to the raw encoded image data, without doing any decoding.
@@ -175,6 +192,24 @@ pub struct RgbData {
     ///
     /// The first number indicates the x scaling factor, the second number the
     /// y scaling factor.
+    pub scale_factors: (f32, f32),
+}
+
+/// A structure holding normalized four-channel direct `DeviceCMYK` data.
+#[derive(Clone)]
+pub struct CmykData {
+    /// Interleaved C, M, Y, and K bytes. Its length is width * height * 4.
+    pub data: Vec<u8>,
+    /// The width.
+    pub width: u32,
+    /// The height.
+    pub height: u32,
+    /// Whether the image should be interpolated.
+    pub interpolate: bool,
+    /// Additional scaling factors to apply to the image.
+    ///
+    /// These have the same correction and reduced-resolution meaning as
+    /// [`RgbData::scale_factors`].
     pub scale_factors: (f32, f32),
 }
 

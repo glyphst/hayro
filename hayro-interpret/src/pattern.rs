@@ -249,6 +249,28 @@ impl<'a> TilingPattern<'a> {
         initial_transform: Affine,
         is_stroke: bool,
     ) -> Option<()> {
+        self.interpret_with_bbox_clip(device, initial_transform, is_stroke, true)
+    }
+
+    /// Interpret one pattern cell without synthesizing the outer `/BBox`
+    /// clip. Consumers may use this only when their retained output proves
+    /// that every possible mark is already contained by the cell box.
+    pub fn interpret_unclipped(
+        &self,
+        device: &mut impl Device<'a>,
+        initial_transform: Affine,
+        is_stroke: bool,
+    ) -> Option<()> {
+        self.interpret_with_bbox_clip(device, initial_transform, is_stroke, false)
+    }
+
+    fn interpret_with_bbox_clip(
+        &self,
+        device: &mut impl Device<'a>,
+        initial_transform: Affine,
+        is_stroke: bool,
+        clip_bbox: bool,
+    ) -> Option<()> {
         let state = State::new(initial_transform);
 
         let mut context = Context::new_with(
@@ -273,7 +295,9 @@ impl<'a> TilingPattern<'a> {
             path: initial_transform * self.bbox.to_path(0.1),
             fill: FillRule::NonZero,
         };
-        device.push_clip_path(&clip_path);
+        if clip_bbox {
+            device.push_clip_path(&clip_path);
+        }
 
         if self.is_color {
             interpret(iter, &resources, &mut context, device);
@@ -288,7 +312,9 @@ impl<'a> TilingPattern<'a> {
             interpret(iter, &resources, &mut context, &mut device);
         }
 
-        device.pop_clip();
+        if clip_bbox {
+            device.pop_clip();
+        }
 
         Some(())
     }

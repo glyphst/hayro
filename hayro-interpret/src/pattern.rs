@@ -15,7 +15,7 @@ use hayro_syntax::content::TypedIter;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::{
-    BBOX, EXT_G_STATE, MATRIX, PAINT_TYPE, RESOURCES, SHADING, X_STEP, Y_STEP,
+    BBOX, EXT_G_STATE, MATRIX, PAINT_TYPE, RESOURCES, SHADING, TILING_TYPE, X_STEP, Y_STEP,
 };
 use hayro_syntax::object::{Object, dict_or_stream};
 use hayro_syntax::page::Resources;
@@ -138,6 +138,7 @@ pub struct TilingPattern<'a> {
     pub matrix: Affine,
     stream: Stream<'a>,
     is_color: bool,
+    tiling_type: u8,
     pub(crate) stroke_paint: Color,
     pub(crate) non_stroking_paint: Color,
     pub(crate) parent_resources: Resources<'a>,
@@ -170,7 +171,15 @@ impl<'a> TilingPattern<'a> {
             return None;
         }
 
-        let is_color = dict.get::<u8>(PAINT_TYPE)? == 1;
+        let paint_type = dict.get::<u8>(PAINT_TYPE)?;
+        if !matches!(paint_type, 1 | 2) {
+            return None;
+        }
+        let is_color = paint_type == 1;
+        let tiling_type = dict.get::<u8>(TILING_TYPE)?;
+        if !matches!(tiling_type, 1..=3) {
+            return None;
+        }
         let matrix = dict
             .get::<[f64; 6]>(MATRIX)
             .map(Affine::new)
@@ -213,12 +222,24 @@ impl<'a> TilingPattern<'a> {
             stream,
             stroke_paint,
             non_stroking_paint,
+            tiling_type,
             settings: ctx.settings.clone(),
             parent_resources: resources.clone(),
             cache: ctx.interpreter_cache.clone(),
             xref: ctx.xref,
             nesting_depth,
         })
+    }
+
+    /// Whether the pattern's content stream supplies its own colors
+    /// (`/PaintType 1`) instead of using the selecting graphics-state paint.
+    pub fn is_colored(&self) -> bool {
+        self.is_color
+    }
+
+    /// Return the validated PDF `/TilingType` value (1, 2, or 3).
+    pub fn tiling_type(&self) -> u8 {
+        self.tiling_type
     }
 
     /// Interpret the contents of the pattern into the given device.

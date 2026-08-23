@@ -921,7 +921,10 @@ where
     let mut prev_patch_colors: Option<[ColorComponents; 4]> = None;
     let mut patches = vec![];
 
-    while let Some(flag) = reader.read(bpf) {
+    while let Some(raw_flag) = reader.read(bpf) {
+        // PDF 32000 specifies that only the least-significant two bits of a
+        // 4- or 8-bit patch edge flag are significant.
+        let flag = raw_flag & 0b11;
         let mut control_points = vec![Point::ZERO; 16]; // Always allocate 16, use subset as needed.
         let mut colors = [smallvec![], smallvec![], smallvec![], smallvec![]];
 

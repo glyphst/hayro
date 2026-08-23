@@ -2,13 +2,53 @@ use crate::RectExt;
 use crate::color::{Color, ColorSpace};
 use crate::x_object::FormXObject;
 use hayro_syntax::object::dict::keys::{
-    AP, AS, BORDER, BS, C, CA, D, F, FORMTYPE, N, RECT, RESOURCES, S, SUBTYPE, TYPE, W,
+    AP, AS, BORDER, BS, C, CA, D, F, FORMTYPE, N, QUADPOINTS, RECT, RESOURCES, S, SUBTYPE, TYPE, W,
 };
 use hayro_syntax::object::{Array, Dict, Name, Number, Object, Rect, Stream};
 use kurbo::{Affine, Shape};
 use smallvec::smallvec;
 
 const MAX_LINK_BORDER_DASH_ITEMS: usize = 65_536;
+const DEFAULT_MAX_LINK_QUADS: usize = 65_536;
+
+/// A reason why a Link annotation's `/QuadPoints` entry could not be retained
+/// exactly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum LinkQuadPointsError {
+    /// `/QuadPoints` is present but is not a resolvable array.
+    InvalidArray,
+    /// The array is empty or its length is not a multiple of eight.
+    InvalidLength,
+    /// A coordinate is not a finite number representable by the retained
+    /// geometry model.
+    InvalidCoordinate,
+    /// A quadrilateral is degenerate, clockwise, or has unsupported edge
+    /// topology.
+    InvalidGeometry,
+    /// The number of quadrilaterals exceeds the caller-provided bound.
+    ItemLimit,
+    /// `/Rect` is missing, malformed, non-finite, or empty.
+    InvalidRectangle,
+}
+
+/// One Link activation quadrilateral in ISO 32000 source-space order.
+///
+/// ISO 32000 defines the first edge as the bottom edge and the four vertices
+/// as counter-clockwise. The resolver also recognizes Adobe's deployed
+/// cross-wise `top-left, top-right, bottom-left, bottom-right` order, but
+/// normalizes it into this representation before returning it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinkQuadrilateral {
+    /// First point of the bottom edge.
+    pub bottom_left: kurbo::Point,
+    /// Second point of the bottom edge.
+    pub bottom_right: kurbo::Point,
+    /// Point connected to `bottom_right` along the right edge.
+    pub top_right: kurbo::Point,
+    /// Point connected to `top_right` and `bottom_left`.
+    pub top_left: kurbo::Point,
+}
 
 /// A reason why a visible annotation's normal appearance could not be
 /// selected or mapped exactly.
@@ -70,11 +110,13 @@ pub enum LinkBorderError {
     /// The annotation contains `/CA`, whose opacity semantics are defined for
     /// markup annotations rather than Link annotations.
     UnsupportedOpacity,
+    /// A `/BS` border depends on malformed or over-limit `/QuadPoints`.
+    InvalidQuadPoints(LinkQuadPointsError),
 }
 
 /// Geometry used to synthesize a Link annotation border in default user
 /// space.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LinkBorderGeometry {
     /// A legacy rounded rectangle from `/Border`.
     RoundedRectangle {
@@ -90,14 +132,23 @@ pub enum LinkBorderGeometry {
         /// Normalized annotation rectangle.
         rect: kurbo::Rect,
     },
+    /// One or more quadrilaterals used by a `/BS` border.
+    Quadrilaterals {
+        /// Normalized annotation rectangle. Every retained point is inside it.
+        rect: kurbo::Rect,
+        /// ISO-order quadrilaterals whose first edge is the bottom edge.
+        quads: Vec<LinkQuadrilateral>,
+    },
 }
 
 impl LinkBorderGeometry {
     /// Return the normalized source-space annotation rectangle.
     #[must_use]
-    pub const fn rect(self) -> kurbo::Rect {
+    pub const fn rect(&self) -> kurbo::Rect {
         match self {
-            Self::RoundedRectangle { rect, .. } | Self::Rectangle { rect } => rect,
+            Self::RoundedRectangle { rect, .. }
+            | Self::Rectangle { rect }
+            | Self::Quadrilaterals { rect, .. } => *rect,
         }
     }
 }
@@ -188,6 +239,15 @@ impl LinkBorder {
 /// a retained device can apply the page root transform without losing source
 /// units used by widths and dash patterns.
 pub fn resolve_link_border(annotation: &Dict<'_>) -> Result<Option<LinkBorder>, LinkBorderError> {
+    resolve_link_border_with_limit(annotation, DEFAULT_MAX_LINK_QUADS)
+}
+
+/// Resolve a Link border while bounding the number of retained activation
+/// quadrilaterals.
+pub fn resolve_link_border_with_limit(
+    annotation: &Dict<'_>,
+    max_quads: usize,
+) -> Result<Option<LinkBorder>, LinkBorderError> {
     if annotation
         .get::<Name<'_>>(SUBTYPE)
         .as_ref()
@@ -260,7 +320,13 @@ pub fn resolve_link_border(annotation: &Dict<'_>) -> Result<Option<LinkBorder>, 
                 LinkBorderStyle::Solid
             }
         };
-        (LinkBorderGeometry::Rectangle { rect }, width, style)
+        let geometry = match resolve_link_quad_points(annotation, max_quads)
+            .map_err(LinkBorderError::InvalidQuadPoints)?
+        {
+            Some(quads) => LinkBorderGeometry::Quadrilaterals { rect, quads },
+            None => LinkBorderGeometry::Rectangle { rect },
+        };
+        (geometry, width, style)
     } else {
         let border = legacy_border(annotation)?;
         let style = match border.dash_array {
@@ -284,6 +350,139 @@ pub fn resolve_link_border(annotation: &Dict<'_>) -> Result<Option<LinkBorder>, 
         style,
         color,
     }))
+}
+
+/// Resolve a Link annotation's activation quadrilaterals.
+///
+/// An absent entry, or an entry containing any coordinate outside `/Rect`,
+/// returns `None`, which instructs callers to use `/Rect` as required by ISO
+/// 32000. Malformed and over-limit entries return an error so callers never
+/// silently substitute a different hit region.
+pub fn resolve_link_quad_points(
+    annotation: &Dict<'_>,
+    max_quads: usize,
+) -> Result<Option<Vec<LinkQuadrilateral>>, LinkQuadPointsError> {
+    if !annotation.contains_key(QUADPOINTS) {
+        return Ok(None);
+    }
+    let rect = annotation
+        .get::<Rect>(RECT)
+        .ok_or(LinkQuadPointsError::InvalidRectangle)?
+        .to_kurbo();
+    if !finite_rect(rect) || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return Err(LinkQuadPointsError::InvalidRectangle);
+    }
+    let array = annotation
+        .get::<Array<'_>>(QUADPOINTS)
+        .ok_or(LinkQuadPointsError::InvalidArray)?;
+    let item_count = array.raw_iter().count();
+    if item_count == 0 || !item_count.is_multiple_of(8) {
+        return Err(LinkQuadPointsError::InvalidLength);
+    }
+    let quad_count = item_count / 8;
+    if quad_count > max_quads {
+        return Err(LinkQuadPointsError::ItemLimit);
+    }
+
+    let mut values = array.flex_iter();
+    let mut raw_quads = Vec::with_capacity(quad_count);
+    let mut outside_rect = false;
+    for _ in 0..quad_count {
+        let mut points = [kurbo::Point::ZERO; 4];
+        for point in &mut points {
+            let x = values
+                .next::<Number>()
+                .map(|number| number.as_f64())
+                .filter(|value| value.is_finite())
+                .ok_or(LinkQuadPointsError::InvalidCoordinate)?;
+            let y = values
+                .next::<Number>()
+                .map(|number| number.as_f64())
+                .filter(|value| value.is_finite())
+                .ok_or(LinkQuadPointsError::InvalidCoordinate)?;
+            *point = kurbo::Point::new(x, y);
+            outside_rect |= x < rect.x0 || x > rect.x1 || y < rect.y0 || y > rect.y1;
+        }
+        raw_quads.push(points);
+    }
+    if outside_rect {
+        return Ok(None);
+    }
+
+    let mut quads = Vec::with_capacity(quad_count);
+    for points in raw_quads {
+        let normalized = if valid_counter_clockwise_quad(points) {
+            points
+        } else if quad_self_intersects(points) {
+            let adobe_z_order = [points[2], points[3], points[1], points[0]];
+            if !valid_counter_clockwise_quad(adobe_z_order) {
+                return Err(LinkQuadPointsError::InvalidGeometry);
+            }
+            adobe_z_order
+        } else {
+            return Err(LinkQuadPointsError::InvalidGeometry);
+        };
+        quads.push(LinkQuadrilateral {
+            bottom_left: normalized[0],
+            bottom_right: normalized[1],
+            top_right: normalized[2],
+            top_left: normalized[3],
+        });
+    }
+    Ok(Some(quads))
+}
+
+fn valid_counter_clockwise_quad(points: [kurbo::Point; 4]) -> bool {
+    let scale = points
+        .iter()
+        .map(|point| point.x.abs().max(point.y.abs()))
+        .fold(1.0_f64, f64::max);
+    let epsilon = f64::EPSILON * scale * scale * 64.0;
+    !quad_self_intersects(points) && signed_double_area(points) > epsilon
+}
+
+fn signed_double_area(points: [kurbo::Point; 4]) -> f64 {
+    points
+        .into_iter()
+        .zip(points.into_iter().cycle().skip(1))
+        .take(4)
+        .map(|(first, second)| first.x * second.y - first.y * second.x)
+        .sum()
+}
+
+fn quad_self_intersects(points: [kurbo::Point; 4]) -> bool {
+    segments_intersect(points[0], points[1], points[2], points[3])
+        || segments_intersect(points[1], points[2], points[3], points[0])
+}
+
+fn segments_intersect(
+    first_start: kurbo::Point,
+    first_end: kurbo::Point,
+    second_start: kurbo::Point,
+    second_end: kurbo::Point,
+) -> bool {
+    let first_a = orientation(first_start, first_end, second_start);
+    let first_b = orientation(first_start, first_end, second_end);
+    let second_a = orientation(second_start, second_end, first_start);
+    let second_b = orientation(second_start, second_end, first_end);
+    let scale = [first_start, first_end, second_start, second_end]
+        .into_iter()
+        .map(|point| point.x.abs().max(point.y.abs()))
+        .fold(1.0_f64, f64::max);
+    let epsilon = f64::EPSILON * scale * scale * 64.0;
+    if first_a.abs() <= epsilon
+        || first_b.abs() <= epsilon
+        || second_a.abs() <= epsilon
+        || second_b.abs() <= epsilon
+    {
+        return true;
+    }
+    first_a.is_sign_positive() != first_b.is_sign_positive()
+        && second_a.is_sign_positive() != second_b.is_sign_positive()
+}
+
+fn orientation(start: kurbo::Point, end: kurbo::Point, point: kurbo::Point) -> f64 {
+    (end.x - start.x) * (point.y - start.y) - (end.y - start.y) * (point.x - start.x)
 }
 
 struct LegacyBorder {

@@ -1,6 +1,6 @@
 use crate::FillRule;
 use crate::annotation::{
-    annotation_is_visible_on_screen, resolve_annotation_appearance, resolve_link_border,
+    annotation_is_visible_on_screen, resolve_annotation_appearance, resolve_link_border_with_limit,
 };
 use crate::color::ColorSpace;
 use crate::context::Context;
@@ -353,6 +353,8 @@ pub struct InterpreterSettings {
     /// Maximum nested array and dictionary depth retained for one
     /// marked-content property value.
     pub max_marked_content_property_depth: u32,
+    /// Maximum activation quadrilaterals retained from one Link annotation.
+    pub max_link_quads_per_annotation: usize,
 }
 
 impl Default for InterpreterSettings {
@@ -375,6 +377,7 @@ impl Default for InterpreterSettings {
             max_marked_content_metadata_bytes: 64 * 1024 * 1024,
             max_marked_content_property_bytes: 64 * 1024 * 1024,
             max_marked_content_property_depth: 64,
+            max_link_quads_per_annotation: 65_536,
         }
     }
 }
@@ -430,7 +433,10 @@ pub fn interpret_page<'a>(
                     context.pop_root_transform();
                     context.restore_state(device);
                 }
-                Ok(None) => match resolve_link_border(&annot) {
+                Ok(None) => match resolve_link_border_with_limit(
+                    &annot,
+                    context.settings.max_link_quads_per_annotation,
+                ) {
                     Ok(Some(border)) if border.is_visible() => {
                         device.draw_link_border(&border, context.root_transform());
                     }

@@ -988,6 +988,70 @@ mod tests {
     }
 
     #[test]
+    fn link_border_normalizes_iso_and_adobe_quadpoint_orders() {
+        let objects = "5 0 obj <</Type/Annot/Subtype/Link/Rect[10 20 110 70]/QuadPoints[20 25 100 25 90 60 30 60]/BS<</W 2/S/U>>/C[1 0 0]>> endobj\n\
+             6 0 obj <</Type/Annot/Subtype/Link/Rect[120 20 220 70]/QuadPoints[130 60 210 60 140 25 200 25]/BS<</W 2/S/S>>/C[0 0 1]>> endobj\n\
+             7 0 obj <</Type/Annot/Subtype/Link/Rect[230 20 330 70]/QuadPoints[220 25 300 25 300 60 240 60]/BS<</W 2/S/S>>>> endobj";
+        let device = interpret_bytes(annotation_pdf("5 0 R 6 0 R 7 0 R", objects), true);
+
+        assert_eq!(device.link_borders.len(), 3);
+        assert_eq!(
+            device.link_borders[0].0.geometry,
+            LinkBorderGeometry::Quadrilaterals {
+                rect: Rect::new(10.0, 20.0, 110.0, 70.0),
+                quads: vec![crate::LinkQuadrilateral {
+                    bottom_left: kurbo::Point::new(20.0, 25.0),
+                    bottom_right: kurbo::Point::new(100.0, 25.0),
+                    top_right: kurbo::Point::new(90.0, 60.0),
+                    top_left: kurbo::Point::new(30.0, 60.0),
+                }],
+            }
+        );
+        assert_eq!(
+            device.link_borders[1].0.geometry,
+            LinkBorderGeometry::Quadrilaterals {
+                rect: Rect::new(120.0, 20.0, 220.0, 70.0),
+                quads: vec![crate::LinkQuadrilateral {
+                    bottom_left: kurbo::Point::new(140.0, 25.0),
+                    bottom_right: kurbo::Point::new(200.0, 25.0),
+                    top_right: kurbo::Point::new(210.0, 60.0),
+                    top_left: kurbo::Point::new(130.0, 60.0),
+                }],
+            }
+        );
+        assert_eq!(
+            device.link_borders[2].0.geometry,
+            LinkBorderGeometry::Rectangle {
+                rect: Rect::new(230.0, 20.0, 330.0, 70.0),
+            }
+        );
+    }
+
+    #[test]
+    fn link_quadpoint_limit_reports_a_structured_warning() {
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let warning_target = warnings.clone();
+        let settings = InterpreterSettings {
+            warning_sink: Arc::new(move |warning| {
+                warning_target.lock().unwrap().push(warning);
+            }),
+            max_link_quads_per_annotation: 1,
+            ..InterpreterSettings::default()
+        };
+        let objects = "5 0 obj <</Type/Annot/Subtype/Link/Rect[10 20 110 70]/QuadPoints[10 20 50 20 50 30 10 30 10 40 50 40 50 50 10 50]/BS<</W 2/S/S>>>> endobj";
+        let device =
+            interpret_bytes_with_settings(annotation_pdf("5 0 R", objects), true, settings);
+
+        assert!(device.link_borders.is_empty());
+        assert!(matches!(
+            warnings.lock().unwrap().as_slice(),
+            [InterpreterWarning::LinkBorderFailure(
+                crate::LinkBorderError::InvalidQuadPoints(crate::LinkQuadPointsError::ItemLimit)
+            )]
+        ));
+    }
+
+    #[test]
     fn malformed_link_border_reports_a_structured_warning() {
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let warning_target = warnings.clone();

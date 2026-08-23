@@ -337,6 +337,13 @@ pub(crate) fn handle_gs_single<'a>(
                 convert_line_join(LineJoin(dict.get::<Number>(key)?));
         }
         "ML" => context.get_mut().graphics_state.stroke_props.miter_limit = dict.get::<f32>(key)?,
+        "SA" => {
+            context
+                .get_mut()
+                .graphics_state
+                .stroke_props
+                .automatic_adjustment = dict.get::<bool>(key)?;
+        }
         "CA" => context.get_mut().graphics_state.stroke_alpha = dict.get::<f32>(key)?,
         "ca" => context.get_mut().graphics_state.non_stroke_alpha = dict.get::<f32>(key)?,
         "TR" | "TR2" => {

@@ -321,6 +321,11 @@ pub struct StrokeProps {
     pub dash_array: SmallVec<[f32; 4]>,
     /// The dash offset.
     pub dash_offset: f32,
+    /// Whether device-dependent automatic stroke adjustment is enabled.
+    ///
+    /// This is the PDF graphics-state `/SA` parameter. Devices must retain it
+    /// because its effect depends on the final user-to-device transform.
+    pub automatic_adjustment: bool,
 }
 
 impl Default for StrokeProps {
@@ -332,6 +337,7 @@ impl Default for StrokeProps {
             miter_limit: 10.0,
             dash_array: smallvec![],
             dash_offset: 0.0,
+            automatic_adjustment: false,
         }
     }
 }

@@ -443,6 +443,21 @@ mod tests {
         luminosity_soft_mask_pdf_with_backdrop("/BC[0.1 0.2 0.3]")
     }
 
+    fn automatic_stroke_adjustment_pdf() -> Vec<u8> {
+        let page_stream = b"/GS1 gs 0 10 m 90 10 l S q /GS0 gs 0 20 m 90 20 l S Q 0 30 m 90 30 l S";
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</ExtGState<</GS0<</SA false>>/GS1<</SA true>>>>>>/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
+             trailer <</Root 1 0 R>>\n%%EOF",
+            page_stream.len(),
+            String::from_utf8_lossy(page_stream),
+        )
+        .into_bytes()
+    }
+
     fn luminosity_soft_mask_pdf_with_backdrop(backdrop: &str) -> Vec<u8> {
         luminosity_soft_mask_pdf_with_options(backdrop, "/DeviceRGB", "")
     }
@@ -539,6 +554,7 @@ mod tests {
         form_keys: Vec<u128>,
         instance_transforms: Vec<Affine>,
         path_transforms: Vec<Affine>,
+        draw_modes: Vec<DrawMode>,
         group_properties: Vec<Option<FormGroupProperties>>,
         soft_masks: Vec<(MaskType, ColorSpaceKind, bool, Vec<f32>)>,
         marked_properties: Vec<MarkedContentProperties>,
@@ -558,9 +574,10 @@ mod tests {
     }
 
     impl<'a> Device<'a> for RecordingDevice {
-        fn draw_path(&mut self, _: &BezPath, mut props: DrawProps<'a>, _: &DrawMode) {
+        fn draw_path(&mut self, _: &BezPath, mut props: DrawProps<'a>, mode: &DrawMode) {
             self.events.push("path");
             self.path_transforms.push(props.transform);
+            self.draw_modes.push(mode.clone());
             if let Some(mask) = props.soft_mask.take() {
                 self.record_soft_mask(mask);
             }
@@ -610,6 +627,20 @@ mod tests {
 
     fn interpret(retained: bool) -> RecordingDevice {
         interpret_bytes(form_pdf(), retained)
+    }
+
+    #[test]
+    fn automatic_stroke_adjustment_is_retained_and_restored() {
+        let device = interpret_bytes(automatic_stroke_adjustment_pdf(), false);
+        let adjustment = device
+            .draw_modes
+            .iter()
+            .map(|mode| match mode {
+                DrawMode::Stroke(props) => props.automatic_adjustment,
+                mode => panic!("expected a stroke, got {mode:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(adjustment, [true, false, true]);
     }
 
     fn interpret_bytes(bytes: Vec<u8>, retained: bool) -> RecordingDevice {

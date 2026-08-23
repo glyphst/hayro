@@ -105,6 +105,9 @@ pub enum ShadingType {
     },
     /// A triangle-mesh shading.
     TriangleMesh {
+        /// The original PDF shading type (`4` for free-form Gouraud meshes or
+        /// `5` for lattice-form Gouraud meshes).
+        shading_type: u8,
         /// The triangles making up the shading.
         triangles: Vec<Triangle>,
         /// An optional function used for calculating the sampled color values.
@@ -218,6 +221,7 @@ impl Shading {
                 )?;
 
                 ShadingType::TriangleMesh {
+                    shading_type: 4,
                     triangles,
                     function,
                 }
@@ -244,6 +248,7 @@ impl Shading {
                 )?;
 
                 ShadingType::TriangleMesh {
+                    shading_type: 5,
                     triangles,
                     function,
                 }

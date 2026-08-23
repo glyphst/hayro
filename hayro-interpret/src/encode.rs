@@ -215,6 +215,7 @@ impl ShadingPattern {
             ShadingType::TriangleMesh {
                 triangles,
                 function,
+                ..
             } => {
                 let full_transform = self.matrix;
                 let samples = sample_triangles(triangles, full_transform);

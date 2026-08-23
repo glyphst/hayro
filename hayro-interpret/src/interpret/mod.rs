@@ -248,6 +248,8 @@ fn marked_content_properties(
         }
     }
     MarkedContentProperties {
+        property_list_name: None,
+        property_list_resolved: true,
         mcid,
         actual_text,
         alternate_text,
@@ -730,7 +732,7 @@ pub fn interpret<'a>(
                     .and_then(|name| resources.properties.get::<Dict<'_>>(name.as_ref()))
                     .or_else(|| dict_or_stream(bdc.1).map(|(props, _)| props.clone()));
 
-                let marked_properties = resolved_properties
+                let mut marked_properties = resolved_properties
                     .as_ref()
                     .map(|properties| {
                         marked_content_properties(
@@ -741,6 +743,9 @@ pub fn interpret<'a>(
                         )
                     })
                     .unwrap_or_default();
+                marked_properties.property_list_name =
+                    property_name.as_ref().map(|name| name.as_ref().to_vec());
+                marked_properties.property_list_resolved = resolved_properties.is_some();
 
                 device.begin_marked_content_with_properties(bdc.0, marked_properties);
                 let membership = resolved_properties.as_ref().and_then(|props| {

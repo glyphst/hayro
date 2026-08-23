@@ -511,6 +511,21 @@ mod tests {
         .into_bytes()
     }
 
+    fn missing_marked_content_properties_pdf() -> Vec<u8> {
+        let page_stream = b"/Figure /Missing BDC 0 0 10 10 re f EMC";
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<<>>/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
+             trailer <</Root 1 0 R>>\n%%EOF",
+            page_stream.len(),
+            String::from_utf8_lossy(page_stream),
+        )
+        .into_bytes()
+    }
+
     fn annotation_form(object: u32, bbox: &str, matrix: &str, contents: &str) -> String {
         format!(
             "{object} 0 obj <</Type/XObject/Subtype/Form/FormType 1/BBox{bbox}/Matrix{matrix}/Resources<<>>/Length {}>> stream\n{contents}\nendstream endobj",
@@ -829,6 +844,27 @@ mod tests {
             properties.unavailable_keys,
             [b"PRECISION".to_vec(), b"UNITS".to_vec()]
         );
+    }
+
+    #[test]
+    fn marked_content_exposes_unresolved_named_property_list_identity() {
+        let device = interpret_bytes(missing_marked_content_properties_pdf(), false);
+        let properties = &device.marked_properties[0];
+        assert_eq!(
+            properties.property_list_name.as_deref(),
+            Some(b"Missing".as_slice())
+        );
+        assert!(!properties.property_list_resolved);
+        assert!(properties.additional_properties.is_empty());
+        assert!(properties.unavailable_keys.is_empty());
+
+        let resolved = interpret_bytes(marked_content_metadata_pdf(), false);
+        let properties = &resolved.marked_properties[0];
+        assert_eq!(
+            properties.property_list_name.as_deref(),
+            Some(b"Layout".as_slice())
+        );
+        assert!(properties.property_list_resolved);
     }
 
     #[test]

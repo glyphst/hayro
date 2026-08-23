@@ -51,6 +51,12 @@ pub enum MarkedContentPropertyValue {
 /// PDF text-string encoding rules without retaining syntax-layer lifetimes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MarkedContentProperties {
+    /// Raw name of a named property-list resource used by BDC.
+    pub property_list_name: Option<Vec<u8>>,
+    /// Whether the named or inline property-list operand resolved to a
+    /// dictionary. A missing named resource remains observable to retaining
+    /// devices so callers can apply and diagnose deterministic repair.
+    pub property_list_resolved: bool,
     /// Marked-content identifier from the properties dictionary.
     pub mcid: Option<i32>,
     /// Replacement text used by accessibility and text extraction.

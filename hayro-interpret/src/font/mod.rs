@@ -370,6 +370,20 @@ pub struct Type3Glyph<'a> {
     pub(crate) char_code: u32,
 }
 
+/// Owned nominal metrics for a Type 3 glyph in Hayro's normalized 1000-unit
+/// text coordinate system.
+///
+/// The quadrilateral is derived from the font's `/FontBBox` and
+/// `/FontMatrix`; it is intentionally nominal selection geometry rather than
+/// an ink bound computed by interpreting the CharProc.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Type3GlyphMetrics {
+    /// Text advance applied by the interpreter after this glyph.
+    pub advance: [f32; 2],
+    /// Nominal font bounding quadrilateral in glyph text coordinates.
+    pub nominal_quad: [kurbo::Point; 4],
+}
+
 /// A glyph defined by PDF drawing instructions.
 impl<'a> Type3Glyph<'a> {
     /// Draw the type3 glyph to the given device.
@@ -389,6 +403,15 @@ impl<'a> Type3Glyph<'a> {
     /// Note: Type3 fonts can only provide Unicode via `ToUnicode` cmap.
     pub fn as_unicode(&self) -> Option<BfString> {
         self.font.char_code_to_unicode(self.char_code)
+    }
+
+    /// Return owned metrics suitable for text selection and search geometry.
+    pub fn text_metrics(&self) -> Type3GlyphMetrics {
+        debug_assert!(self.char_code <= u8::MAX as u32);
+        Type3GlyphMetrics {
+            advance: [self.font.glyph_width(self.char_code as u8), 0.0],
+            nominal_quad: self.font.glyph_nominal_quad(),
+        }
     }
 }
 

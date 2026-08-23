@@ -17,7 +17,7 @@ use hayro_syntax::object::Dict;
 use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::{CHAR_PROCS, FONT_BBOX, FONT_MATRIX, RESOURCES};
 use hayro_syntax::page::Resources;
-use kurbo::{Affine, BezPath, Rect};
+use kurbo::{Affine, BezPath, Point, Rect};
 use rustc_hash::FxHashMap;
 use skrifa::GlyphId;
 
@@ -93,6 +93,16 @@ impl<'a> Type3<'a> {
             _ => self.missing_width,
         };
         (w * self.matrix.as_coeffs()[0] as f32) * UNITS_PER_EM
+    }
+
+    pub(crate) fn glyph_nominal_quad(&self) -> [Point; 4] {
+        let transform = self.matrix * Affine::scale(UNITS_PER_EM as f64);
+        [
+            transform * Point::new(self.font_bbox.x0, self.font_bbox.y0),
+            transform * Point::new(self.font_bbox.x1, self.font_bbox.y0),
+            transform * Point::new(self.font_bbox.x1, self.font_bbox.y1),
+            transform * Point::new(self.font_bbox.x0, self.font_bbox.y1),
+        ]
     }
 
     pub(crate) fn char_code_to_unicode(&self, char_code: u32) -> Option<BfString> {

@@ -406,14 +406,22 @@ impl Type0Font {
     }
 
     pub(crate) fn origin_displacement(&self, code: u32) -> Vec2 {
+        if self.is_horizontal() {
+            Vec2::default()
+        } else {
+            -self.writing_origin(code)
+        }
+    }
+
+    pub(crate) fn writing_origin(&self, code: u32) -> Vec2 {
         let cid = self.code_to_cid(code).unwrap_or(0);
 
         if self.is_horizontal() {
             Vec2::default()
-        } else if let Some([_, v1, v2]) = self.widths2.get(&cid) {
-            Vec2::new(-*v1 as f64, -*v2 as f64)
+        } else if let Some([_, v1_x, v1_y]) = self.widths2.get(&cid) {
+            Vec2::new(*v1_x as f64, *v1_y as f64)
         } else {
-            Vec2::new(-self.horizontal_width(cid) as f64 / 2.0, -self.dw2.0 as f64)
+            Vec2::new(self.horizontal_width(cid) as f64 / 2.0, self.dw2.0 as f64)
         }
     }
 

@@ -175,6 +175,15 @@ pub enum WritingMode {
 pub struct TextGlyphMetrics {
     /// Advance in the font's 1,000-unit glyph space.
     pub advance: [f32; 2],
+    /// Point in the positioned glyph's 1,000-unit coordinate system that maps
+    /// back to the current writing origin.
+    ///
+    /// This is `[0, 0]` for horizontal writing. For a vertical `CIDFont` it is
+    /// the exact `v1` position vector from `W2`, or the specification-defined
+    /// `DW2`/horizontal-width default. The glyph transform already contains
+    /// the inverse displacement, so downstream readers use this point to
+    /// recover the logical baseline without applying `v1` twice.
+    pub writing_origin: [f32; 2],
     /// Nominal ascent in the font's 1,000-unit glyph space.
     pub ascent: Option<f32>,
     /// Nominal descent in the font's 1,000-unit glyph space.
@@ -330,6 +339,7 @@ impl OutlineGlyph {
     /// Metrics needed for nominal selection boxes and semantic text layout.
     pub fn text_metrics(&self) -> TextGlyphMetrics {
         let advance = self.font.glyph_advance(self.char_code);
+        let writing_origin = self.font.writing_origin(self.char_code);
         let (ascent, descent) = self
             .font
             .text_metrics()
@@ -338,6 +348,7 @@ impl OutlineGlyph {
             });
         TextGlyphMetrics {
             advance: [advance.x as f32, advance.y as f32],
+            writing_origin: [writing_origin.x as f32, writing_origin.y as f32],
             ascent,
             descent,
             writing_mode: if self.font.is_horizontal() {

@@ -127,6 +127,13 @@ impl OutlineFont {
         }
     }
 
+    pub(crate) fn writing_origin(&self, char_code: u32) -> kurbo::Vec2 {
+        match self {
+            Self::Type1(_) | Self::TrueType(_) => kurbo::Vec2::ZERO,
+            Self::Type0(font) => font.writing_origin(char_code),
+        }
+    }
+
     pub(crate) fn is_horizontal(&self) -> bool {
         match self {
             Self::Type1(_) | Self::TrueType(_) => true,

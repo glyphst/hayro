@@ -9,7 +9,7 @@ use std::array;
 use std::ops::Rem;
 
 const MAX_CALCULATOR_OPERATIONS: usize = 16_384;
-const MAX_CALCULATOR_NESTING: usize = 32;
+const MAX_CALCULATOR_NESTING: usize = 128;
 
 /// A type 4 function (postscript function).
 #[derive(Debug)]

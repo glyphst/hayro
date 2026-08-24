@@ -818,7 +818,8 @@ impl Default for FallbackFontQuery {
 pub(crate) fn glyph_name_to_unicode(name: &str) -> Option<char> {
     match glyph_name_to_bf_string(name) {
         Some(BfString::Char(character)) => Some(character),
-        Some(BfString::String(_)) | None => None,
+        Some(BfString::String(string)) => string.chars().next(),
+        None => None,
     }
     .or_else(|| {
         warn!("failed to map glyph name {} to unicode", name);
@@ -897,7 +898,7 @@ pub(crate) fn unicode_from_name(name: &str) -> Option<char> {
 
 #[cfg(test)]
 mod glyph_name_tests {
-    use super::glyph_name_to_bf_string;
+    use super::{glyph_name_to_bf_string, glyph_name_to_unicode};
     use hayro_cmap::BfString;
 
     #[test]
@@ -919,6 +920,7 @@ mod glyph_name_tests {
             glyph_name_to_bf_string("f_f_i"),
             Some(BfString::String("ffi".into()))
         );
+        assert_eq!(glyph_name_to_unicode("f_f_i"), Some('f'));
         assert_eq!(
             glyph_name_to_bf_string("uni00410042"),
             Some(BfString::String("AB".into()))

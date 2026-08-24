@@ -23,6 +23,115 @@ pub(crate) type Values = SmallVec<[f32; 4]>;
 pub(crate) type StitchingBounds = SmallVec<[f32; 3]>;
 type TupleVec = SmallVec<[(f32, f32); 4]>;
 
+/// One instruction in a bounded, forward-only PDF Type 4 calculator program.
+///
+/// Conditional procedures are flattened into forward jumps so retained
+/// renderers can validate and execute the same owned program on either the CPU
+/// or GPU without retaining parser objects.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum CalculatorInstruction {
+    /// Push a real number.
+    Number(f32),
+    /// Apply the PostScript `abs` operator.
+    Abs,
+    /// Apply the PostScript `add` operator.
+    Add,
+    /// Apply the PostScript `atan` operator.
+    Atan,
+    /// Apply the PostScript `ceiling` operator.
+    Ceiling,
+    /// Apply the PostScript `cos` operator.
+    Cos,
+    /// Apply the PostScript `cvi` operator.
+    Cvi,
+    /// Apply the PostScript `cvr` operator.
+    Cvr,
+    /// Apply the PostScript `div` operator.
+    Div,
+    /// Apply the PostScript `exp` operator.
+    Exp,
+    /// Apply the PostScript `floor` operator.
+    Floor,
+    /// Apply the PostScript `idiv` operator.
+    Idiv,
+    /// Apply the PostScript `ln` operator.
+    Ln,
+    /// Apply the PostScript `log` operator.
+    Log,
+    /// Apply the PostScript `mod` operator.
+    Mod,
+    /// Apply the PostScript `mul` operator.
+    Mul,
+    /// Apply the PostScript `neg` operator.
+    Neg,
+    /// Apply the PostScript `round` operator.
+    Round,
+    /// Apply the PostScript `sin` operator.
+    Sin,
+    /// Apply the PostScript `sqrt` operator.
+    Sqrt,
+    /// Apply the PostScript `sub` operator.
+    Sub,
+    /// Apply the PostScript `truncate` operator.
+    Truncate,
+    /// Apply the PostScript `and` operator.
+    And,
+    /// Apply the PostScript `bitshift` operator.
+    Bitshift,
+    /// Apply the PostScript `eq` operator.
+    Eq,
+    /// Push the boolean value `false`.
+    False,
+    /// Apply the PostScript `ge` operator.
+    Ge,
+    /// Apply the PostScript `gt` operator.
+    Gt,
+    /// Apply the PostScript `le` operator.
+    Le,
+    /// Apply the PostScript `lt` operator.
+    Lt,
+    /// Apply the PostScript `ne` operator.
+    Ne,
+    /// Apply the PostScript `not` operator.
+    Not,
+    /// Apply the PostScript `or` operator.
+    Or,
+    /// Push the boolean value `true`.
+    True,
+    /// Apply the PostScript `xor` operator.
+    Xor,
+    /// Pop a condition and continue at this absolute instruction index when
+    /// it is false. The target always points forwards.
+    JumpIfFalse(u32),
+    /// Continue at this absolute instruction index. The target always points
+    /// forwards.
+    Jump(u32),
+    /// Apply the PostScript `copy` operator.
+    Copy,
+    /// Apply the PostScript `dup` operator.
+    Dup,
+    /// Apply the PostScript `exch` operator.
+    Exch,
+    /// Apply the PostScript `index` operator.
+    Index,
+    /// Apply the PostScript `pop` operator.
+    Pop,
+    /// Apply the PostScript `roll` operator.
+    Roll,
+}
+
+/// An owned, bounded PDF Type 4 calculator function.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CalculatorFunction {
+    /// Inclusive input clamps from the function dictionary's `/Domain`.
+    pub input_domain: Vec<[f32; 2]>,
+    /// Inclusive output clamps from `/Range`, when one is present.
+    pub output_range: Option<Vec<[f32; 2]>>,
+    /// Forward-only calculator bytecode.
+    pub instructions: Vec<CalculatorInstruction>,
+}
+
 #[derive(Debug)]
 enum FunctionType {
     Type0(Type0),
@@ -65,6 +174,17 @@ impl Function {
         match self.0.as_ref() {
             FunctionType::Type3(t3) => t3.stitching_bounds(),
             _ => SmallVec::new(),
+        }
+    }
+
+    /// Return an owned calculator program when this is a PDF Type 4 function.
+    ///
+    /// The parser bounds program size and nesting before this representation is
+    /// made available. Other function types return `None`.
+    pub fn calculator_function(&self) -> Option<CalculatorFunction> {
+        match self.0.as_ref() {
+            FunctionType::Type4(t4) => t4.calculator_function(),
+            _ => None,
         }
     }
 }

@@ -5,7 +5,7 @@
 use crate::CacheKey;
 use crate::cache::Cache;
 use crate::color::{ColorComponents, ColorSpace};
-use crate::function::{Function, StitchingBounds, Values, interpolate};
+use crate::function::{CalculatorFunction, Function, StitchingBounds, Values, interpolate};
 use crate::util::{Float32Ext, PointExt, RectExt};
 use hayro_syntax::bit_reader::BitReader;
 use hayro_syntax::object::Array;
@@ -69,6 +69,19 @@ impl ShadingFunction {
         bounds.sort_by(f32::total_cmp);
         bounds.dedup_by(|a, b| (*a - *b).abs() <= f32::EPSILON);
         bounds.into_vec()
+    }
+
+    /// Return the owned PDF Type 4 program when this shading uses one
+    /// calculator function for all color components.
+    ///
+    /// Arrays of one-output functions deliberately return `None`; callers may
+    /// continue to use an error-controlled table for those functions until a
+    /// combined exact representation is available.
+    pub fn calculator_function(&self) -> Option<CalculatorFunction> {
+        match self {
+            Self::Single(function) => function.calculator_function(),
+            Self::Multiple(_) => None,
+        }
     }
 }
 

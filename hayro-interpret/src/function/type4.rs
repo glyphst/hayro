@@ -1,4 +1,4 @@
-use crate::function::{Clamper, Values};
+use crate::function::{CalculatorFunction, CalculatorInstruction, Clamper, Values};
 use hayro_syntax::content;
 use hayro_syntax::object::Number;
 use hayro_syntax::object::Stream;
@@ -7,6 +7,9 @@ use hayro_syntax::reader::{ReaderContext, ReaderExt};
 use smallvec::SmallVec;
 use std::array;
 use std::ops::Rem;
+
+const MAX_CALCULATOR_OPERATIONS: usize = 16_384;
+const MAX_CALCULATOR_NESTING: usize = 32;
 
 /// A type 4 function (postscript function).
 #[derive(Debug)]
@@ -44,6 +47,28 @@ impl Type4 {
         self.clamper.clamp_output(&mut out);
 
         Some(out)
+    }
+
+    pub(crate) fn calculator_function(&self) -> Option<CalculatorFunction> {
+        let mut instructions = Vec::new();
+        flatten_program(&self.program, &mut instructions)?;
+        if instructions.len() > MAX_CALCULATOR_OPERATIONS.saturating_mul(2) {
+            return None;
+        }
+        Some(CalculatorFunction {
+            input_domain: self
+                .clamper
+                .domain
+                .iter()
+                .map(|(min, max)| [*min, *max])
+                .collect(),
+            output_range: self
+                .clamper
+                .range
+                .as_ref()
+                .map(|range| range.iter().map(|(min, max)| [*min, *max]).collect()),
+            instructions,
+        })
     }
 }
 
@@ -416,10 +441,18 @@ fn eval_inner(procedure: &[PostScriptOp], arg_stack: &mut InterpreterStack) -> O
 
 fn parse_procedure(data: &[u8]) -> Option<Vec<PostScriptOp>> {
     let mut r = Reader::new(data);
-    parse_procedure_inner(&mut r)
+    let mut operation_count = 0;
+    parse_procedure_inner(&mut r, 0, &mut operation_count)
 }
 
-fn parse_procedure_inner(r: &mut Reader<'_>) -> Option<Vec<PostScriptOp>> {
+fn parse_procedure_inner(
+    r: &mut Reader<'_>,
+    depth: usize,
+    operation_count: &mut usize,
+) -> Option<Vec<PostScriptOp>> {
+    if depth > MAX_CALCULATOR_NESTING {
+        return None;
+    }
     let mut stack = ParseStack::new();
 
     let mut ops = vec![];
@@ -434,14 +467,99 @@ fn parse_procedure_inner(r: &mut Reader<'_>) -> Option<Vec<PostScriptOp>> {
 
             break;
         } else if r.peek_byte()? == b'{' {
-            stack.push(parse_procedure_inner(r)?);
+            stack.push(parse_procedure_inner(r, depth + 1, operation_count)?);
         } else {
             let op = PostScriptOp::from_reader(r, &mut stack)?;
+            *operation_count = operation_count.checked_add(1)?;
+            if *operation_count > MAX_CALCULATOR_OPERATIONS {
+                return None;
+            }
             ops.push(op);
         }
     }
 
     Some(ops)
+}
+
+fn instruction_index(instructions: &[CalculatorInstruction]) -> Option<u32> {
+    u32::try_from(instructions.len()).ok()
+}
+
+fn flatten_program(
+    program: &[PostScriptOp],
+    instructions: &mut Vec<CalculatorInstruction>,
+) -> Option<()> {
+    for op in program {
+        let instruction = match op {
+            PostScriptOp::Number(number) => CalculatorInstruction::Number(number.as_f64() as f32),
+            PostScriptOp::Abs => CalculatorInstruction::Abs,
+            PostScriptOp::Add => CalculatorInstruction::Add,
+            PostScriptOp::Atan => CalculatorInstruction::Atan,
+            PostScriptOp::Ceiling => CalculatorInstruction::Ceiling,
+            PostScriptOp::Cos => CalculatorInstruction::Cos,
+            PostScriptOp::Cvi => CalculatorInstruction::Cvi,
+            PostScriptOp::Cvr => CalculatorInstruction::Cvr,
+            PostScriptOp::Div => CalculatorInstruction::Div,
+            PostScriptOp::Exp => CalculatorInstruction::Exp,
+            PostScriptOp::Floor => CalculatorInstruction::Floor,
+            PostScriptOp::Idiv => CalculatorInstruction::Idiv,
+            PostScriptOp::Ln => CalculatorInstruction::Ln,
+            PostScriptOp::Log => CalculatorInstruction::Log,
+            PostScriptOp::Mod => CalculatorInstruction::Mod,
+            PostScriptOp::Mul => CalculatorInstruction::Mul,
+            PostScriptOp::Neg => CalculatorInstruction::Neg,
+            PostScriptOp::Round => CalculatorInstruction::Round,
+            PostScriptOp::Sin => CalculatorInstruction::Sin,
+            PostScriptOp::Sqrt => CalculatorInstruction::Sqrt,
+            PostScriptOp::Sub => CalculatorInstruction::Sub,
+            PostScriptOp::Truncate => CalculatorInstruction::Truncate,
+            PostScriptOp::And => CalculatorInstruction::And,
+            PostScriptOp::Bitshift => CalculatorInstruction::Bitshift,
+            PostScriptOp::Eq => CalculatorInstruction::Eq,
+            PostScriptOp::False => CalculatorInstruction::False,
+            PostScriptOp::Ge => CalculatorInstruction::Ge,
+            PostScriptOp::Gt => CalculatorInstruction::Gt,
+            PostScriptOp::Le => CalculatorInstruction::Le,
+            PostScriptOp::Lt => CalculatorInstruction::Lt,
+            PostScriptOp::Ne => CalculatorInstruction::Ne,
+            PostScriptOp::Not => CalculatorInstruction::Not,
+            PostScriptOp::Or => CalculatorInstruction::Or,
+            PostScriptOp::True => CalculatorInstruction::True,
+            PostScriptOp::Xor => CalculatorInstruction::Xor,
+            PostScriptOp::Copy => CalculatorInstruction::Copy,
+            PostScriptOp::Dup => CalculatorInstruction::Dup,
+            PostScriptOp::Exch => CalculatorInstruction::Exch,
+            PostScriptOp::Index => CalculatorInstruction::Index,
+            PostScriptOp::Pop => CalculatorInstruction::Pop,
+            PostScriptOp::Roll => CalculatorInstruction::Roll,
+            PostScriptOp::If(body) => {
+                let branch = instructions.len();
+                instructions.push(CalculatorInstruction::JumpIfFalse(0));
+                flatten_program(body, instructions)?;
+                let target = instruction_index(instructions)?;
+                instructions[branch] = CalculatorInstruction::JumpIfFalse(target);
+                continue;
+            }
+            PostScriptOp::IfElse(if_body, else_body) => {
+                let branch = instructions.len();
+                instructions.push(CalculatorInstruction::JumpIfFalse(0));
+                flatten_program(if_body, instructions)?;
+                let jump = instructions.len();
+                instructions.push(CalculatorInstruction::Jump(0));
+                let else_target = instruction_index(instructions)?;
+                instructions[branch] = CalculatorInstruction::JumpIfFalse(else_target);
+                flatten_program(else_body, instructions)?;
+                let end_target = instruction_index(instructions)?;
+                instructions[jump] = CalculatorInstruction::Jump(end_target);
+                continue;
+            }
+        };
+        instructions.push(instruction);
+        if instructions.len() > MAX_CALCULATOR_OPERATIONS.saturating_mul(2) {
+            return None;
+        }
+    }
+    Some(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -559,8 +677,12 @@ impl PostScriptOp {
 
 #[cfg(test)]
 mod tests {
-    use crate::function::type4::{PostScriptOp, Type4, parse_procedure};
-    use crate::function::{Clamper, Function, FunctionType, TupleVec, Values};
+    use crate::function::type4::{
+        MAX_CALCULATOR_NESTING, MAX_CALCULATOR_OPERATIONS, PostScriptOp, Type4, parse_procedure,
+    };
+    use crate::function::{
+        CalculatorInstruction, Clamper, Function, FunctionType, TupleVec, Values,
+    };
     use std::f32::consts::LN_10;
     use std::sync::Arc;
 
@@ -599,6 +721,51 @@ mod tests {
                 )
             ]
         );
+    }
+
+    #[test]
+    fn calculator_function_flattens_forward_branches() {
+        let program = parse_procedure(b"{ dup 0 gt { 1 } { 2 } ifelse add }").unwrap();
+        let type4 = Type4 {
+            program,
+            clamper: Clamper {
+                domain: smallvec![(0.0, 1.0)],
+                range: Some(smallvec![(0.0, 3.0)]),
+            },
+        };
+
+        let calculator = type4.calculator_function().unwrap();
+        assert_eq!(calculator.input_domain, vec![[0.0, 1.0]]);
+        assert_eq!(calculator.output_range, Some(vec![[0.0, 3.0]]));
+        assert_eq!(
+            calculator.instructions,
+            vec![
+                CalculatorInstruction::Dup,
+                CalculatorInstruction::Number(0.0),
+                CalculatorInstruction::Gt,
+                CalculatorInstruction::JumpIfFalse(6),
+                CalculatorInstruction::Number(1.0),
+                CalculatorInstruction::Jump(7),
+                CalculatorInstruction::Number(2.0),
+                CalculatorInstruction::Add,
+            ]
+        );
+    }
+
+    #[test]
+    fn calculator_parser_rejects_excessive_nesting() {
+        let program = format!(
+            "{{ {} true {} }}",
+            "{".repeat(MAX_CALCULATOR_NESTING + 1),
+            "} if".repeat(MAX_CALCULATOR_NESTING + 1)
+        );
+        assert!(parse_procedure(program.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn calculator_parser_rejects_excessive_operations() {
+        let program = format!("{{ {} }}", "0 pop ".repeat(MAX_CALCULATOR_OPERATIONS));
+        assert!(parse_procedure(program.as_bytes()).is_none());
     }
 
     fn op_impl(prog: &str, out: &[f32]) {

@@ -237,6 +237,23 @@ impl<'a> TilingPattern<'a> {
         self.is_color
     }
 
+    /// Return the selecting graphics-state color for an uncolored
+    /// (`/PaintType 2`) cell.
+    ///
+    /// A retaining device can use this value as the binding for a reusable
+    /// paint-parameterized cell instead of baking the selection into every
+    /// callback. Colored patterns return `None` because their content stream
+    /// owns its paints.
+    pub fn uncolored_base_color(&self, is_stroke: bool) -> Option<&Color> {
+        if self.is_color {
+            None
+        } else if is_stroke {
+            Some(&self.stroke_paint)
+        } else {
+            Some(&self.non_stroking_paint)
+        }
+    }
+
     /// Return the validated PDF `/TilingType` value (1, 2, or 3).
     pub fn tiling_type(&self) -> u8 {
         self.tiling_type

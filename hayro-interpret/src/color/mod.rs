@@ -295,6 +295,15 @@ impl ColorSpaceType {
 pub struct ColorSpace(Arc<ColorSpaceType>);
 
 impl ColorSpace {
+    /// Parse a self-contained PDF color-space object for semantic inspection.
+    ///
+    /// Resource aliases must be resolved by the caller before using this
+    /// constructor. The returned handle owns all decoded color data and does
+    /// not borrow the source object.
+    pub fn from_pdf_object(object: Object<'_>) -> Option<Self> {
+        Self::new(object, &Cache::new())
+    }
+
     /// Return whether two handles share the same parsed color-space instance.
     ///
     /// This identity is process-local and is intended only for deduplicating
@@ -358,6 +367,11 @@ impl ColorSpace {
             ColorSpaceType::DeviceN(_) => ColorSpaceKind::DeviceN,
             ColorSpaceType::Pattern(_) => ColorSpaceKind::Pattern,
         }
+    }
+
+    /// Return the number of native components accepted by this color space.
+    pub fn component_count(&self) -> usize {
+        usize::from(self.num_components())
     }
 
     /// Return `true` if the current color space is the pattern color space.

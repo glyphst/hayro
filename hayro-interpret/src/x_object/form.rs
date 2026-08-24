@@ -1,6 +1,6 @@
 use super::xobject_oc;
 use crate::cache::CacheKey;
-use crate::color::ColorSpaceKind;
+use crate::color::{ColorSpace, ColorSpaceKind};
 use crate::context::Context;
 use crate::device::Device;
 use crate::interpret::state::State;
@@ -8,9 +8,8 @@ use crate::util::hash128;
 use crate::{ClipPath, FillRule, interpret};
 use crate::{InterpreterCache, InterpreterSettings};
 use hayro_syntax::content::TypedIter;
-use hayro_syntax::object::Dict;
-use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
+use hayro_syntax::object::{Dict, Object, Stream};
 use hayro_syntax::page::Resources;
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, Rect, Shape};
@@ -72,11 +71,11 @@ impl FormGroupProperties {
         self.declared_color_space_kind
     }
 
-    /// Conservatively classified explicit blending color space.
+    /// Parsed family of the explicit blending color space.
     ///
-    /// `None` means either that the group omits `/CS`, that the color space is
-    /// not a direct device-space name, or that a `DefaultGray`, `DefaultRGB`,
-    /// or `DefaultCMYK` resource remaps that direct name.
+    /// `None` means either that the group omits `/CS`, that the color space
+    /// could not be parsed, or that a `DefaultGray`, `DefaultRGB`, or
+    /// `DefaultCMYK` resource remaps a direct device-space name.
     pub fn color_space_kind(self) -> Option<ColorSpaceKind> {
         self.color_space_kind
     }
@@ -104,6 +103,7 @@ pub struct FormInvocation<'a> {
     nesting_depth: u32,
     retained_key: u128,
     group_properties: Option<FormGroupProperties>,
+    group_color_space: Option<ColorSpace>,
 }
 
 impl fmt::Debug for FormInvocation<'_> {
@@ -131,8 +131,25 @@ impl<'a> FormInvocation<'a> {
         context: &Context<'a>,
     ) -> Self {
         let resources = Resources::from_parent(form.resources.clone(), parent_resources.clone());
+        let group_color_space = form
+            .dict
+            .get::<Dict<'_>>(GROUP)
+            .and_then(|group| group.get::<Object<'_>>(CS))
+            .and_then(|object| {
+                ColorSpace::new(object.clone(), &context.interpreter_cache.object_cache).or_else(
+                    || {
+                        object
+                            .into_name()
+                            .and_then(|name| resources.get_color_space(&name))
+                            .and_then(|resolved| {
+                                ColorSpace::new(resolved, &context.interpreter_cache.object_cache)
+                            })
+                    },
+                )
+            });
         let group_properties = form.group_properties.map(|mut properties| {
-            let default_name = match properties.color_space_kind {
+            properties.color_space_kind = group_color_space.as_ref().map(ColorSpace::kind);
+            let default_name = match properties.declared_color_space_kind {
                 Some(ColorSpaceKind::DeviceGray) => Some(DEFAULT_GRAY),
                 Some(ColorSpaceKind::DeviceRgb) => Some(DEFAULT_RGB),
                 Some(ColorSpaceKind::DeviceCmyk) => Some(DEFAULT_CMYK),
@@ -170,6 +187,7 @@ impl<'a> FormInvocation<'a> {
             nesting_depth: context.nesting_depth(),
             retained_key,
             group_properties,
+            group_color_space,
         }
     }
 
@@ -191,6 +209,15 @@ impl<'a> FormInvocation<'a> {
     /// Typed properties from the form's `/Group` dictionary, when present.
     pub fn group_properties(&self) -> Option<FormGroupProperties> {
         self.group_properties
+    }
+
+    /// Parsed blending color space declared by the Form group, when valid.
+    ///
+    /// The handle is owned and remains valid for the duration of this
+    /// invocation callback. Retained renderers can sample or classify it
+    /// before deep-copying their own representation.
+    pub fn group_color_space(&self) -> Option<&ColorSpace> {
+        self.group_color_space.as_ref()
     }
 
     /// Whether the invocation inherits a soft mask whose root transform cannot
@@ -556,6 +583,7 @@ mod tests {
         path_transforms: Vec<Affine>,
         draw_modes: Vec<DrawMode>,
         group_properties: Vec<Option<FormGroupProperties>>,
+        group_color_spaces: Vec<Option<ColorSpaceKind>>,
         soft_masks: Vec<(MaskType, ColorSpaceKind, bool, Vec<f32>)>,
         marked_properties: Vec<MarkedContentProperties>,
         link_borders: Vec<(LinkBorder, Affine)>,
@@ -600,6 +628,8 @@ mod tests {
             self.form_keys.push(form.cache_key());
             self.instance_transforms.push(form.instance_transform());
             self.group_properties.push(form.group_properties());
+            self.group_color_spaces
+                .push(form.group_color_space().map(ColorSpace::kind));
             if self.retained {
                 form.interpret_local(self);
             } else {
@@ -734,6 +764,21 @@ mod tests {
         );
         assert_eq!(properties.color_space_kind(), None);
         assert!(properties.color_space_is_default_overridden());
+    }
+
+    #[test]
+    fn form_invocations_expose_parsed_non_device_group_color_spaces() {
+        let device = interpret_bytes(
+            form_pdf_with_group(
+                "/Group<</S/Transparency/I true/K false/CS[/CalRGB<</WhitePoint[0.9505 1 1.089]>>]>>",
+            ),
+            true,
+        );
+        let properties = device.group_properties[0].expect("group properties");
+        assert_eq!(properties.declared_color_space_kind(), None);
+        assert_eq!(properties.color_space_kind(), Some(ColorSpaceKind::CalRgb));
+        assert_eq!(device.group_color_spaces[0], Some(ColorSpaceKind::CalRgb));
+        assert!(!properties.color_space_is_default_overridden());
     }
 
     #[test]

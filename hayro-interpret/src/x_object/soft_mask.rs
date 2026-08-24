@@ -188,6 +188,11 @@ impl<'a> SoftMask<'a> {
         self.0.group_color_space.kind()
     }
 
+    /// Parsed blending color space of the soft-mask source group.
+    pub fn group_color_space(&self) -> &ColorSpace {
+        &self.0.group_color_space
+    }
+
     /// Whether a default device-space resource remaps the mask group's direct
     /// `/CS` name.
     pub fn group_color_space_is_default_overridden(&self) -> bool {

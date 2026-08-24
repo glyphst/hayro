@@ -3,7 +3,9 @@ use crate::context::Context;
 use crate::device::Device;
 use crate::font::glyph_simulator::GlyphSimulator;
 use crate::font::true_type::{Width, read_encoding, read_widths};
-use crate::font::{Encoding, GlyphRun, Type3Glyph, UNITS_PER_EM, read_to_unicode};
+use crate::font::{
+    Encoding, GlyphRun, Type3Glyph, UNITS_PER_EM, glyph_name_to_bf_string, read_to_unicode,
+};
 use crate::interpret::state::TextState;
 use crate::util::RectExt;
 use crate::x_object::soft_mask::SoftMask;
@@ -79,10 +81,7 @@ impl<'a> Type3<'a> {
     }
 
     pub(crate) fn map_code(&self, code: u8) -> GlyphId {
-        self.encodings
-            .get(&code)
-            .map(|s| s.as_str())
-            .or_else(|| self.encoding.map_code(code))
+        encoded_glyph_name(&self.encoding, &self.encodings, code)
             .map(|g| self.glyph_simulator.string_to_glyph(g))
             .unwrap_or(GlyphId::NOTDEF)
     }
@@ -106,10 +105,16 @@ impl<'a> Type3<'a> {
     }
 
     pub(crate) fn char_code_to_unicode(&self, char_code: u32) -> Option<BfString> {
-        // Type3 fonts can only provide Unicode via ToUnicode CMap.
-        self.to_unicode
+        if let Some(unicode) = self
+            .to_unicode
             .as_ref()
             .and_then(|t| t.lookup_bf_string(char_code))
+        {
+            return Some(unicode);
+        }
+
+        let code = u8::try_from(char_code).ok()?;
+        encoded_glyph_name(&self.encoding, &self.encodings, code).and_then(glyph_name_to_bf_string)
     }
 
     pub(crate) fn render_glyph(
@@ -185,6 +190,17 @@ impl<'a> Type3<'a> {
     }
 }
 
+fn encoded_glyph_name<'a>(
+    encoding: &Encoding,
+    differences: &'a FxHashMap<u8, String>,
+    code: u8,
+) -> Option<&'a str> {
+    differences
+        .get(&code)
+        .map(String::as_str)
+        .or_else(|| encoding.map_code(code))
+}
+
 impl CacheKey for Type3<'_> {
     fn cache_key(&self) -> u128 {
         self.dict.cache_key()
@@ -241,5 +257,27 @@ impl<'a, T: Device<'a>> Device<'a> for Type3ShapeGlyphDevice<'a, '_, T> {
             s.paint = self.paint.clone();
             self.inner.draw_image(Image::Stencil(s), props);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encoded_glyph_name;
+    use crate::font::Encoding;
+    use rustc_hash::FxHashMap;
+
+    #[test]
+    fn differences_override_the_base_encoding() {
+        let mut differences = FxHashMap::default();
+        differences.insert(65, "B".to_string());
+
+        assert_eq!(
+            encoded_glyph_name(&Encoding::WinAnsi, &differences, 65),
+            Some("B")
+        );
+        assert_eq!(
+            encoded_glyph_name(&Encoding::WinAnsi, &differences, 32),
+            Some("space")
+        );
     }
 }

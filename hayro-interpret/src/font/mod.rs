@@ -212,6 +212,7 @@ impl Glyph<'_> {
     ///
     /// **For Type3 Fonts:**
     /// 1. `ToUnicode` cmap
+    /// 2. Encoding glyph name via the Adobe glyph-name mapping algorithm
     ///
     /// Returns `None` if the Unicode value could not be determined.
     ///
@@ -375,7 +376,7 @@ pub struct Type3Glyph<'a> {
 ///
 /// The quadrilateral is derived from the font's `/FontBBox` and
 /// `/FontMatrix`; it is intentionally nominal selection geometry rather than
-/// an ink bound computed by interpreting the CharProc.
+/// an ink bound computed by interpreting the `CharProc`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Type3GlyphMetrics {
     /// Text advance applied by the interpreter after this glyph.
@@ -400,7 +401,8 @@ impl<'a> Type3Glyph<'a> {
 
     /// Returns the Unicode code point for this glyph, if available.
     ///
-    /// Note: Type3 fonts can only provide Unicode via `ToUnicode` cmap.
+    /// A `ToUnicode` cmap takes precedence. When it has no entry, a Type 3
+    /// font's Encoding glyph name is mapped using the Adobe glyph-name rules.
     pub fn as_unicode(&self) -> Option<BfString> {
         self.font.char_code_to_unicode(self.char_code)
     }
@@ -814,15 +816,71 @@ impl Default for FallbackFontQuery {
 /// An incomplete implementation of the Adobe Glyph List Specification
 /// <https://github.com/adobe-type-tools/agl-specification>
 pub(crate) fn glyph_name_to_unicode(name: &str) -> Option<char> {
-    if let Some(unicode_str) = glyph_names::get(name) {
-        return unicode_str.chars().next();
+    match glyph_name_to_bf_string(name) {
+        Some(BfString::Char(character)) => Some(character),
+        Some(BfString::String(_)) | None => None,
     }
-
-    unicode_from_name(name).or_else(|| {
+    .or_else(|| {
         warn!("failed to map glyph name {} to unicode", name);
 
         None
     })
+}
+
+/// Apply the Adobe glyph-name mapping algorithm without guessing producer-
+/// private names.
+///
+/// A glyph name can carry a suffix after `.`, combine independently mapped
+/// components with `_`, or use the `uniXXXX`/`uXXXXX` naming conventions. The
+/// returned value retains multi-scalar mappings instead of truncating them.
+pub(crate) fn glyph_name_to_bf_string(name: &str) -> Option<BfString> {
+    let canonical = name.split('.').next()?;
+    if canonical.is_empty() {
+        return None;
+    }
+
+    let mut unicode = String::new();
+    for component in canonical.split('_') {
+        if component.is_empty() {
+            return None;
+        }
+        if let Some(mapped) = glyph_names::get(component) {
+            unicode.push_str(mapped);
+        } else {
+            unicode.push_str(&unicode_sequence_from_name(component)?);
+        }
+    }
+
+    let mut characters = unicode.chars();
+    let first = characters.next()?;
+    if characters.next().is_none() {
+        Some(BfString::Char(first))
+    } else {
+        Some(BfString::String(unicode))
+    }
+}
+
+fn unicode_sequence_from_name(name: &str) -> Option<String> {
+    if let Some(hex) = name.strip_prefix("uni") {
+        if hex.is_empty() || !hex.len().is_multiple_of(4) {
+            return None;
+        }
+
+        let mut unicode = String::new();
+        for chunk in hex.as_bytes().chunks_exact(4) {
+            let digits = std::str::from_utf8(chunk).ok()?;
+            let scalar = u32::from_str_radix(digits, 16).ok()?;
+            unicode.push(char::from_u32(scalar)?);
+        }
+        return Some(unicode);
+    }
+
+    let hex = name.strip_prefix('u')?;
+    if !(4..=6).contains(&hex.len()) {
+        return None;
+    }
+    let scalar = u32::from_str_radix(hex, 16).ok()?;
+    Some(char::from_u32(scalar)?.to_string())
 }
 
 pub(crate) fn unicode_from_name(name: &str) -> Option<char> {
@@ -835,6 +893,51 @@ pub(crate) fn unicode_from_name(name: &str) -> Option<char> {
                 .then(|| name.get(1..).and_then(convert))
         })
         .flatten()
+}
+
+#[cfg(test)]
+mod glyph_name_tests {
+    use super::glyph_name_to_bf_string;
+    use hayro_cmap::BfString;
+
+    #[test]
+    fn maps_agl_names_and_discards_style_suffixes() {
+        assert_eq!(glyph_name_to_bf_string("A"), Some(BfString::Char('A')));
+        assert_eq!(
+            glyph_name_to_bf_string("space.alt"),
+            Some(BfString::Char(' '))
+        );
+        assert_eq!(
+            glyph_name_to_bf_string("ffi"),
+            Some(BfString::Char('\u{fb03}'))
+        );
+    }
+
+    #[test]
+    fn retains_composite_and_unicode_name_sequences() {
+        assert_eq!(
+            glyph_name_to_bf_string("f_f_i"),
+            Some(BfString::String("ffi".into()))
+        );
+        assert_eq!(
+            glyph_name_to_bf_string("uni00410042"),
+            Some(BfString::String("AB".into()))
+        );
+        assert_eq!(
+            glyph_name_to_bf_string("u1F642"),
+            Some(BfString::Char('\u{1f642}'))
+        );
+    }
+
+    #[test]
+    fn rejects_private_or_invalid_names() {
+        assert_eq!(glyph_name_to_bf_string("a17"), None);
+        assert_eq!(glyph_name_to_bf_string("x30"), None);
+        assert_eq!(glyph_name_to_bf_string(".notdef"), None);
+        assert_eq!(glyph_name_to_bf_string("uniD800"), None);
+        assert_eq!(glyph_name_to_bf_string("u110000"), None);
+        assert_eq!(glyph_name_to_bf_string("A__B"), None);
+    }
 }
 
 pub(crate) fn read_to_unicode(dict: &Dict<'_>, cmap_resolver: &CMapResolverFn) -> Option<CMap> {

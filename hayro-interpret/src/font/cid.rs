@@ -1,6 +1,7 @@
 use crate::font::blob::{CffFontBlob, OpenTypeFontBlob, Type1FontBlob};
 use crate::font::generated::glyph_names;
 use crate::font::standard_font::select_standard_font;
+use crate::font::true_type::{MAX_EMBEDDED_UNICODE_CMAP_MAPPINGS, collect_cmap_unicodes};
 use crate::font::{
     FallbackFontQuery, FontFlags, FontQuery, read_to_unicode, resolve_font_text_metrics,
     stretch_glyph, strip_subset_prefix,
@@ -44,6 +45,9 @@ pub(crate) struct Type0Font {
     /// Whether the `to_unicode` map is a UCS2 `CMap` (CID-indexed) rather than
     /// a `ToUnicode` `CMap` (code-indexed).
     to_unicode_is_cid_indexed: bool,
+    /// Unicode values proven by an unambiguous reverse lookup through an
+    /// embedded OpenType font's non-symbol cmap.
+    embedded_unicodes: Option<FxHashMap<GlyphId, Option<BfString>>>,
 }
 
 impl Type0Font {
@@ -142,6 +146,18 @@ impl Type0Font {
             .get::<u32>(FLAGS)
             .and_then(FontFlags::from_bits);
 
+        let embedded_unicodes = if !fallback
+            && let FontType::OpenType(font) = &font_type
+            && !font.font_ref().charmap().is_symbol()
+        {
+            collect_cmap_unicodes(
+                font.font_ref().charmap().mappings(),
+                MAX_EMBEDDED_UNICODE_CMAP_MAPPINGS,
+            )
+        } else {
+            None
+        };
+
         Some(Self {
             cache_key,
             horizontal,
@@ -158,6 +174,7 @@ impl Type0Font {
             text_metrics,
             fallback,
             to_unicode_is_cid_indexed,
+            embedded_unicodes,
         })
     }
 
@@ -407,10 +424,17 @@ impl Type0Font {
             } else {
                 code
             };
-            return to_unicode.lookup_bf_string(key);
+            if let Some(unicode) = to_unicode.lookup_bf_string(key) {
+                return Some(unicode);
+            }
         }
 
-        None
+        let glyph = self.map_code(code);
+        (glyph != GlyphId::NOTDEF)
+            .then_some(glyph)
+            .and_then(|glyph| self.embedded_unicodes.as_ref()?.get(&glyph))
+            .and_then(Option::as_ref)
+            .cloned()
     }
 }
 

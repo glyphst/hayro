@@ -1,6 +1,8 @@
 use crate::FontResolverFn;
 use crate::font::blob::{CffFontBlob, OpenTypeFontBlob};
-use crate::font::generated::{glyph_names, metrics, standard, symbol, zapf_dings};
+use crate::font::generated::{
+    glyph_names, metrics, standard, symbol, zapf_dings, zapf_dings_unicode,
+};
 use crate::font::true_type::{Width, read_encoding, read_widths};
 use crate::font::{
     Encoding, FontData, FontQuery, glyph_name_to_unicode, normalized_glyph_name, stretch_glyph,
@@ -492,7 +494,14 @@ impl StandardKind {
     }
 
     pub(crate) fn char_code_to_unicode(&self, code: u8) -> Option<char> {
-        self.code_to_ps_name(code).and_then(glyph_name_to_unicode)
+        let name = self.code_to_ps_name(code)?;
+        match self.base_font {
+            // Names such as `a17` are defined by ZapfDingbats' built-in
+            // encoding and are intentionally not treated as general Adobe
+            // glyph names.
+            StandardFont::ZapfDingBats => zapf_dings_unicode::get(name),
+            _ => glyph_name_to_unicode(name),
+        }
     }
 
     pub(crate) fn is_italic(&self) -> bool {

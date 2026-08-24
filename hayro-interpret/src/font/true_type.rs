@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::sync::Arc;
 
-const MAX_EMBEDDED_UNICODE_CMAP_MAPPINGS: usize = 262_144;
+pub(crate) const MAX_EMBEDDED_UNICODE_CMAP_MAPPINGS: usize = 262_144;
 
 #[derive(Debug)]
 pub(crate) struct TrueTypeFont {
@@ -453,7 +453,7 @@ fn retain_unique_unicode(
     }
 }
 
-fn collect_cmap_unicodes(
+pub(crate) fn collect_cmap_unicodes(
     mappings: impl IntoIterator<Item = (u32, GlyphId)>,
     limit: usize,
 ) -> Option<FxHashMap<GlyphId, Option<BfString>>> {
@@ -471,7 +471,7 @@ fn collect_cmap_unicodes(
     Some(unicodes)
 }
 
-fn is_extractable_cmap_character(character: char) -> bool {
+pub(crate) fn is_extractable_cmap_character(character: char) -> bool {
     let scalar = character as u32;
     !character.is_control()
         && !(0xE000..=0xF8FF).contains(&scalar)

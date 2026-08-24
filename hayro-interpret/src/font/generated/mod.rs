@@ -7,3 +7,4 @@ pub(crate) mod standard;
 pub(crate) mod symbol;
 pub(crate) mod win_ansi;
 pub(crate) mod zapf_dings;
+pub(crate) mod zapf_dings_unicode;

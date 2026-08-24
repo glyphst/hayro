@@ -205,10 +205,12 @@ impl Glyph<'_> {
     /// 1. `ToUnicode` cmap
     /// 2. Glyph name → Unicode (via Adobe Glyph List)
     /// 3. Unicode naming conventions (e.g., "uni0041", "u0041")
+    /// 4. The dedicated Symbol/ZapfDingbats mapping for those standard fonts
     ///
     /// **For CID Fonts (Type0):**
     /// 1. `ToUnicode` cmap
-    ///
+    /// 2. An unambiguous reverse mapping through an embedded, non-symbol
+    ///    OpenType cmap after applying the PDF's code → CID → GID mapping
     ///
     /// **For Type3 Fonts:**
     /// 1. `ToUnicode` cmap

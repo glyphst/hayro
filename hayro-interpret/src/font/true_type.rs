@@ -24,6 +24,8 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::sync::Arc;
 
+const MAX_EMBEDDED_UNICODE_CMAP_MAPPINGS: usize = 262_144;
+
 #[derive(Debug)]
 pub(crate) struct TrueTypeFont {
     cache_key: u128,
@@ -246,12 +248,18 @@ impl EmbeddedKind {
         }
 
         let charmap = base_font.font_ref().charmap();
-        if !charmap.is_symbol() {
-            for (scalar, glyph) in charmap.mappings() {
-                if let Some(character) = char::from_u32(scalar)
-                    && is_extractable_cmap_character(character)
-                {
-                    retain_unique_unicode(&mut embedded_unicodes, glyph, BfString::Char(character));
+        if !charmap.is_symbol()
+            && let Some(cmap_unicodes) =
+                collect_cmap_unicodes(charmap.mappings(), MAX_EMBEDDED_UNICODE_CMAP_MAPPINGS)
+        {
+            for (glyph, unicode) in cmap_unicodes {
+                match unicode {
+                    Some(unicode) => {
+                        retain_unique_unicode(&mut embedded_unicodes, glyph, unicode);
+                    }
+                    None => {
+                        embedded_unicodes.insert(glyph, None);
+                    }
                 }
             }
         }
@@ -445,6 +453,24 @@ fn retain_unique_unicode(
     }
 }
 
+fn collect_cmap_unicodes(
+    mappings: impl IntoIterator<Item = (u32, GlyphId)>,
+    limit: usize,
+) -> Option<FxHashMap<GlyphId, Option<BfString>>> {
+    let mut unicodes = FxHashMap::default();
+    for (index, (scalar, glyph)) in mappings.into_iter().enumerate() {
+        if index >= limit {
+            return None;
+        }
+        if let Some(character) = char::from_u32(scalar)
+            && is_extractable_cmap_character(character)
+        {
+            retain_unique_unicode(&mut unicodes, glyph, BfString::Char(character));
+        }
+    }
+    Some(unicodes)
+}
+
 fn is_extractable_cmap_character(character: char) -> bool {
     let scalar = character as u32;
     !character.is_control()
@@ -558,7 +584,7 @@ pub(crate) fn read_encoding(dict: &Dict<'_>) -> (Encoding, FxHashMap<u8, String>
 
 #[cfg(test)]
 mod unicode_fallback_tests {
-    use super::{is_extractable_cmap_character, retain_unique_unicode};
+    use super::{collect_cmap_unicodes, is_extractable_cmap_character, retain_unique_unicode};
     use hayro_cmap::BfString;
     use rustc_hash::FxHashMap;
     use skrifa::GlyphId;
@@ -586,5 +612,16 @@ mod unicode_fallback_tests {
         assert!(!is_extractable_cmap_character('\u{E000}'));
         assert!(!is_extractable_cmap_character('\u{FDD0}'));
         assert!(!is_extractable_cmap_character('\u{10FFFF}'));
+    }
+
+    #[test]
+    fn cmap_fallback_is_discarded_when_its_scan_limit_is_exceeded() {
+        let glyph = GlyphId::new(7);
+        assert!(
+            collect_cmap_unicodes([(u32::from('A'), glyph), (u32::from('B'), glyph)], 2).is_some()
+        );
+        assert!(
+            collect_cmap_unicodes([(u32::from('A'), glyph), (u32::from('B'), glyph)], 1).is_none()
+        );
     }
 }

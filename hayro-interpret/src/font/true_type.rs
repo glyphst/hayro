@@ -2,7 +2,7 @@ use crate::font::blob::{CffFontBlob, OpenTypeFontBlob};
 use crate::font::generated::{glyph_names, mac_os_roman, mac_roman, standard};
 use crate::font::standard_font::StandardKind;
 use crate::font::{
-    Encoding, FallbackFontQuery, FontFlags, glyph_name_to_unicode, read_to_unicode,
+    Encoding, FallbackFontQuery, FontFlags, glyph_name_to_bf_string, read_to_unicode,
     resolve_font_text_metrics, strip_subset_prefix, unicode_from_name,
 };
 use crate::util::OptionLog;
@@ -200,17 +200,9 @@ impl TrueTypeFont {
         }
 
         match &self.kind {
-            Kind::Embedded(e) => e
-                .code_to_name(code as u8)
-                .and_then(glyph_name_to_unicode)
-                .map(BfString::Char),
+            Kind::Embedded(e) => e.char_code_to_unicode(code as u8),
             Kind::Standard(s) => s.char_code_to_unicode(code as u8).map(BfString::Char),
         }
-
-        // TODO: The test PDFs below fail (but mutool can render them correctly).
-        // There is likely some other strategy that requires processing the font tables
-        // hayro-tests/pdfs/custom/font_truetype_7.pdf
-        // hayro-tests/pdfs/custom/font_truetype_6.pdf
     }
 }
 
@@ -221,6 +213,7 @@ struct EmbeddedKind {
     missing_width: f32,
     font_flags: Option<FontFlags>,
     glyph_names: FxHashMap<String, GlyphId>,
+    embedded_unicodes: FxHashMap<GlyphId, Option<BfString>>,
     encoding: Encoding,
     // Only used for PDFs that mistakenly embed a
     // CFF font.
@@ -245,6 +238,23 @@ impl EmbeddedKind {
             .and_then(|d| OpenTypeFontBlob::new(Arc::new(d.to_vec()), 0))?;
 
         let glyph_names = base_font.glyph_names();
+        let mut embedded_unicodes = FxHashMap::default();
+        for (name, glyph) in &glyph_names {
+            if let Some(unicode) = glyph_name_to_bf_string(name) {
+                retain_unique_unicode(&mut embedded_unicodes, *glyph, unicode);
+            }
+        }
+
+        let charmap = base_font.font_ref().charmap();
+        if !charmap.is_symbol() {
+            for (scalar, glyph) in charmap.mappings() {
+                if let Some(character) = char::from_u32(scalar)
+                    && is_extractable_cmap_character(character)
+                {
+                    retain_unique_unicode(&mut embedded_unicodes, glyph, BfString::Char(character));
+                }
+            }
+        }
 
         let cff_font_blob = base_font
             .font_ref()
@@ -263,6 +273,7 @@ impl EmbeddedKind {
             widths,
             missing_width,
             glyph_names,
+            embedded_unicodes,
             font_flags,
             encoding,
             cached_mappings: RefCell::new(FxHashMap::default()),
@@ -285,6 +296,29 @@ impl EmbeddedKind {
             // See PDFJS-6410 - PDF has no base encoding, so let's fallback to
             // standard here.
             .or_else(|| standard::get(code))
+    }
+
+    fn char_code_to_unicode(&self, code: u8) -> Option<BfString> {
+        let declared_name = self
+            .differences
+            .get(&code)
+            .map(String::as_str)
+            .or_else(|| self.encoding.map_code(code));
+        if let Some(unicode) = declared_name.and_then(glyph_name_to_bf_string) {
+            return Some(unicode);
+        }
+
+        let glyph = self.map_code(code);
+        if glyph != GlyphId::NOTDEF
+            && let Some(unicode) = self.embedded_unicodes.get(&glyph).and_then(Option::as_ref)
+        {
+            return Some(unicode.clone());
+        }
+
+        self.is_non_symbolic()
+            .then(|| standard::get(code))
+            .flatten()
+            .and_then(glyph_name_to_bf_string)
     }
 
     fn outline_glyph(&self, glyph: GlyphId) -> BezPath {
@@ -394,6 +428,33 @@ impl EmbeddedKind {
     }
 }
 
+fn retain_unique_unicode(
+    mappings: &mut FxHashMap<GlyphId, Option<BfString>>,
+    glyph: GlyphId,
+    unicode: BfString,
+) {
+    match mappings.entry(glyph) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(Some(unicode));
+        }
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            if entry.get().as_ref() != Some(&unicode) {
+                entry.insert(None);
+            }
+        }
+    }
+}
+
+fn is_extractable_cmap_character(character: char) -> bool {
+    let scalar = character as u32;
+    !character.is_control()
+        && !(0xE000..=0xF8FF).contains(&scalar)
+        && !(0xF0000..=0xFFFFD).contains(&scalar)
+        && !(0x100000..=0x10FFFD).contains(&scalar)
+        && !(0xFDD0..=0xFDEF).contains(&scalar)
+        && scalar & 0xFFFF < 0xFFFE
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Width {
     Value(f32),
@@ -492,5 +553,38 @@ pub(crate) fn read_encoding(dict: &Dict<'_>) -> (Encoding, FxHashMap<u8, String>
             get_encoding_base(dict, Name::new_unescaped(ENCODING)),
             FxHashMap::default(),
         )
+    }
+}
+
+#[cfg(test)]
+mod unicode_fallback_tests {
+    use super::{is_extractable_cmap_character, retain_unique_unicode};
+    use hayro_cmap::BfString;
+    use rustc_hash::FxHashMap;
+    use skrifa::GlyphId;
+
+    #[test]
+    fn embedded_glyph_unicode_must_be_unambiguous() {
+        let glyph = GlyphId::new(7);
+        let mut mappings = FxHashMap::default();
+        retain_unique_unicode(&mut mappings, glyph, BfString::Char('A'));
+        retain_unique_unicode(&mut mappings, glyph, BfString::Char('A'));
+        assert_eq!(mappings.get(&glyph), Some(&Some(BfString::Char('A'))));
+
+        retain_unique_unicode(&mut mappings, glyph, BfString::Char('B'));
+        assert_eq!(mappings.get(&glyph), Some(&None));
+
+        retain_unique_unicode(&mut mappings, glyph, BfString::Char('A'));
+        assert_eq!(mappings.get(&glyph), Some(&None));
+    }
+
+    #[test]
+    fn cmap_fallback_rejects_nonsemantic_scalars() {
+        assert!(is_extractable_cmap_character('A'));
+        assert!(is_extractable_cmap_character('\u{1F642}'));
+        assert!(!is_extractable_cmap_character('\0'));
+        assert!(!is_extractable_cmap_character('\u{E000}'));
+        assert!(!is_extractable_cmap_character('\u{FDD0}'));
+        assert!(!is_extractable_cmap_character('\u{10FFFF}'));
     }
 }

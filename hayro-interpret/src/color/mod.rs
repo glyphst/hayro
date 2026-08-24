@@ -190,10 +190,14 @@ pub(crate) enum ColorSpaceType {
 
 impl ColorSpaceType {
     fn new(object: Object<'_>, cache: &Cache) -> Option<Self> {
-        Self::new_inner(object, cache)
+        Self::new_inner(object, cache, false)
     }
 
-    fn new_inner(object: Object<'_>, cache: &Cache) -> Option<Self> {
+    fn new_preserving_icc(object: Object<'_>, cache: &Cache) -> Option<Self> {
+        Self::new_inner(object, cache, true)
+    }
+
+    fn new_inner(object: Object<'_>, cache: &Cache, preserve_icc: bool) -> Option<Self> {
         if let Object::Name(name) = object {
             return Self::new_from_name(&name);
         } else if let Object::Array(color_array) = object {
@@ -214,7 +218,7 @@ impl ColorSpaceType {
                                     // sRGB. If we ever implement PDF-to-PDF, we probably want to
                                     // let the user pass the native color type and don't make this optimization
                                     // if it's not sRGB.
-                                    if icc.is_srgb() {
+                                    if icc.is_srgb() && !preserve_icc {
                                         Self::DeviceRgb(DeviceRgb)
                                     } else {
                                         Self::ICCBased(icc)
@@ -299,9 +303,15 @@ impl ColorSpace {
     ///
     /// Resource aliases must be resolved by the caller before using this
     /// constructor. The returned handle owns all decoded color data and does
-    /// not borrow the source object.
+    /// not borrow the source object. Unlike the ordinary interpretation path,
+    /// this preserves `ICCBased` identity even when the profile advertises the
+    /// conventional `sRGB` device-model marker, so retained renderers can
+    /// validate rather than silently assume device equivalence.
     pub fn from_pdf_object(object: Object<'_>) -> Option<Self> {
-        Self::new(object, &Cache::new())
+        Some(Self(Arc::new(ColorSpaceType::new_preserving_icc(
+            object,
+            &Cache::new(),
+        )?)))
     }
 
     /// Return whether two handles share the same parsed color-space instance.
@@ -692,4 +702,24 @@ fn encode_components(input: &[f32], ranges: &[(f32, f32)]) -> SmallVec<[u8; 4]> 
             (((*value - min) / (max - min)) * 255.0 + 0.5) as u8
         })
         .collect()
+}
+
+#[cfg(test)]
+mod retained_inspection_tests {
+    use super::*;
+    use hayro_syntax::Pdf;
+
+    #[test]
+    fn owned_inspection_preserves_srgb_marked_icc_identity() {
+        let bytes =
+            include_bytes!("../../../hayro-tests/pdfs/custom/xobject_with_fill_opacity.pdf");
+        let pdf = Pdf::new(bytes.to_vec()).expect("parse ICC page-group fixture");
+        let group = pdf.pages()[0]
+            .raw()
+            .get::<Dict<'_>>(GROUP)
+            .expect("page group");
+        let object = group.get::<Object<'_>>(CS).expect("page group color space");
+        let color_space = ColorSpace::from_pdf_object(object).expect("parse owned color space");
+        assert_eq!(color_space.kind(), ColorSpaceKind::IccBased);
+    }
 }

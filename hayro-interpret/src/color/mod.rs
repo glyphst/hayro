@@ -295,6 +295,15 @@ impl ColorSpaceType {
 pub struct ColorSpace(Arc<ColorSpaceType>);
 
 impl ColorSpace {
+    /// Return whether two handles share the same parsed color-space instance.
+    ///
+    /// This identity is process-local and is intended only for deduplicating
+    /// derived resources while interpreting one document. It is not a stable
+    /// document or serialization identifier.
+    pub fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Create a new color space from the given object.
     pub(crate) fn new(object: Object<'_>, cache: &Cache) -> Option<Self> {
         Some(Self(Arc::new(ColorSpaceType::new(object, cache)?)))

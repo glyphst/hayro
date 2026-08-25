@@ -177,6 +177,16 @@ impl Function {
         }
     }
 
+    /// Return every nested Type 3 stitching boundary in input-domain order.
+    ///
+    /// Retained frontends use this read-only query during conservative raw
+    /// preflight. A renderer that cannot prove the curved boundary of a
+    /// discontinuous patch Function can reject it before interpretation while
+    /// still accepting continuous one-input functions.
+    pub fn stitching_boundaries(&self) -> Vec<f32> {
+        self.stitching_bounds().into_vec()
+    }
+
     /// Return an owned calculator program when this is a PDF Type 4 function.
     ///
     /// The parser bounds program size and nesting before this representation is

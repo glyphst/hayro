@@ -1,5 +1,5 @@
 use crate::CacheKey;
-use crate::color::Color;
+use crate::color::{Color, ColorSpaceKind};
 use crate::pattern::Pattern;
 use crate::util::hash128;
 use crate::x_object::ImageXObject;
@@ -70,6 +70,16 @@ impl CacheKey for StencilImage<'_, '_> {
 pub struct RasterImage<'a>(pub(crate) ImageXObject<'a>);
 
 impl RasterImage<'_> {
+    /// Return typed source/effective color-space properties for this image.
+    ///
+    /// The decoded pixels returned by [`Self::with_rgba`] already reflect the
+    /// effective space. Retained consumers can use this value to prove that a
+    /// `DefaultGray`, `DefaultRGB`, or `DefaultCMYK` resource was applied
+    /// instead of silently treating the declared device space as final.
+    pub fn color_space_properties(&self) -> ImageColorSpaceProperties {
+        self.0.color_space_properties
+    }
+
     /// Perform some operation with the RGB and alpha channel of the image.
     ///
     /// The second argument allows you to give the image decoder a hint for
@@ -121,6 +131,43 @@ impl RasterImage<'_> {
     #[doc(hidden)]
     pub fn height(&self) -> u32 {
         self.0.height()
+    }
+}
+
+/// Typed source/effective color-space properties for a raster image.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ImageColorSpaceProperties {
+    pub(crate) has_color_space: bool,
+    pub(crate) declared_color_space_kind: Option<ColorSpaceKind>,
+    pub(crate) color_space_kind: Option<ColorSpaceKind>,
+    pub(crate) color_space_components: Option<usize>,
+    pub(crate) color_space_default_overridden: bool,
+}
+
+impl ImageColorSpaceProperties {
+    /// Whether the image explicitly declares `ColorSpace`/`CS`.
+    pub fn has_color_space(self) -> bool {
+        self.has_color_space
+    }
+
+    /// Parsed family named by the image before default-device remapping.
+    pub fn declared_color_space_kind(self) -> Option<ColorSpaceKind> {
+        self.declared_color_space_kind
+    }
+
+    /// Parsed family actually used to decode the image.
+    pub fn color_space_kind(self) -> Option<ColorSpaceKind> {
+        self.color_space_kind
+    }
+
+    /// Native component count accepted by the effective color space.
+    pub fn color_space_components(self) -> Option<usize> {
+        self.color_space_components
+    }
+
+    /// Whether a default device-space resource replaces the declared space.
+    pub fn color_space_is_default_overridden(self) -> bool {
+        self.color_space_default_overridden
     }
 }
 

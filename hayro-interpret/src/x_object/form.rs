@@ -418,10 +418,10 @@ mod tests {
     use crate::color::ColorSpaceKind;
     use crate::font::GlyphRun;
     use crate::{
-        BlendMode, DrawMode, DrawProps, Image, ImageDrawProps, InterpreterSettings,
-        InterpreterWarning, LinkBorder, LinkBorderColor, LinkBorderGeometry, LinkBorderStyle,
-        MarkedContentProperties, MarkedContentProperty, MarkedContentPropertyValue, MaskType,
-        SoftMask, interpret_page,
+        BlendMode, DrawMode, DrawProps, Image, ImageColorSpaceProperties, ImageData,
+        ImageDrawProps, InterpreterSettings, InterpreterWarning, LinkBorder, LinkBorderColor,
+        LinkBorderGeometry, LinkBorderStyle, MarkedContentProperties, MarkedContentProperty,
+        MarkedContentPropertyValue, MaskType, SoftMask, interpret_page,
     };
     use hayro_syntax::Pdf;
     use kurbo::BezPath;
@@ -482,6 +482,34 @@ mod tests {
              trailer <</Root 1 0 R>>\n%%EOF",
             page_stream.len(),
             String::from_utf8_lossy(page_stream),
+        )
+        .into_bytes()
+    }
+
+    fn default_rgb_image_pdf() -> Vec<u8> {
+        let page_stream =
+            b"q 10 0 0 10 0 0 cm /ImDefault Do Q q 10 0 0 10 20 0 cm /ImExplicit Do Q";
+        let image_data = "4080C0>";
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<<\
+               /ColorSpace<</DefaultRGB [/CalRGB <</WhitePoint[0.9505 1 1.089]/Gamma[2 2 2]>>]>>\
+               /XObject<</ImDefault 5 0 R/ImExplicit 6 0 R>>>>/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
+             5 0 obj <</Type/XObject/Subtype/Image/Width 1/Height 1/BitsPerComponent 8\
+               /ColorSpace/DeviceRGB/Filter/ASCIIHexDecode/Length {}>> stream\n{}\nendstream endobj\n\
+             6 0 obj <</Type/XObject/Subtype/Image/Width 1/Height 1/BitsPerComponent 8\
+               /ColorSpace[/CalRGB <</WhitePoint[0.9505 1 1.089]/Gamma[2 2 2]>>]\
+               /Filter/ASCIIHexDecode/Length {}>> stream\n{}\nendstream endobj\n\
+             trailer <</Root 1 0 R>>\n%%EOF",
+            page_stream.len(),
+            String::from_utf8_lossy(page_stream),
+            image_data.len(),
+            image_data,
+            image_data.len(),
+            image_data,
         )
         .into_bytes()
     }
@@ -607,6 +635,7 @@ mod tests {
         alpha_is_shape: Vec<bool>,
         alpha_constants: Vec<f32>,
         text_knockout: Vec<bool>,
+        raster_images: Vec<(ImageColorSpaceProperties, Vec<u8>)>,
     }
 
     impl RecordingDevice {
@@ -659,7 +688,21 @@ mod tests {
             self.events.push("end-fill-stroke");
         }
 
-        fn draw_image(&mut self, _: Image<'a, '_>, _: ImageDrawProps<'a>) {}
+        fn draw_image(&mut self, image: Image<'a, '_>, _: ImageDrawProps<'a>) {
+            if let Image::Raster(image) = image {
+                let properties = image.color_space_properties();
+                image.with_rgba(
+                    |data, _| {
+                        let bytes = match data {
+                            ImageData::Rgb(data) => data.data,
+                            ImageData::Luma(data) => data.data,
+                        };
+                        self.raster_images.push((properties, bytes));
+                    },
+                    None,
+                );
+            }
+        }
 
         fn draw_form(&mut self, form: &FormInvocation<'a>) {
             self.events.push("form");
@@ -709,6 +752,40 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(adjustment, [true, false, true]);
+    }
+
+    #[test]
+    fn images_apply_default_rgb_before_decoding_and_report_provenance() {
+        let device = interpret_bytes(default_rgb_image_pdf(), false);
+        assert_eq!(device.raster_images.len(), 2);
+
+        let (default_properties, default_pixels) = &device.raster_images[0];
+        assert!(default_properties.has_color_space());
+        assert_eq!(
+            default_properties.declared_color_space_kind(),
+            Some(ColorSpaceKind::DeviceRgb)
+        );
+        assert_eq!(
+            default_properties.color_space_kind(),
+            Some(ColorSpaceKind::CalRgb)
+        );
+        assert_eq!(default_properties.color_space_components(), Some(3));
+        assert!(default_properties.color_space_is_default_overridden());
+
+        let (explicit_properties, explicit_pixels) = &device.raster_images[1];
+        assert_eq!(
+            explicit_properties.declared_color_space_kind(),
+            Some(ColorSpaceKind::CalRgb)
+        );
+        assert_eq!(
+            explicit_properties.color_space_kind(),
+            Some(ColorSpaceKind::CalRgb)
+        );
+        assert_eq!(explicit_properties.color_space_components(), Some(3));
+        assert!(!explicit_properties.color_space_is_default_overridden());
+
+        assert_eq!(default_pixels, explicit_pixels);
+        assert_ne!(default_pixels.as_slice(), [0x40, 0x80, 0xc0]);
     }
 
     #[test]

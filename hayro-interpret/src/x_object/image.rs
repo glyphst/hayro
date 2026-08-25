@@ -47,7 +47,7 @@ impl ImageKind {
 impl<'a> ImageXObject<'a> {
     pub(crate) fn new(
         stream: &Stream<'a>,
-        resolve_cs: impl FnOnce(&Name<'_>) -> Option<ColorSpace>,
+        resolve_cs: impl FnMut(&Name<'_>) -> Option<ColorSpace>,
         warning_sink: &WarningSinkFn,
         cache: &Cache,
         transfer_function: Option<ActiveTransferFunction>,
@@ -72,7 +72,7 @@ impl<'a> ImageXObject<'a> {
 
     fn new_inner(
         stream: &Stream<'a>,
-        resolve_cs: impl FnOnce(&Name<'_>) -> Option<ColorSpace>,
+        mut resolve_cs: impl FnMut(&Name<'_>) -> Option<ColorSpace>,
         warning_sink: &WarningSinkFn,
         cache: &Cache,
         mut kind: ImageKind,
@@ -99,14 +99,13 @@ impl<'a> ImageXObject<'a> {
             let cs_obj = dict
                 .get::<Object<'_>>(CS)
                 .or_else(|| dict.get::<Object<'_>>(COLORSPACE));
+            let declared_name = cs_obj.clone().and_then(Object::into_name);
             let declared = cs_obj
                 .clone()
-                .and_then(|object| ColorSpace::new(object, cache));
+                .and_then(|object| ColorSpace::new(object, cache))
+                .or_else(|| declared_name.as_ref().and_then(&mut resolve_cs));
             let declared_kind = declared.as_ref().map(ColorSpace::kind);
-            let declared_name = cs_obj.clone().and_then(Object::into_name);
-            let default_name = declared_name
-                .as_ref()
-                .and_then(default_device_resource_name);
+            let default_name = declared_kind.and_then(default_device_resource_name);
             let (effective, default_overridden) = if let Some(default_name) = default_name {
                 let default_name = Name::new_unescaped(default_name);
                 if let Some(default) = resolve_cs(&default_name) {
@@ -114,14 +113,8 @@ impl<'a> ImageXObject<'a> {
                 } else {
                     (declared, false)
                 }
-            } else if declared.is_some() {
-                (declared, false)
             } else {
-                // Inline images can also refer to color spaces by name.
-                // Apparently, some PDF producers also do this for normal images,
-                // though the PDF spec forbids it. See
-                // https://github.com/LaurenzV/hayro/pull/1311.
-                (declared_name.and_then(|name| resolve_cs(&name)), false)
+                (declared, false)
             };
             let properties = ImageColorSpaceProperties {
                 has_color_space: cs_obj.is_some(),
@@ -282,11 +275,11 @@ impl<'a> ImageXObject<'a> {
     }
 }
 
-fn default_device_resource_name(name: &Name<'_>) -> Option<&'static [u8]> {
-    match name.as_ref() {
-        DEVICE_GRAY | G => Some(DEFAULT_GRAY),
-        DEVICE_RGB | RGB => Some(DEFAULT_RGB),
-        DEVICE_CMYK | CMYK => Some(DEFAULT_CMYK),
+fn default_device_resource_name(kind: crate::color::ColorSpaceKind) -> Option<&'static [u8]> {
+    match kind {
+        crate::color::ColorSpaceKind::DeviceGray => Some(DEFAULT_GRAY),
+        crate::color::ColorSpaceKind::DeviceRgb => Some(DEFAULT_RGB),
+        crate::color::ColorSpaceKind::DeviceCmyk => Some(DEFAULT_CMYK),
         _ => None,
     }
 }

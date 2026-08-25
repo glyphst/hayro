@@ -487,25 +487,28 @@ mod tests {
     }
 
     fn default_rgb_image_pdf() -> Vec<u8> {
-        let page_stream =
-            b"q 10 0 0 10 0 0 cm /ImDefault Do Q q 10 0 0 10 20 0 cm /ImExplicit Do Q";
+        let page_stream = b"q 10 0 0 10 0 0 cm /ImDefault Do Q q 10 0 0 10 20 0 cm /ImExplicit Do Q q 10 0 0 10 40 0 cm /ImAlias Do Q";
         let image_data = "4080C0>";
         format!(
             "%PDF-1.7\n\
              1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
              2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
              3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<<\
-               /ColorSpace<</DefaultRGB [/CalRGB <</WhitePoint[0.9505 1 1.089]/Gamma[2 2 2]>>]>>\
-               /XObject<</ImDefault 5 0 R/ImExplicit 6 0 R>>>>/Contents 4 0 R>> endobj\n\
+               /ColorSpace<</DefaultRGB [/CalRGB <</WhitePoint[0.9505 1 1.089]/Gamma[2 2 2]>>]/AliasRGB/DeviceRGB>>\
+               /XObject<</ImDefault 5 0 R/ImExplicit 6 0 R/ImAlias 7 0 R>>>>/Contents 4 0 R>> endobj\n\
              4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
              5 0 obj <</Type/XObject/Subtype/Image/Width 1/Height 1/BitsPerComponent 8\
                /ColorSpace/DeviceRGB/Filter/ASCIIHexDecode/Length {}>> stream\n{}\nendstream endobj\n\
              6 0 obj <</Type/XObject/Subtype/Image/Width 1/Height 1/BitsPerComponent 8\
                /ColorSpace[/CalRGB <</WhitePoint[0.9505 1 1.089]/Gamma[2 2 2]>>]\
                /Filter/ASCIIHexDecode/Length {}>> stream\n{}\nendstream endobj\n\
+             7 0 obj <</Type/XObject/Subtype/Image/Width 1/Height 1/BitsPerComponent 8\
+               /ColorSpace/AliasRGB/Filter/ASCIIHexDecode/Length {}>> stream\n{}\nendstream endobj\n\
              trailer <</Root 1 0 R>>\n%%EOF",
             page_stream.len(),
             String::from_utf8_lossy(page_stream),
+            image_data.len(),
+            image_data,
             image_data.len(),
             image_data,
             image_data.len(),
@@ -757,7 +760,7 @@ mod tests {
     #[test]
     fn images_apply_default_rgb_before_decoding_and_report_provenance() {
         let device = interpret_bytes(default_rgb_image_pdf(), false);
-        assert_eq!(device.raster_images.len(), 2);
+        assert_eq!(device.raster_images.len(), 3);
 
         let (default_properties, default_pixels) = &device.raster_images[0];
         assert!(default_properties.has_color_space());
@@ -786,6 +789,18 @@ mod tests {
 
         assert_eq!(default_pixels, explicit_pixels);
         assert_ne!(default_pixels.as_slice(), [0x40, 0x80, 0xc0]);
+
+        let (alias_properties, alias_pixels) = &device.raster_images[2];
+        assert_eq!(
+            alias_properties.declared_color_space_kind(),
+            Some(ColorSpaceKind::DeviceRgb)
+        );
+        assert_eq!(
+            alias_properties.color_space_kind(),
+            Some(ColorSpaceKind::CalRgb)
+        );
+        assert!(alias_properties.color_space_is_default_overridden());
+        assert_eq!(alias_pixels, explicit_pixels);
     }
 
     #[test]

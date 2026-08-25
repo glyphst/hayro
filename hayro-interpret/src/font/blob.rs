@@ -102,6 +102,11 @@ impl CffFontBlob {
         &self.0.as_ref().get().font
     }
 
+    pub(crate) fn postscript_name(&self) -> Option<&str> {
+        let name = self.0.as_ref().get().cff.name(0)?;
+        std::str::from_utf8(name).ok()
+    }
+
     pub(crate) fn text_metrics(&self) -> Option<(f32, f32)> {
         let bounds = self.font().metadata()?.bbox();
         let ascent = bounds.y_max.to_f32();

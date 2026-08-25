@@ -151,8 +151,28 @@ pub type FontData = Arc<dyn AsRef<[u8]> + Send + Sync>;
 /// valid prefix is found.
 pub(crate) fn strip_subset_prefix(name: &str) -> &str {
     match name.split_once('+') {
-        Some((prefix, rest)) if prefix.len() == 6 => rest,
+        Some((prefix, rest))
+            if prefix.len() == 6
+                && !rest.is_empty()
+                && prefix.bytes().all(|byte| byte.is_ascii_uppercase()) =>
+        {
+            rest
+        }
         _ => name,
+    }
+}
+
+#[cfg(test)]
+mod subset_prefix_tests {
+    use super::strip_subset_prefix;
+
+    #[test]
+    fn strips_only_pdf_subset_tags() {
+        assert_eq!(strip_subset_prefix("ABCDEF+MT2SYT"), "MT2SYT");
+        assert_eq!(strip_subset_prefix("abcDEF+MT2SYT"), "abcDEF+MT2SYT");
+        assert_eq!(strip_subset_prefix("ABCDE+MT2SYT"), "ABCDE+MT2SYT");
+        assert_eq!(strip_subset_prefix("ABCDEF+"), "ABCDEF+");
+        assert_eq!(strip_subset_prefix("MT2SYT"), "MT2SYT");
     }
 }
 
@@ -314,6 +334,42 @@ impl OutlineGlyph {
     /// See [`Glyph::as_unicode`] for details on the fallback chain used.
     pub fn as_unicode(&self) -> Option<BfString> {
         self.font.char_code_to_unicode(self.char_code)
+    }
+
+    /// Return the source character code consumed from the PDF string.
+    pub fn char_code(&self) -> u32 {
+        self.char_code
+    }
+
+    /// Return the declared or built-in PostScript glyph name when this is a
+    /// simple Type 1/CFF font with a name-bearing encoding.
+    ///
+    /// CID and TrueType fonts do not expose a single source glyph name through
+    /// this API because their code-to-glyph mapping can be cmap-dependent.
+    pub fn source_glyph_name(&self) -> Option<&str> {
+        self.font.source_glyph_name(self.char_code)
+    }
+
+    /// Return the PDF font's PostScript name with any six-letter subset prefix
+    /// removed, when one was declared.
+    pub fn font_postscript_name(&self) -> Option<&str> {
+        self.font.postscript_name()
+    }
+
+    /// Return the name carried by an embedded Type 1 or CFF program, when present.
+    /// This is distinct from the PDF dictionary's declared `/BaseFont` name.
+    pub fn embedded_font_postscript_name(&self) -> Option<&str> {
+        self.font.embedded_postscript_name()
+    }
+
+    /// Return the normalized `/BaseFont` name for a simple Type 1 font.
+    pub fn base_font_name(&self) -> Option<&str> {
+        self.font.base_font_name()
+    }
+
+    /// Return the normalized Type 1 font descriptor `/FontName`.
+    pub fn descriptor_font_name(&self) -> Option<&str> {
+        self.font.descriptor_font_name()
     }
 
     /// Get raw font bytes and metadata for downstream use.

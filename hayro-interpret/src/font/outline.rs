@@ -108,6 +108,42 @@ impl OutlineFont {
         }
     }
 
+    pub(crate) fn source_glyph_name(&self, char_code: u32) -> Option<&str> {
+        match self {
+            Self::Type1(font) => font.source_glyph_name(char_code),
+            Self::TrueType(_) | Self::Type0(_) => None,
+        }
+    }
+
+    pub(crate) fn postscript_name(&self) -> Option<&str> {
+        match self {
+            Self::Type1(font) => font.postscript_name(),
+            Self::TrueType(font) => font.postscript_name(),
+            Self::Type0(font) => font.postscript_name(),
+        }
+    }
+
+    pub(crate) fn embedded_postscript_name(&self) -> Option<&str> {
+        match self {
+            Self::Type1(font) => font.embedded_postscript_name(),
+            Self::TrueType(_) | Self::Type0(_) => None,
+        }
+    }
+
+    pub(crate) fn base_font_name(&self) -> Option<&str> {
+        match self {
+            Self::Type1(font) => font.base_font_name(),
+            Self::TrueType(_) | Self::Type0(_) => None,
+        }
+    }
+
+    pub(crate) fn descriptor_font_name(&self) -> Option<&str> {
+        match self {
+            Self::Type1(font) => font.descriptor_font_name(),
+            Self::TrueType(_) | Self::Type0(_) => None,
+        }
+    }
+
     /// Get the advance width for a glyph by character code.
     pub(crate) fn glyph_advance_width(&self, char_code: u32) -> Option<f32> {
         match self {

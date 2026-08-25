@@ -9,7 +9,7 @@ pub use crate::object::null::Null;
 pub use crate::object::number::Number;
 pub use crate::object::rect::Rect;
 pub use crate::object::r#ref::{MaybeRef, ObjRef};
-pub use crate::object::stream::Stream;
+pub use crate::object::stream::{LimitedStreamDecodeFailure, Stream};
 pub use crate::object::string::String;
 use crate::reader::Reader;
 use crate::reader::{Readable, ReaderContext, ReaderExt, Skippable};

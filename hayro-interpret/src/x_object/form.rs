@@ -530,27 +530,27 @@ mod tests {
     }
 
     fn marked_content_metadata_pdf() -> Vec<u8> {
-        marked_content_metadata_pdf_with_stream("")
+        marked_content_metadata_pdf_with_stream("", b"<x/>")
     }
 
-    fn marked_content_metadata_pdf_with_stream(stream_entries: &str) -> Vec<u8> {
+    fn marked_content_metadata_pdf_with_stream(stream_entries: &str, metadata: &[u8]) -> Vec<u8> {
         let page_stream = b"/Artifact /Layout BDC 0 0 10 10 re f EMC";
-        let metadata = b"<x/>";
-        format!(
+        let mut pdf = format!(
             "%PDF-1.7\n\
              1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
              2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
              3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</Properties<</Layout 5 0 R>>>>/Contents 4 0 R>> endobj\n\
              4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
              5 0 obj <</O/Layout/Subtype/Glyphst/BBox[-0.25 1.5 20 30]/Metadata 6 0 R>> endobj\n\
-             6 0 obj <</Type/Metadata/Subtype/XML{stream_entries}/Length {}>> stream\n{}\nendstream endobj\n\
-             trailer <</Root 1 0 R>>\n%%EOF",
+             6 0 obj <</Type/Metadata/Subtype/XML{stream_entries}/Length {}>> stream\n",
             page_stream.len(),
             String::from_utf8_lossy(page_stream),
             metadata.len(),
-            String::from_utf8_lossy(metadata),
         )
-        .into_bytes()
+        .into_bytes();
+        pdf.extend_from_slice(metadata);
+        pdf.extend_from_slice(b"\nendstream endobj\ntrailer <</Root 1 0 R>>\n%%EOF");
+        pdf
     }
 
     fn marked_content_private_properties_pdf(entries: &str) -> Vec<u8> {
@@ -878,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn marked_content_exposes_layout_bounds_owner_and_unfiltered_metadata() {
+    fn marked_content_exposes_layout_bounds_owner_and_decoded_metadata() {
         let device = interpret_bytes(marked_content_metadata_pdf(), false);
         assert_eq!(device.marked_properties.len(), 1);
         let properties = &device.marked_properties[0];
@@ -894,10 +894,22 @@ mod tests {
         assert!(properties.unavailable_keys.is_empty());
 
         let filtered = interpret_bytes(
-            marked_content_metadata_pdf_with_stream("/Filter/FlateDecode"),
+            marked_content_metadata_pdf_with_stream(
+                "/Filter/FlateDecode",
+                b"\x78\x9c\xb3\xa9\xd0\xb7\x03\x00\x02\xf8\x01\x22",
+            ),
             false,
         );
         let properties = &filtered.marked_properties[0];
+        let metadata = properties.metadata.as_ref().expect("filtered metadata");
+        assert_eq!(metadata.data, b"<x/>");
+        assert!(properties.unavailable_keys.is_empty());
+
+        let unsupported_filter = interpret_bytes(
+            marked_content_metadata_pdf_with_stream("/Filter/ASCIIHexDecode", b"3c782f3e>"),
+            false,
+        );
+        let properties = &unsupported_filter.marked_properties[0];
         assert!(properties.metadata.is_none());
         assert_eq!(properties.unavailable_keys, [b"Metadata".to_vec()]);
 
@@ -910,6 +922,21 @@ mod tests {
             },
         );
         let properties = &limited.marked_properties[0];
+        assert!(properties.metadata.is_none());
+        assert_eq!(properties.unavailable_keys, [b"Metadata".to_vec()]);
+
+        let filtered_limited = interpret_bytes_with_settings(
+            marked_content_metadata_pdf_with_stream(
+                "/Filter/FlateDecode",
+                b"\x78\x9c\xb3\xa9\xd0\xb7\x03\x00\x02\xf8\x01\x22",
+            ),
+            false,
+            InterpreterSettings {
+                max_marked_content_metadata_bytes: 3,
+                ..InterpreterSettings::default()
+            },
+        );
+        let properties = &filtered_limited.marked_properties[0];
         assert!(properties.metadata.is_none());
         assert_eq!(properties.unavailable_keys, [b"Metadata".to_vec()]);
     }

@@ -22,8 +22,7 @@ use crate::x_object::{ImageXObject, XObject};
 use hayro_syntax::content::TypedIter;
 use hayro_syntax::content::ops::TypedInstruction;
 use hayro_syntax::object::dict::keys::{
-    ACTUAL_TEXT, ALT, ANNOTS, BBOX, F, FILTER, LANG, MCID, METADATA, NAME, O, OC, OCG, OCMD,
-    SUBTYPE, TYPE,
+    ACTUAL_TEXT, ALT, ANNOTS, BBOX, LANG, MCID, METADATA, NAME, O, OC, OCG, OCMD, SUBTYPE, TYPE,
 };
 use hayro_syntax::object::{
     Array, Dict, Name, Object, ObjectIdentifier, Stream, String as PdfString, dict_or_stream,
@@ -189,17 +188,11 @@ fn marked_content_properties(
             .get::<Name<'_>>(TYPE)
             .is_some_and(|value| value.as_ref() == METADATA);
         let subtype = dict.get::<Name<'_>>(SUBTYPE)?;
-        if !is_metadata
-            || subtype.as_ref() != b"XML"
-            || dict.contains_key(FILTER)
-            || dict.contains_key(F)
-        {
+        if !is_metadata || subtype.as_ref() != b"XML" {
             return None;
         }
-        let data = stream.raw_data();
-        if data.len() as u64 > max_metadata_bytes {
-            return None;
-        }
+        let max_metadata_bytes = usize::try_from(max_metadata_bytes).unwrap_or(usize::MAX);
+        let data = stream.decoded_flate_with_limit(max_metadata_bytes).ok()?;
         Some(MarkedContentMetadata {
             subtype: subtype.as_ref().to_vec(),
             data: data.into_owned(),
@@ -343,8 +336,8 @@ pub struct InterpreterSettings {
     /// raster devices. Retained-scene devices should enable this and evaluate
     /// the emitted expressions themselves.
     pub preserve_optional_content: bool,
-    /// Maximum unfiltered metadata bytes copied from one marked-content
-    /// property list.
+    /// Maximum decoded metadata bytes copied from one marked-content property
+    /// list.
     ///
     /// Values above this limit remain present in `unavailable_keys`, allowing
     /// retained-scene devices to fail closed before allocating the copy.

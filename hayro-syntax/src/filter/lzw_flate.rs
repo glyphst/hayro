@@ -10,6 +10,12 @@ pub(crate) mod flate {
     use crate::filter::lzw_flate::{PredictorParams, apply_predictor};
     use crate::object::Dict;
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum LimitedDecodeFailure {
+        Decode,
+        LimitExceeded,
+    }
+
     #[cfg(feature = "unsafe")]
     pub(crate) fn decode(data: &[u8], params: &Dict<'_>) -> Option<Vec<u8>> {
         use flate2::read::{DeflateDecoder, ZlibDecoder};
@@ -38,6 +44,52 @@ pub(crate) mod flate {
         apply_predictor(decoded, &params)
     }
 
+    #[cfg(feature = "unsafe")]
+    pub(crate) fn decode_with_limit(
+        data: &[u8],
+        max_output_bytes: usize,
+    ) -> Result<Vec<u8>, LimitedDecodeFailure> {
+        use flate2::read::{DeflateDecoder, ZlibDecoder};
+        use std::io::Read;
+
+        fn read_bounded(
+            mut decoder: impl Read,
+            max_output_bytes: usize,
+        ) -> Result<Vec<u8>, LimitedDecodeFailure> {
+            let mut result = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let remaining = max_output_bytes.saturating_sub(result.len());
+                let read_len = buffer.len().min(remaining.saturating_add(1));
+                if read_len == 0 {
+                    return Err(LimitedDecodeFailure::LimitExceeded);
+                }
+                let read = decoder
+                    .read(&mut buffer[..read_len])
+                    .map_err(|_| LimitedDecodeFailure::Decode)?;
+                if read == 0 {
+                    return Ok(result);
+                }
+                if read > remaining {
+                    return Err(LimitedDecodeFailure::LimitExceeded);
+                }
+                result
+                    .try_reserve_exact(read)
+                    .map_err(|_| LimitedDecodeFailure::Decode)?;
+                result.extend_from_slice(&buffer[..read]);
+            }
+        }
+
+        let has_zlib_header = data.len() >= 2
+            && (data[0] & 0x0f) == 0x08
+            && ((data[0] as u16) << 8 | data[1] as u16).is_multiple_of(31);
+        if has_zlib_header {
+            read_bounded(ZlibDecoder::new(data), max_output_bytes)
+        } else {
+            read_bounded(DeflateDecoder::new(data), max_output_bytes)
+        }
+    }
+
     #[cfg(not(feature = "unsafe"))]
     pub(crate) fn decode(data: &[u8], params: &Dict<'_>) -> Option<Vec<u8>> {
         let decoded = fallback::decode(data)?;
@@ -45,17 +97,40 @@ pub(crate) mod flate {
         apply_predictor(decoded, &params)
     }
 
+    #[cfg(not(feature = "unsafe"))]
+    pub(crate) fn decode_with_limit(
+        data: &[u8],
+        max_output_bytes: usize,
+    ) -> Result<Vec<u8>, LimitedDecodeFailure> {
+        fallback::decode_with_limit(data, max_output_bytes)
+    }
+
     /// Ported from <https://github.com/mozilla/pdf.js/blob/master/src/core/flate_stream.js>
     /// TODO: Rewrite this in idiomatic Rust.
     mod fallback {
+        use super::LimitedDecodeFailure;
         use alloc::vec;
         use alloc::vec::Vec;
 
         pub(crate) fn decode(data: &[u8]) -> Option<Vec<u8>> {
-            flate_decode(data)
+            flate_decode(data, None).ok()
         }
 
-        fn flate_decode(data: &[u8]) -> Option<Vec<u8>> {
+        #[cfg(not(feature = "unsafe"))]
+        pub(crate) fn decode_with_limit(
+            data: &[u8],
+            max_output_bytes: usize,
+        ) -> Result<Vec<u8>, LimitedDecodeFailure> {
+            flate_decode(data, Some(max_output_bytes))
+        }
+
+        fn flate_decode(
+            data: &[u8],
+            max_output_bytes: Option<usize>,
+        ) -> Result<Vec<u8>, LimitedDecodeFailure> {
+            if data.is_empty() {
+                return Err(LimitedDecodeFailure::Decode);
+            }
             if data.len() >= 2 {
                 let cmf = data[0];
                 let flg = data[1];
@@ -64,12 +139,12 @@ pub(crate) mod flate {
                     && ((cmf as u16) << 8 | flg as u16).is_multiple_of(31)
                     && (flg & 0x20) == 0
                 {
-                    let mut stream = FlateStream::new(&data[2..]);
+                    let mut stream = FlateStream::new(&data[2..], max_output_bytes);
                     return stream.decode();
                 }
             }
 
-            let mut stream = FlateStream::new(data);
+            let mut stream = FlateStream::new(data, max_output_bytes);
             stream.decode()
         }
 
@@ -80,10 +155,12 @@ pub(crate) mod flate {
             code_size: u8,
             output: Vec<u8>,
             eof: bool,
+            max_output_bytes: Option<usize>,
+            limit_exceeded: bool,
         }
 
         impl<'a> FlateStream<'a> {
-            fn new(data: &'a [u8]) -> Self {
+            fn new(data: &'a [u8], max_output_bytes: Option<usize>) -> Self {
                 FlateStream {
                     data,
                     pos: 0,
@@ -91,15 +168,39 @@ pub(crate) mod flate {
                     code_size: 0,
                     output: Vec::new(),
                     eof: false,
+                    max_output_bytes,
+                    limit_exceeded: false,
                 }
             }
 
-            fn decode(&mut self) -> Option<Vec<u8>> {
+            fn decode(&mut self) -> Result<Vec<u8>, LimitedDecodeFailure> {
                 while !self.eof && self.pos < self.data.len() {
                     self.read_block();
                 }
 
-                Some(core::mem::take(&mut self.output))
+                if self.limit_exceeded {
+                    Err(LimitedDecodeFailure::LimitExceeded)
+                } else {
+                    Ok(core::mem::take(&mut self.output))
+                }
+            }
+
+            fn can_extend_output(&mut self, additional: usize) -> bool {
+                let Some(max_output_bytes) = self.max_output_bytes else {
+                    return true;
+                };
+                if self
+                    .output
+                    .len()
+                    .checked_add(additional)
+                    .is_some_and(|new_len| new_len <= max_output_bytes)
+                {
+                    true
+                } else {
+                    self.limit_exceeded = true;
+                    self.eof = true;
+                    false
+                }
             }
 
             fn get_byte(&mut self) -> Option<u8> {
@@ -252,6 +353,9 @@ pub(crate) mod flate {
                         self.eof = true;
                     }
                 } else {
+                    if !self.can_extend_output(block_len as usize) {
+                        return;
+                    }
                     let block = self.get_bytes(block_len as usize);
                     self.output.extend_from_slice(&block);
                     if block.len() < block_len as usize {
@@ -283,6 +387,9 @@ pub(crate) mod flate {
                     };
 
                     if code1 < 256 {
+                        if !self.can_extend_output(1) {
+                            return;
+                        }
                         self.output.push(code1 as u8);
                     } else if code1 == 256 {
                         return;
@@ -332,6 +439,9 @@ pub(crate) mod flate {
                         }
 
                         // Copy from previous output
+                        if !self.can_extend_output(length) {
+                            return;
+                        }
                         let start = self.output.len().wrapping_sub(distance);
                         for _ in 0..length {
                             if start < self.output.len() {

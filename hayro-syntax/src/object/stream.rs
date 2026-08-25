@@ -5,7 +5,9 @@ use crate::filter::Filter;
 use crate::object;
 use crate::object::Dict;
 use crate::object::Name;
-use crate::object::dict::keys::{DECODE_PARMS, DP, F, FILTER, LENGTH, TYPE};
+use crate::object::dict::keys::{
+    DECODE_PARMS, DP, F, FILTER, FLATE_DECODE, FLATE_DECODE_ABBREVIATION, LENGTH, TYPE,
+};
 use crate::object::{Array, ObjectIdentifier};
 use crate::object::{Object, ObjectLike, ObjectRefLike};
 use crate::reader::Reader;
@@ -161,6 +163,73 @@ impl<'a> Stream<'a> {
             .map(|r| r.data)
     }
 
+    /// Return bounded decoded bytes for an unfiltered stream or a stream with
+    /// exactly one `FlateDecode` filter.
+    ///
+    /// This deliberately narrow API validates the filter object instead of
+    /// using the best-effort general filter iterator. It rejects external
+    /// streams, filter chains, unknown filters, and non-default decode
+    /// parameters, so callers can retain the supported bytes without silently
+    /// skipping stream semantics.
+    pub fn decoded_flate_with_limit(
+        &self,
+        max_output_bytes: usize,
+    ) -> Result<Cow<'a, [u8]>, LimitedStreamDecodeFailure> {
+        if self.dict.contains_key(F) {
+            return Err(LimitedStreamDecodeFailure::UnsupportedFilter);
+        }
+
+        if !self.dict.contains_key(FILTER) {
+            let data = self.raw_data();
+            return if data.len() <= max_output_bytes {
+                Ok(data)
+            } else {
+                Err(LimitedStreamDecodeFailure::LimitExceeded)
+            };
+        }
+
+        match self.dict.get::<Object<'_>>(FILTER) {
+            Some(Object::Name(name)) => Some(name),
+            Some(Object::Array(array)) if array.raw_iter().count() == 1 => {
+                array.iter::<Name<'_>>().next()
+            }
+            _ => None,
+        }
+        .filter(|name| matches!(name.as_ref(), FLATE_DECODE | FLATE_DECODE_ABBREVIATION))
+        .ok_or(LimitedStreamDecodeFailure::UnsupportedFilter)?;
+
+        let decode_params_are_supported = match (
+            self.dict.contains_key(DP),
+            self.dict.contains_key(DECODE_PARMS),
+        ) {
+            (false, false) => true,
+            (true, false) => self
+                .dict
+                .get::<Object<'_>>(DP)
+                .is_some_and(|params| limited_flate_decode_params_are_supported(params)),
+            (false, true) => self
+                .dict
+                .get::<Object<'_>>(DECODE_PARMS)
+                .is_some_and(limited_flate_decode_params_are_supported),
+            (true, true) => false,
+        };
+        if !decode_params_are_supported {
+            return Err(LimitedStreamDecodeFailure::UnsupportedDecodeParameters);
+        }
+
+        let data = self.raw_data();
+        crate::filter::lzw_flate::flate::decode_with_limit(&data, max_output_bytes)
+            .map(Cow::Owned)
+            .map_err(|failure| match failure {
+                crate::filter::lzw_flate::flate::LimitedDecodeFailure::Decode => {
+                    LimitedStreamDecodeFailure::Decode
+                }
+                crate::filter::lzw_flate::flate::LimitedDecodeFailure::LimitExceeded => {
+                    LimitedStreamDecodeFailure::LimitExceeded
+                }
+            })
+    }
+
     /// Return the decoded data of the stream, and return image metadata
     /// if available.
     pub fn decoded_image(
@@ -189,6 +258,22 @@ impl<'a> Stream<'a> {
             data,
             image_data: None,
         }))
+    }
+}
+
+fn limited_flate_decode_params_are_supported(params: Object<'_>) -> bool {
+    match params {
+        Object::Null(_) => true,
+        Object::Dict(dict) => dict.is_empty(),
+        Object::Array(array) if array.raw_iter().count() == 1 => array
+            .iter::<Object<'_>>()
+            .next()
+            .is_some_and(|params| match params {
+                Object::Null(_) => true,
+                Object::Dict(dict) => dict.is_empty(),
+                _ => false,
+            }),
+        _ => false,
     }
 }
 
@@ -246,6 +331,19 @@ pub enum DecodeFailure {
     Decryption,
     /// An unknown failure occurred.
     Unknown,
+}
+
+/// A failure produced by [`Stream::decoded_flate_with_limit`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum LimitedStreamDecodeFailure {
+    /// The stream data is malformed or could not be decoded.
+    Decode,
+    /// The stream uses an external, unknown, non-Flate, or chained filter.
+    UnsupportedFilter,
+    /// The stream has decode parameters outside the proven default subset.
+    UnsupportedDecodeParameters,
+    /// Decoding would produce more bytes than the caller-provided limit.
+    LimitExceeded,
 }
 
 /// An image color space.
@@ -367,6 +465,7 @@ impl<'a> ObjectRefLike<'a> for Stream<'a> {
 #[cfg(test)]
 mod tests {
     use crate::object::Stream;
+    use crate::object::stream::LimitedStreamDecodeFailure;
     use crate::reader::Reader;
     use crate::reader::{ReaderContext, ReaderExt};
 
@@ -400,5 +499,80 @@ mod tests {
             .unwrap();
 
         assert_eq!(stream.data, b"abcdefghij");
+    }
+
+    #[test]
+    fn bounded_unfiltered_stream() {
+        let mut reader = Reader::new(b"<< /Length 4 >> stream\n<x/>\nendstream");
+        let stream = reader
+            .read_with_context::<Stream<'_>>(&ReaderContext::dummy())
+            .unwrap();
+
+        assert_eq!(
+            stream.decoded_flate_with_limit(4).unwrap().as_ref(),
+            b"<x/>"
+        );
+        assert_eq!(
+            stream.decoded_flate_with_limit(3),
+            Err(LimitedStreamDecodeFailure::LimitExceeded)
+        );
+    }
+
+    #[test]
+    fn bounded_single_flate_stream() {
+        let data = b"<< /Length 12 /Filter [/Fl] >> stream\n\x78\x9c\xb3\xa9\xd0\xb7\x03\x00\x02\xf8\x01\x22\nendstream";
+        let mut reader = Reader::new(data);
+        let stream = reader
+            .read_with_context::<Stream<'_>>(&ReaderContext::dummy())
+            .unwrap();
+
+        assert_eq!(
+            stream.decoded_flate_with_limit(4).unwrap().as_ref(),
+            b"<x/>"
+        );
+        assert_eq!(
+            stream.decoded_flate_with_limit(3),
+            Err(LimitedStreamDecodeFailure::LimitExceeded)
+        );
+    }
+
+    #[test]
+    fn bounded_flate_rejects_unproven_stream_semantics() {
+        let cases: &[(&[u8], LimitedStreamDecodeFailure)] = &[
+            (
+                b"<< /Length 12 /Filter /MadeUp >> stream\n\x78\x9c\xb3\xa9\xd0\xb7\x03\x00\x02\xf8\x01\x22\nendstream",
+                LimitedStreamDecodeFailure::UnsupportedFilter,
+            ),
+            (
+                b"<< /Length 12 /Filter [/FlateDecode /ASCII85Decode] >> stream\n\x78\x9c\xb3\xa9\xd0\xb7\x03\x00\x02\xf8\x01\x22\nendstream",
+                LimitedStreamDecodeFailure::UnsupportedFilter,
+            ),
+            (
+                b"<< /Length 12 /Filter /FlateDecode /DecodeParms << /Predictor 12 >> >> stream\n\x78\x9c\xb3\xa9\xd0\xb7\x03\x00\x02\xf8\x01\x22\nendstream",
+                LimitedStreamDecodeFailure::UnsupportedDecodeParameters,
+            ),
+        ];
+        for (data, expected) in cases {
+            let mut reader = Reader::new(data);
+            let stream = reader
+                .read_with_context::<Stream<'_>>(&ReaderContext::dummy())
+                .unwrap();
+            assert_eq!(stream.decoded_flate_with_limit(4), Err(*expected));
+        }
+    }
+
+    #[cfg(feature = "unsafe")]
+    #[test]
+    fn bounded_flate_rejects_a_bad_zlib_checksum() {
+        let data = b"<< /Length 12 /Filter /FlateDecode >> stream\n\x78\x9c\xb3\xa9\xd0\xb7\x03\x00\x02\xf8\x01\x23\nendstream";
+        let mut reader = Reader::new(data);
+        let stream = reader
+            .read_with_context::<Stream<'_>>(&ReaderContext::dummy())
+            .unwrap();
+
+        assert_eq!(
+            stream.decoded_flate_with_limit(4),
+            Err(LimitedStreamDecodeFailure::Decode)
+        );
     }
 }

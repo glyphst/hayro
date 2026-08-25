@@ -10,7 +10,7 @@ use kurbo::{Affine, BezPath, Rect, Shape};
 pub struct MarkedContentMetadata {
     /// Raw `/Subtype` name. The currently proven subset is `XML`.
     pub subtype: Vec<u8>,
-    /// Unfiltered, decrypted metadata stream bytes.
+    /// Decoded, decrypted metadata stream bytes.
     pub data: Vec<u8>,
 }
 
@@ -76,7 +76,7 @@ pub struct MarkedContentProperties {
     pub owner: Option<Vec<u8>>,
     /// Finite four-number `/BBox` property in its declared coordinate space.
     pub bounding_box: Option<[f64; 4]>,
-    /// Exact unfiltered XML metadata attached to the marked-content sequence.
+    /// Exact decoded XML metadata attached to the marked-content sequence.
     pub metadata: Option<MarkedContentMetadata>,
     /// Additional producer-defined entries, sorted by raw PDF name bytes.
     pub additional_properties: Vec<MarkedContentProperty>,

@@ -574,5 +574,15 @@ mod tests {
             stream.decoded_flate_with_limit(4),
             Err(LimitedStreamDecodeFailure::Decode)
         );
+
+        let data = b"<< /Length 4 /Filter /FlateDecode >> stream\n<x/>\nendstream";
+        let mut reader = Reader::new(data);
+        let stream = reader
+            .read_with_context::<Stream<'_>>(&ReaderContext::dummy())
+            .unwrap();
+        assert_eq!(
+            stream.decoded_flate_with_limit(4),
+            Err(LimitedStreamDecodeFailure::Decode)
+        );
     }
 }

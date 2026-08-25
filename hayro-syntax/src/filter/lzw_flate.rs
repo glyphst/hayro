@@ -49,44 +49,51 @@ pub(crate) mod flate {
         data: &[u8],
         max_output_bytes: usize,
     ) -> Result<Vec<u8>, LimitedDecodeFailure> {
-        use flate2::read::{DeflateDecoder, ZlibDecoder};
-        use std::io::Read;
-
-        fn read_bounded(
-            mut decoder: impl Read,
-            max_output_bytes: usize,
-        ) -> Result<Vec<u8>, LimitedDecodeFailure> {
-            let mut result = Vec::new();
-            let mut buffer = [0_u8; 8192];
-            loop {
-                let remaining = max_output_bytes.saturating_sub(result.len());
-                let read_len = buffer.len().min(remaining.saturating_add(1));
-                if read_len == 0 {
-                    return Err(LimitedDecodeFailure::LimitExceeded);
-                }
-                let read = decoder
-                    .read(&mut buffer[..read_len])
-                    .map_err(|_| LimitedDecodeFailure::Decode)?;
-                if read == 0 {
-                    return Ok(result);
-                }
-                if read > remaining {
-                    return Err(LimitedDecodeFailure::LimitExceeded);
-                }
-                result
-                    .try_reserve_exact(read)
-                    .map_err(|_| LimitedDecodeFailure::Decode)?;
-                result.extend_from_slice(&buffer[..read]);
-            }
-        }
+        use flate2::{Decompress, FlushDecompress, Status};
 
         let has_zlib_header = data.len() >= 2
             && (data[0] & 0x0f) == 0x08
             && ((data[0] as u16) << 8 | data[1] as u16).is_multiple_of(31);
-        if has_zlib_header {
-            read_bounded(ZlibDecoder::new(data), max_output_bytes)
-        } else {
-            read_bounded(DeflateDecoder::new(data), max_output_bytes)
+        let mut decoder = Decompress::new(has_zlib_header);
+        let mut input_offset = 0_usize;
+        let mut result = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let remaining = max_output_bytes.saturating_sub(result.len());
+            let output_len = buffer.len().min(remaining.saturating_add(1));
+            if output_len == 0 {
+                return Err(LimitedDecodeFailure::LimitExceeded);
+            }
+            let input_before = decoder.total_in();
+            let output_before = decoder.total_out();
+            let status = decoder
+                .decompress(
+                    &data[input_offset..],
+                    &mut buffer[..output_len],
+                    FlushDecompress::None,
+                )
+                .map_err(|_| LimitedDecodeFailure::Decode)?;
+            let consumed = usize::try_from(decoder.total_in() - input_before)
+                .map_err(|_| LimitedDecodeFailure::Decode)?;
+            let produced = usize::try_from(decoder.total_out() - output_before)
+                .map_err(|_| LimitedDecodeFailure::Decode)?;
+            input_offset = input_offset
+                .checked_add(consumed)
+                .ok_or(LimitedDecodeFailure::Decode)?;
+            if produced > remaining {
+                return Err(LimitedDecodeFailure::LimitExceeded);
+            }
+            result
+                .try_reserve_exact(produced)
+                .map_err(|_| LimitedDecodeFailure::Decode)?;
+            result.extend_from_slice(&buffer[..produced]);
+
+            match status {
+                Status::StreamEnd if input_offset == data.len() => return Ok(result),
+                Status::StreamEnd => return Err(LimitedDecodeFailure::Decode),
+                Status::Ok | Status::BufError if consumed != 0 || produced != 0 => {}
+                Status::Ok | Status::BufError => return Err(LimitedDecodeFailure::Decode),
+            }
         }
     }
 

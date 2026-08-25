@@ -492,7 +492,7 @@ mod tests {
             "%PDF-1.7\n\
              1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
              2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
-             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</ExtGState<</Shape<</AIS true>>/Opacity<</AIS false>>/NoKo<</TK false>>>>>>/Contents 4 0 R>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</ExtGState<</Shape<</AIS true/ca 0.4>>/Opacity<</AIS false/ca 0.7>>/NoKo<</TK false>>>>>>/Contents 4 0 R>> endobj\n\
              4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
              trailer <</Root 1 0 R>>\n%%EOF",
             page_stream.len(),
@@ -605,6 +605,7 @@ mod tests {
         link_borders: Vec<(LinkBorder, Affine)>,
         events: Vec<&'static str>,
         alpha_is_shape: Vec<bool>,
+        alpha_constants: Vec<f32>,
         text_knockout: Vec<bool>,
     }
 
@@ -625,6 +626,7 @@ mod tests {
             self.path_transforms.push(props.transform);
             self.draw_modes.push(mode.clone());
             self.alpha_is_shape.push(props.alpha_is_shape);
+            self.alpha_constants.push(props.alpha_constant);
             if let Some(mask) = props.soft_mask.take() {
                 self.record_soft_mask(mask);
             }
@@ -713,6 +715,7 @@ mod tests {
     fn alpha_source_text_knockout_and_compound_object_boundaries_are_retained() {
         let device = interpret_bytes(alpha_and_text_object_semantics_pdf(), false);
         assert_eq!(device.alpha_is_shape, [true, false, false, false]);
+        assert_eq!(device.alpha_constants, [0.4, 0.7, 0.7, 1.0]);
         assert_eq!(device.text_knockout, [true, false]);
         assert_eq!(
             device.events,

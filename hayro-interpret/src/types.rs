@@ -315,6 +315,12 @@ pub struct DrawProps<'a> {
     pub soft_mask: Option<SoftMask<'a>>,
     /// The blend mode.
     pub blend_mode: BlendMode,
+    /// The current stroking or nonstroking alpha constant before it is folded
+    /// into the retained paint alpha.
+    ///
+    /// Devices that preserve PDF shape separately from opacity need this
+    /// scalar when [`Self::alpha_is_shape`] is true.
+    pub alpha_constant: f32,
     /// Whether the current alpha constant and soft mask contribute to object
     /// shape instead of object opacity.
     ///

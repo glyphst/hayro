@@ -217,11 +217,17 @@ impl<'a> Context<'a> {
     }
 
     pub(crate) fn draw_props(&self, is_stroke: bool) -> DrawProps<'a> {
+        let alpha_constant = if is_stroke {
+            self.get().graphics_state.stroke_alpha
+        } else {
+            self.get().graphics_state.non_stroke_alpha
+        };
         DrawProps {
             transform: self.get().ctm,
             paint: self.get_paint(is_stroke),
             soft_mask: self.get().graphics_state.soft_mask.clone(),
             blend_mode: self.get().graphics_state.blend_mode,
+            alpha_constant,
             alpha_is_shape: self.get().graphics_state.alpha_is_shape,
         }
     }

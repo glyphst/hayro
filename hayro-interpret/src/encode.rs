@@ -269,9 +269,9 @@ impl ShadingPattern {
         let color_space = self.shading.color_space.clone();
 
         let background_color = self
-            .shading
-            .background
-            .as_ref()
+            .background_applies
+            .then(|| self.shading.background.as_ref())
+            .flatten()
             .map(|b| color_space.to_rgba(b, 1.0))
             .unwrap_or(AlphaColor::TRANSPARENT);
 

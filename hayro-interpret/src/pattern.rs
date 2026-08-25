@@ -90,6 +90,13 @@ pub struct ShadingPattern {
     pub opacity: f32,
     /// An optional transfer function to apply to the shading's output colors.
     pub transfer_function: Option<ActiveTransferFunction>,
+    /// Whether the shading dictionary's `/Background` entry applies.
+    ///
+    /// PDF applies the entry only when a shading is selected through a
+    /// Pattern color space. A direct `sh` operator paints only the shading
+    /// itself, even though both operations otherwise share this retained
+    /// representation.
+    pub background_applies: bool,
 }
 
 impl ShadingPattern {
@@ -113,13 +120,18 @@ impl ShadingPattern {
             opacity,
             matrix,
             transfer_function: None,
+            background_applies: true,
         })
     }
 }
 
 impl CacheKey for ShadingPattern {
     fn cache_key(&self) -> u128 {
-        hash128(&(self.shading.cache_key(), self.matrix.cache_key()))
+        hash128(&(
+            self.shading.cache_key(),
+            self.matrix.cache_key(),
+            self.background_applies,
+        ))
     }
 }
 

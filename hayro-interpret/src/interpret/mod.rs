@@ -996,6 +996,7 @@ pub fn interpret<'a>(
                             matrix: Affine::IDENTITY,
                             opacity: context.get().graphics_state.non_stroke_alpha,
                             transfer_function: transfer_function.clone(),
+                            background_applies: false,
                         })
                     })
                 {

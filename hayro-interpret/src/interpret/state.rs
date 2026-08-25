@@ -277,6 +277,8 @@ pub(crate) struct GraphicsState<'a> {
     pub(crate) soft_mask: Option<SoftMask<'a>>,
     pub(crate) transfer_function: Option<ActiveTransferFunction>,
     pub(crate) blend_mode: BlendMode,
+    pub(crate) alpha_is_shape: bool,
+    pub(crate) text_knockout: bool,
 }
 
 impl Default for GraphicsState<'_> {
@@ -294,6 +296,8 @@ impl Default for GraphicsState<'_> {
             soft_mask: None,
             transfer_function: None,
             blend_mode: BlendMode::default(),
+            alpha_is_shape: false,
+            text_knockout: true,
         }
     }
 }
@@ -346,6 +350,8 @@ pub(crate) fn handle_gs_single<'a>(
         }
         "CA" => context.get_mut().graphics_state.stroke_alpha = dict.get::<f32>(key)?,
         "ca" => context.get_mut().graphics_state.non_stroke_alpha = dict.get::<f32>(key)?,
+        "AIS" => context.get_mut().graphics_state.alpha_is_shape = dict.get::<bool>(key)?,
+        "TK" => context.get_mut().graphics_state.text_knockout = dict.get::<bool>(key)?,
         "TR" | "TR2" => {
             let function = match dict
                 .get::<Object<'_>>(TR2)

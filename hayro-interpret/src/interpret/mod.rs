@@ -806,6 +806,7 @@ pub fn interpret<'a>(
             TypedInstruction::BeginText(_) => {
                 context.get_mut().text_state.text_matrix = Affine::IDENTITY;
                 context.get_mut().text_state.text_line_matrix = Affine::IDENTITY;
+                device.begin_text_object(context.get().graphics_state.text_knockout);
             }
             TypedInstruction::SetTextMatrix(m) => {
                 let m = Affine::new([
@@ -827,6 +828,11 @@ pub fn interpret<'a>(
                     .segments()
                     .next()
                     .is_some();
+
+                // The text object's implicit knockout group contains only its
+                // glyph paints. A clipping text mode takes effect after the
+                // text object has been evaluated.
+                device.end_text_object();
 
                 if has_outline {
                     let clip_path = context.get().ctm * context.get().text_state.clip_paths.clone();

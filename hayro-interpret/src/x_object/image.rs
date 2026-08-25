@@ -169,10 +169,11 @@ impl<'a> ImageXObject<'a> {
             soft_mask = None;
         }
 
-        device.push_transparency_group(
+        device.push_transparency_group_with_alpha_source(
             context.get().graphics_state.non_stroke_alpha,
             std::mem::take(&mut soft_mask),
             blend_mode,
+            context.get().graphics_state.alpha_is_shape,
         );
 
         let image = if self.kind.is_mask() {
@@ -190,6 +191,7 @@ impl<'a> ImageXObject<'a> {
                 transform,
                 soft_mask: None,
                 blend_mode: BlendMode::default(),
+                alpha_is_shape: context.get().graphics_state.alpha_is_shape,
             },
         );
         device.pop_transparency_group();

@@ -258,10 +258,11 @@ impl<'a> FormInvocation<'a> {
         );
 
         if self.group_properties.is_some() {
-            device.push_transparency_group(
+            device.push_transparency_group_with_alpha_source(
                 context.get().graphics_state.non_stroke_alpha,
                 std::mem::take(&mut context.get_mut().graphics_state.soft_mask),
                 std::mem::take(&mut context.get_mut().graphics_state.blend_mode),
+                context.get().graphics_state.alpha_is_shape,
             );
             context.get_mut().graphics_state.non_stroke_alpha = 1.0;
             context.get_mut().graphics_state.stroke_alpha = 1.0;
@@ -485,6 +486,21 @@ mod tests {
         .into_bytes()
     }
 
+    fn alpha_and_text_object_semantics_pdf() -> Vec<u8> {
+        let page_stream = b"/Shape gs 0 0 10 10 re f /Opacity gs 20 0 10 10 re f BT ET /NoKo gs BT ET 40 0 10 10 re B";
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</ExtGState<</Shape<</AIS true>>/Opacity<</AIS false>>/NoKo<</TK false>>>>>>/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
+             trailer <</Root 1 0 R>>\n%%EOF",
+            page_stream.len(),
+            String::from_utf8_lossy(page_stream),
+        )
+        .into_bytes()
+    }
+
     fn luminosity_soft_mask_pdf_with_backdrop(backdrop: &str) -> Vec<u8> {
         luminosity_soft_mask_pdf_with_options(backdrop, "/DeviceRGB", "")
     }
@@ -588,6 +604,8 @@ mod tests {
         marked_properties: Vec<MarkedContentProperties>,
         link_borders: Vec<(LinkBorder, Affine)>,
         events: Vec<&'static str>,
+        alpha_is_shape: Vec<bool>,
+        text_knockout: Vec<bool>,
     }
 
     impl RecordingDevice {
@@ -606,6 +624,7 @@ mod tests {
             self.events.push("path");
             self.path_transforms.push(props.transform);
             self.draw_modes.push(mode.clone());
+            self.alpha_is_shape.push(props.alpha_is_shape);
             if let Some(mask) = props.soft_mask.take() {
                 self.record_soft_mask(mask);
             }
@@ -620,6 +639,23 @@ mod tests {
         }
 
         fn draw_glyph_run(&mut self, _: &GlyphRun<'_, 'a>, _: DrawProps<'a>, _: &DrawMode) {}
+
+        fn begin_text_object(&mut self, text_knockout: bool) {
+            self.events.push("begin-text");
+            self.text_knockout.push(text_knockout);
+        }
+
+        fn end_text_object(&mut self) {
+            self.events.push("end-text");
+        }
+
+        fn begin_combined_fill_stroke(&mut self) {
+            self.events.push("begin-fill-stroke");
+        }
+
+        fn end_combined_fill_stroke(&mut self) {
+            self.events.push("end-fill-stroke");
+        }
 
         fn draw_image(&mut self, _: Image<'a, '_>, _: ImageDrawProps<'a>) {}
 
@@ -671,6 +707,28 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(adjustment, [true, false, true]);
+    }
+
+    #[test]
+    fn alpha_source_text_knockout_and_compound_object_boundaries_are_retained() {
+        let device = interpret_bytes(alpha_and_text_object_semantics_pdf(), false);
+        assert_eq!(device.alpha_is_shape, [true, false, false, false]);
+        assert_eq!(device.text_knockout, [true, false]);
+        assert_eq!(
+            device.events,
+            [
+                "path",
+                "path",
+                "begin-text",
+                "end-text",
+                "begin-text",
+                "end-text",
+                "begin-fill-stroke",
+                "path",
+                "path",
+                "end-fill-stroke",
+            ]
+        );
     }
 
     fn interpret_bytes(bytes: Vec<u8>, retained: bool) -> RecordingDevice {

@@ -246,6 +246,22 @@ impl<'a, T: Device<'a>> Device<'a> for Type3ShapeGlyphDevice<'a, '_, T> {
         self.inner.draw_glyph_run(glyph_run, props, draw_mode);
     }
 
+    fn begin_text_object(&mut self, text_knockout: bool) {
+        self.inner.begin_text_object(text_knockout);
+    }
+
+    fn end_text_object(&mut self) {
+        self.inner.end_text_object();
+    }
+
+    fn begin_combined_fill_stroke(&mut self) {
+        self.inner.begin_combined_fill_stroke();
+    }
+
+    fn end_combined_fill_stroke(&mut self) {
+        self.inner.end_combined_fill_stroke();
+    }
+
     fn pop_clip(&mut self) {
         self.inner.pop_clip();
     }

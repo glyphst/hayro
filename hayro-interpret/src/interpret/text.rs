@@ -2,7 +2,7 @@ use crate::context::Context;
 use crate::device::Device;
 use crate::font::{Glyph, GlyphRun, PositionedGlyph, UNITS_PER_EM};
 use crate::interpret::state::TextStateFont;
-use crate::{DrawMode, FillRule};
+use crate::{DrawMode, DrawProps, FillRule, StrokeProps};
 use hayro_syntax::object;
 use hayro_syntax::page::Resources;
 use kurbo::{Affine, BezPath};
@@ -118,8 +118,13 @@ pub(crate) fn show_glyph_run<'a>(ctx: &mut Context<'a>, device: &mut impl Device
                 device.draw_glyph_run(&run, stroke_draw_props, &DrawMode::Stroke(stroke_props));
             }
             TextRenderingMode::FillStroke => {
-                device.draw_glyph_run(&run, fill_props, &DrawMode::Fill(FillRule::NonZero));
-                device.draw_glyph_run(&run, stroke_draw_props, &DrawMode::Stroke(stroke_props));
+                draw_fill_stroke_glyphs(
+                    device,
+                    &run,
+                    &fill_props,
+                    &stroke_draw_props,
+                    &stroke_props,
+                );
             }
             TextRenderingMode::Invisible => {
                 // Still call draw_glyph_run for invisible text, so that it can
@@ -133,8 +138,13 @@ pub(crate) fn show_glyph_run<'a>(ctx: &mut Context<'a>, device: &mut impl Device
                 device.draw_glyph_run(&run, stroke_draw_props, &DrawMode::Stroke(stroke_props));
             }
             TextRenderingMode::FillAndStrokeAndClip => {
-                device.draw_glyph_run(&run, fill_props, &DrawMode::Fill(FillRule::NonZero));
-                device.draw_glyph_run(&run, stroke_draw_props, &DrawMode::Stroke(stroke_props));
+                draw_fill_stroke_glyphs(
+                    device,
+                    &run,
+                    &fill_props,
+                    &stroke_draw_props,
+                    &stroke_props,
+                );
             }
             TextRenderingMode::Clip => {}
         }
@@ -147,6 +157,34 @@ pub(crate) fn show_glyph_run<'a>(ctx: &mut Context<'a>, device: &mut impl Device
     }
 
     ctx.glyph_scratch.clear();
+}
+
+fn draw_fill_stroke_glyphs<'a>(
+    device: &mut impl Device<'a>,
+    run: &GlyphRun<'_, 'a>,
+    fill_props: &DrawProps<'a>,
+    stroke_draw_props: &DrawProps<'a>,
+    stroke_props: &StrokeProps,
+) {
+    // A combined fill-and-stroke text mode defines one compound graphics
+    // object per glyph. Emitting all fills followed by all strokes changes
+    // both paint order and knockout semantics for overlapping glyphs.
+    for glyph in run.glyphs() {
+        let glyphs = std::slice::from_ref(glyph);
+        let glyph_run = GlyphRun { glyphs };
+        device.begin_combined_fill_stroke();
+        device.draw_glyph_run(
+            &glyph_run,
+            fill_props.clone(),
+            &DrawMode::Fill(FillRule::NonZero),
+        );
+        device.draw_glyph_run(
+            &glyph_run,
+            stroke_draw_props.clone(),
+            &DrawMode::Stroke(stroke_props.clone()),
+        );
+        device.end_combined_fill_stroke();
+    }
 }
 
 fn clip_glyph(clip_path: &mut BezPath, glyph: &PositionedGlyph<'_>) {

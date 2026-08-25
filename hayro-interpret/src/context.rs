@@ -222,6 +222,7 @@ impl<'a> Context<'a> {
             paint: self.get_paint(is_stroke),
             soft_mask: self.get().graphics_state.soft_mask.clone(),
             blend_mode: self.get().graphics_state.blend_mode,
+            alpha_is_shape: self.get().graphics_state.alpha_is_shape,
         }
     }
 

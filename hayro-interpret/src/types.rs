@@ -315,6 +315,12 @@ pub struct DrawProps<'a> {
     pub soft_mask: Option<SoftMask<'a>>,
     /// The blend mode.
     pub blend_mode: BlendMode,
+    /// Whether the current alpha constant and soft mask contribute to object
+    /// shape instead of object opacity.
+    ///
+    /// This is the PDF graphics-state `/AIS` parameter. Keeping it separate
+    /// from the paint alpha is required for exact knockout compositing.
+    pub alpha_is_shape: bool,
 }
 
 /// Properties for an image drawing operation.
@@ -326,6 +332,9 @@ pub struct ImageDrawProps<'a> {
     pub soft_mask: Option<SoftMask<'a>>,
     /// The blend mode.
     pub blend_mode: BlendMode,
+    /// Whether the current alpha constant and soft mask contribute to object
+    /// shape instead of object opacity (`/AIS`).
+    pub alpha_is_shape: bool,
 }
 
 /// The draw mode.

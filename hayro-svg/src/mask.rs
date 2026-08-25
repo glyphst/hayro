@@ -103,6 +103,7 @@ impl<'a> SvgRenderer<'a> {
                                 paint,
                                 soft_mask: None,
                                 blend_mode: BlendMode::Normal,
+                                alpha_is_shape: false,
                             },
                             &DrawMode::Fill(FillRule::NonZero),
                         );

@@ -25,8 +25,10 @@ pub(crate) fn fill_stroke_path<'a>(
     device: &mut impl Device<'a>,
     fill_rule: FillRule,
 ) {
+    device.begin_combined_fill_stroke();
     fill_path_impl(context, device, fill_rule, None);
     stroke_path_impl(context, device, None);
+    device.end_combined_fill_stroke();
 
     context.path_mut().truncate(0);
 }

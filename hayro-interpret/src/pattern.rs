@@ -394,6 +394,22 @@ impl<'a, T: Device<'a>> Device<'a> for StencilPatternDevice<'a, '_, T> {
         self.inner.draw_glyph_run(glyph_run, props, draw_mode);
     }
 
+    fn begin_text_object(&mut self, text_knockout: bool) {
+        self.inner.begin_text_object(text_knockout);
+    }
+
+    fn end_text_object(&mut self) {
+        self.inner.end_text_object();
+    }
+
+    fn begin_combined_fill_stroke(&mut self) {
+        self.inner.begin_combined_fill_stroke();
+    }
+
+    fn end_combined_fill_stroke(&mut self) {
+        self.inner.end_combined_fill_stroke();
+    }
+
     fn draw_image(&mut self, image: Image<'a, '_>, props: ImageDrawProps<'a>) {
         if let Image::Stencil(mut s) = image {
             s.paint = self.paint.clone();

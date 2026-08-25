@@ -128,6 +128,20 @@ pub trait Device<'a> {
         mask: Option<SoftMask<'a>>,
         blend_mode: BlendMode,
     );
+    /// Push a transparency group while preserving the PDF alpha-source flag.
+    ///
+    /// The default keeps existing devices source-compatible. Retaining devices
+    /// should override this callback because `/AIS true` changes alpha
+    /// constants and soft masks from opacity inputs into shape inputs.
+    fn push_transparency_group_with_alpha_source(
+        &mut self,
+        opacity: f32,
+        mask: Option<SoftMask<'a>>,
+        blend_mode: BlendMode,
+        _alpha_is_shape: bool,
+    ) {
+        self.push_transparency_group(opacity, mask, blend_mode);
+    }
     /// Draw a run of positioned glyphs.
     fn draw_glyph_run(
         &mut self,
@@ -135,6 +149,23 @@ pub trait Device<'a> {
         props: DrawProps<'a>,
         draw_mode: &DrawMode,
     );
+    /// Begin one PDF text object (`BT`).
+    ///
+    /// `text_knockout` is the graphics-state `/TK` value captured at the text
+    /// object's boundary. When true, every glyph in the matching text object
+    /// forms one implicit non-isolated knockout group.
+    fn begin_text_object(&mut self, _text_knockout: bool) {}
+    /// End the current PDF text object (`ET`).
+    fn end_text_object(&mut self) {}
+    /// Begin the implicit graphics object shared by a combined fill-and-stroke
+    /// path or glyph.
+    ///
+    /// PDF transparency treats the fill and stroke as one non-isolated
+    /// knockout group, even though devices still receive the two paints
+    /// separately so their colors and alpha constants remain independent.
+    fn begin_combined_fill_stroke(&mut self) {}
+    /// End a combined fill-and-stroke graphics object.
+    fn end_combined_fill_stroke(&mut self) {}
     /// Record one semantic PDF text run before its visual paint callbacks.
     ///
     /// This is called exactly once for each interpreted text run, including

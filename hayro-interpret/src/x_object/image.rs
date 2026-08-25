@@ -47,7 +47,7 @@ impl ImageKind {
 impl<'a> ImageXObject<'a> {
     pub(crate) fn new(
         stream: &Stream<'a>,
-        resolve_cs: impl FnMut(&Name<'_>) -> Option<ColorSpace>,
+        resolve_cs: impl FnMut(&Name<'_>) -> Option<Object<'a>>,
         warning_sink: &WarningSinkFn,
         cache: &Cache,
         transfer_function: Option<ActiveTransferFunction>,
@@ -72,7 +72,7 @@ impl<'a> ImageXObject<'a> {
 
     fn new_inner(
         stream: &Stream<'a>,
-        mut resolve_cs: impl FnMut(&Name<'_>) -> Option<ColorSpace>,
+        mut resolve_cs: impl FnMut(&Name<'_>) -> Option<Object<'a>>,
         warning_sink: &WarningSinkFn,
         cache: &Cache,
         mut kind: ImageKind,
@@ -102,13 +102,20 @@ impl<'a> ImageXObject<'a> {
             let declared_name = cs_obj.clone().and_then(Object::into_name);
             let declared = cs_obj
                 .clone()
-                .and_then(|object| ColorSpace::new(object, cache))
-                .or_else(|| declared_name.as_ref().and_then(&mut resolve_cs));
+                .and_then(|object| ColorSpace::new_preserving_icc(object, cache))
+                .or_else(|| {
+                    declared_name
+                        .as_ref()
+                        .and_then(&mut resolve_cs)
+                        .and_then(|object| ColorSpace::new_preserving_icc(object, cache))
+                });
             let declared_kind = declared.as_ref().map(ColorSpace::kind);
             let default_name = declared_kind.and_then(default_device_resource_name);
             let (effective, default_overridden) = if let Some(default_name) = default_name {
                 let default_name = Name::new_unescaped(default_name);
-                if let Some(default) = resolve_cs(&default_name) {
+                if let Some(default) = resolve_cs(&default_name)
+                    .and_then(|object| ColorSpace::new_preserving_icc(object, cache))
+                {
                     (Some(default), true)
                 } else {
                     (declared, false)

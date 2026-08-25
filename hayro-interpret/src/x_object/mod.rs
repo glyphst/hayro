@@ -9,14 +9,13 @@ pub(crate) use image::ImageXObject;
 
 use crate::WarningSinkFn;
 use crate::cache::Cache;
-use crate::color::ColorSpace;
 use crate::context::Context;
 use crate::device::Device;
 use crate::interpret::state::ActiveTransferFunction;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::Name;
-use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
+use hayro_syntax::object::{Object, Stream};
 use hayro_syntax::page::Resources;
 use std::ops::Deref;
 
@@ -28,7 +27,7 @@ pub(crate) enum XObject<'a> {
 impl<'a> XObject<'a> {
     pub(crate) fn new(
         stream: &Stream<'a>,
-        resolve_cs: impl FnMut(&Name<'_>) -> Option<ColorSpace>,
+        resolve_cs: impl FnMut(&Name<'_>) -> Option<Object<'a>>,
         warning_sink: &WarningSinkFn,
         cache: &Cache,
         transfer_function: Option<ActiveTransferFunction>,

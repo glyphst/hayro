@@ -210,7 +210,8 @@ impl ColorSpaceType {
                     let dict = icc_stream.dict();
                     let num_components = dict.get::<usize>(N)?;
 
-                    return cache.get_or_insert_with(icc_stream.cache_key(), || {
+                    let profile_cache_key = (icc_stream.clone(), preserve_icc).cache_key();
+                    return cache.get_or_insert_with(profile_cache_key, || {
                         if let Some(decoded) = icc_stream.decoded().ok().as_ref() {
                             ICCProfile::new(decoded, num_components)
                                 .map(|icc| {
@@ -326,6 +327,14 @@ impl ColorSpace {
     /// Create a new color space from the given object.
     pub(crate) fn new(object: Object<'_>, cache: &Cache) -> Option<Self> {
         Some(Self(Arc::new(ColorSpaceType::new(object, cache)?)))
+    }
+
+    /// Create a color space without collapsing an sRGB-marked ICC profile to
+    /// the equivalent device implementation.
+    pub(crate) fn new_preserving_icc(object: Object<'_>, cache: &Cache) -> Option<Self> {
+        Some(Self(Arc::new(ColorSpaceType::new_preserving_icc(
+            object, cache,
+        )?)))
     }
 
     /// Create a new color space from the name.
@@ -721,5 +730,23 @@ mod retained_inspection_tests {
         let object = group.get::<Object<'_>>(CS).expect("page group color space");
         let color_space = ColorSpace::from_pdf_object(object).expect("parse owned color space");
         assert_eq!(color_space.kind(), ColorSpaceKind::IccBased);
+    }
+
+    #[test]
+    fn preserving_and_optimized_icc_handles_do_not_alias_in_the_shared_cache() {
+        let bytes =
+            include_bytes!("../../../hayro-tests/pdfs/custom/xobject_with_fill_opacity.pdf");
+        let pdf = Pdf::new(bytes.to_vec()).expect("parse ICC page-group fixture");
+        let group = pdf.pages()[0]
+            .raw()
+            .get::<Dict<'_>>(GROUP)
+            .expect("page group");
+        let object = group.get::<Object<'_>>(CS).expect("page group color space");
+        let cache = Cache::new();
+        let optimized = ColorSpace::new(object.clone(), &cache).expect("optimized ICC");
+        let preserving =
+            ColorSpace::new_preserving_icc(object, &cache).expect("identity-preserving ICC");
+        assert_eq!(optimized.kind(), ColorSpaceKind::DeviceRgb);
+        assert_eq!(preserving.kind(), ColorSpaceKind::IccBased);
     }
 }

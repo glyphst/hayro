@@ -424,6 +424,7 @@ mod tests {
         MarkedContentPropertyValue, MaskType, SoftMask, interpret_page,
     };
     use hayro_syntax::Pdf;
+    use hayro_syntax::object::Name;
     use kurbo::BezPath;
     use std::sync::{Arc, Mutex};
 
@@ -515,6 +516,50 @@ mod tests {
             image_data,
         )
         .into_bytes()
+    }
+
+    fn explicit_srgb_icc_image_pdf() -> Vec<u8> {
+        let source =
+            include_bytes!("../../../hayro-tests/pdfs/custom/xobject_with_fill_opacity.pdf");
+        let source = Pdf::new(source.to_vec()).expect("parse ICC source fixture");
+        let group = source.pages()[0]
+            .raw()
+            .get::<Dict<'_>>(GROUP)
+            .expect("ICC source page group");
+        let color_space = group
+            .get::<hayro_syntax::object::Array<'_>>(CS)
+            .expect("ICCBased source array");
+        let mut color_space = color_space.flex_iter();
+        let family = color_space.next::<Name<'_>>().expect("ICCBased family");
+        assert_eq!(family.as_ref(), ICC_BASED);
+        let profile = color_space
+            .next::<Stream<'_>>()
+            .expect("ICC profile stream")
+            .decoded()
+            .expect("decode ICC profile");
+        let page_stream = b"q 10 0 0 10 0 0 cm /Im0 Do Q";
+        let image_data = "4080C0>";
+        let mut pdf = format!(
+            "%PDF-1.7\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<<\
+               /ColorSpace<</DefaultRGB/DeviceRGB/Icc[/ICCBased 6 0 R]>>\
+               /XObject<</Im0 5 0 R>>>>/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
+             5 0 obj <</Type/XObject/Subtype/Image/Width 1/Height 1/BitsPerComponent 8\
+               /ColorSpace/Icc/Filter/ASCIIHexDecode/Length {}>> stream\n{}\nendstream endobj\n\
+             6 0 obj <</N 3/Length {}>> stream\n",
+            page_stream.len(),
+            String::from_utf8_lossy(page_stream),
+            image_data.len(),
+            image_data,
+            profile.len(),
+        )
+        .into_bytes();
+        pdf.extend_from_slice(profile.as_ref());
+        pdf.extend_from_slice(b"\nendstream endobj\ntrailer <</Root 1 0 R>>\n%%EOF");
+        pdf
     }
 
     fn alpha_and_text_object_semantics_pdf() -> Vec<u8> {
@@ -801,6 +846,23 @@ mod tests {
         );
         assert!(alias_properties.color_space_is_default_overridden());
         assert_eq!(alias_pixels, explicit_pixels);
+    }
+
+    #[test]
+    fn explicit_srgb_icc_image_is_not_mistaken_for_device_rgb() {
+        let device = interpret_bytes(explicit_srgb_icc_image_pdf(), false);
+        assert_eq!(device.raster_images.len(), 1);
+        let properties = device.raster_images[0].0;
+        assert_eq!(
+            properties.declared_color_space_kind(),
+            Some(ColorSpaceKind::IccBased)
+        );
+        assert_eq!(
+            properties.color_space_kind(),
+            Some(ColorSpaceKind::IccBased)
+        );
+        assert_eq!(properties.color_space_components(), Some(3));
+        assert!(!properties.color_space_is_default_overridden());
     }
 
     #[test]

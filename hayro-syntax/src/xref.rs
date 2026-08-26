@@ -1,6 +1,6 @@
 //! Reading and querying the xref table of a PDF file.
 
-use crate::crypto::{DecryptionError, DecryptionTarget, Decryptor, get};
+use crate::crypto::{DecryptionError, DecryptionTarget, Decryptor, EncryptionInfo, get};
 use crate::data::Data;
 use crate::metadata::Metadata;
 use crate::object::Name;
@@ -26,8 +26,10 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::max;
+use core::fmt;
 use core::iter;
 use core::ops::Deref;
+use zeroize::Zeroizing;
 
 pub(crate) const XREF_ENTRY_LEN: usize = 20;
 
@@ -290,17 +292,18 @@ impl XRef {
             data: Arc::new(Data::new(data)),
             map: Arc::new(RwLock::new(MapRepr { xref_map, repaired })),
             decryptor: Arc::new(Decryptor::None),
+            encryption_info: None,
             has_ocgs: false,
             metadata: Arc::new(Metadata::default()),
             trailer_data,
-            password: password.to_vec(),
+            password: Zeroizing::new(password.to_vec()),
         })));
 
         // We read the trailer twice, once to determine the encryption used and then a second
         // time to resolve the catalog dictionary, etc. This allows us to support catalog dictionaries
         // that are stored in an encrypted object stream.
 
-        let decryptor = {
+        let (decryptor, encryption_info) = {
             match input {
                 XRefInput::TrailerDictData(trailer_dict_data) => {
                     let mut r = Reader::new(trailer_dict_data);
@@ -311,7 +314,7 @@ impl XRef {
 
                     get_decryptor(&trailer_dict, password)?
                 }
-                XRefInput::RootRef(_) => Decryptor::None,
+                XRefInput::RootRef(_) => (Decryptor::None, None),
             }
         };
 
@@ -320,6 +323,7 @@ impl XRef {
             Inner::Some(r) => {
                 let mutable = Arc::make_mut(r);
                 mutable.decryptor = Arc::new(decryptor.clone());
+                mutable.encryption_info = encryption_info;
             }
         }
 
@@ -373,6 +377,7 @@ impl XRef {
                 let mutable = Arc::make_mut(r);
                 mutable.trailer_data = trailer_data;
                 mutable.decryptor = Arc::new(decryptor);
+                mutable.encryption_info = encryption_info;
                 mutable.has_ocgs = has_ocgs;
                 mutable.metadata = Arc::new(metadata);
             }
@@ -413,6 +418,13 @@ impl XRef {
         match &self.0 {
             Inner::Dummy => unreachable!(),
             Inner::Some(r) => &r.metadata,
+        }
+    }
+
+    pub(crate) fn encryption_info(&self) -> Option<EncryptionInfo> {
+        match &self.0 {
+            Inner::Dummy => None,
+            Inner::Some(r) => r.encryption_info,
         }
     }
 
@@ -672,15 +684,32 @@ impl TrailerData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct SomeRepr {
     data: Arc<Data>,
     map: Arc<RwLock<MapRepr>>,
     metadata: Arc<Metadata>,
     decryptor: Arc<Decryptor>,
+    encryption_info: Option<EncryptionInfo>,
     has_ocgs: bool,
-    password: Vec<u8>,
+    password: Zeroizing<Vec<u8>>,
     trailer_data: TrailerData,
+}
+
+impl fmt::Debug for SomeRepr {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SomeRepr")
+            .field("data", &self.data)
+            .field("map", &self.map)
+            .field("metadata", &self.metadata)
+            .field("decryptor", &self.decryptor)
+            .field("encryption_info", &self.encryption_info)
+            .field("has_ocgs", &self.has_ocgs)
+            .field("password", &"<redacted>")
+            .field("trailer_data", &self.trailer_data)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1025,7 +1054,10 @@ fn read_xref_table_trailer<'a>(
     reader.read_with_context::<Dict<'_>>(ctx)
 }
 
-fn get_decryptor(trailer_dict: &Dict<'_>, password: &[u8]) -> Result<Decryptor, XRefError> {
+fn get_decryptor(
+    trailer_dict: &Dict<'_>,
+    password: &[u8],
+) -> Result<(Decryptor, Option<EncryptionInfo>), XRefError> {
     if let Some(encryption_dict) = trailer_dict.get::<Dict<'_>>(ENCRYPT) {
         let id = if let Some(id) = trailer_dict
             .get::<Array<'_>>(ID)
@@ -1037,9 +1069,11 @@ fn get_decryptor(trailer_dict: &Dict<'_>, password: &[u8]) -> Result<Decryptor, 
             vec![]
         };
 
-        get(&encryption_dict, &id, password).map_err(XRefError::Encryption)
+        get(&encryption_dict, &id, password)
+            .map(|(decryptor, info)| (decryptor, Some(info)))
+            .map_err(XRefError::Encryption)
     } else {
-        Ok(Decryptor::None)
+        Ok((Decryptor::None, None))
     }
 }
 

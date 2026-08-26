@@ -9,9 +9,8 @@ This crate does not provide more high-level functionality, such as parsing fonts
 Such functionality is out-of-scope for `hayro-syntax`, since this crate is supposed to be
 as *light-weight* and *application-agnostic* as possible.
 
-Functionality-wise, this crate is therefore close to feature-complete. The main missing feature
-is support for password-protected documents. In addition to that, more low-level APIs might be
-added in the future.
+Functionality-wise, this crate is therefore close to feature-complete. More low-level APIs might
+be added in the future.
 
 The crate is `no_std` compatible but requires an allocator to be available.
 
@@ -67,9 +66,8 @@ The supported features include:
 - The crate is very lightweight, especially in comparison to other PDF crates.
 
 # Limitations
-- There are still a few features missing, for example, support for
-  password-protected PDFs. In addition to that, many properties (like page annotations) are
-  currently not exposed.
+- There are still a few features missing. For example, many properties (like page annotations)
+  are currently not exposed.
 - This crate is for read-only processing, you cannot directly use it to manipulate PDF files.
   If you need to do that, there are other crates in the Rust ecosystem that are suitable for this.
 */

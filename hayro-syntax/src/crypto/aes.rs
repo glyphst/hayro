@@ -4,6 +4,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use zeroize::{Zeroize, Zeroizing};
 
 const S_BOX: [u8; 256] = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
@@ -289,6 +290,14 @@ pub(crate) struct AESCipher<const KEY_SIZE: usize, const ROUNDS: usize> {
 pub(crate) type AES128Cipher = AESCipher<16, 11>;
 pub(crate) type AES256Cipher = AESCipher<32, 15>;
 
+impl<const KEY_SIZE: usize, const ROUNDS: usize> Drop for AESCipher<KEY_SIZE, ROUNDS> {
+    fn drop(&mut self) {
+        for round_key in &mut self.round_keys {
+            round_key.zeroize();
+        }
+    }
+}
+
 impl<const KEY_SIZE: usize, const ROUNDS: usize> AESCipher<KEY_SIZE, ROUNDS> {
     pub(crate) fn new(key: &[u8]) -> Option<Self> {
         if key.len() != KEY_SIZE {
@@ -408,7 +417,7 @@ impl<const KEY_SIZE: usize, const ROUNDS: usize> AESCipher<KEY_SIZE, ROUNDS> {
         let mut result = Vec::new();
         let mut current_iv = *iv;
 
-        let mut padded_data = data.to_vec();
+        let mut padded_data = Zeroizing::new(data.to_vec());
         let pad_len = 16 - (data.len() % 16);
         padded_data.extend(vec![pad_len as u8; pad_len]);
 
@@ -423,6 +432,7 @@ impl<const KEY_SIZE: usize, const ROUNDS: usize> AESCipher<KEY_SIZE, ROUNDS> {
             let encrypted = self.encrypt_block(&block);
             result.extend_from_slice(&encrypted);
             current_iv = encrypted;
+            block.zeroize();
         }
 
         result
@@ -436,7 +446,7 @@ impl<const KEY_SIZE: usize, const ROUNDS: usize> AESCipher<KEY_SIZE, ROUNDS> {
             let mut block = [0_u8; 16];
             block.copy_from_slice(chunk);
 
-            let decrypted = self.decrypt_block(&block);
+            let mut decrypted = self.decrypt_block(&block);
 
             let mut plain_block = [0_u8; 16];
             for i in 0..16 {
@@ -445,6 +455,8 @@ impl<const KEY_SIZE: usize, const ROUNDS: usize> AESCipher<KEY_SIZE, ROUNDS> {
 
             result.extend_from_slice(&plain_block);
             prev_block = block;
+            decrypted.zeroize();
+            plain_block.zeroize();
         }
 
         if unpad

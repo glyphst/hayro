@@ -2,6 +2,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use zeroize::Zeroize;
 
 #[derive(Clone)]
 pub(crate) struct Rc4 {
@@ -49,6 +50,14 @@ impl Rc4 {
 
     pub(crate) fn encrypt(&mut self, data: &[u8]) -> Vec<u8> {
         self.decrypt(data)
+    }
+}
+
+impl Drop for Rc4 {
+    fn drop(&mut self) {
+        self.a.zeroize();
+        self.b.zeroize();
+        self.s.zeroize();
     }
 }
 

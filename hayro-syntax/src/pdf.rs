@@ -8,7 +8,7 @@ use crate::reader::Reader;
 use crate::sync::Arc;
 use crate::xref::{XRef, XRefError, fallback, root_xref};
 
-pub use crate::crypto::DecryptionError;
+pub use crate::crypto::{DecryptionError, EncryptionInfo, PasswordAuthentication};
 use crate::metadata::Metadata;
 
 /// A PDF file.
@@ -105,6 +105,13 @@ impl Pdf {
     pub fn metadata(&self) -> &Metadata {
         self.xref.metadata()
     }
+
+    /// Return validated Standard-security-handler metadata for an encrypted document.
+    ///
+    /// Unencrypted documents return `None`.
+    pub fn encryption_info(&self) -> Option<EncryptionInfo> {
+        self.xref.encryption_info()
+    }
 }
 
 fn find_version(data: &[u8]) -> Option<PdfVersion> {
@@ -160,7 +167,7 @@ impl PdfVersion {
 
 #[cfg(test)]
 mod tests {
-    use crate::pdf::{Pdf, PdfVersion};
+    use crate::pdf::{DecryptionError, LoadPdfError, PasswordAuthentication, Pdf, PdfVersion};
 
     #[test]
     fn issue_49() {
@@ -181,5 +188,69 @@ mod tests {
         let pdf = Pdf::new(data).unwrap();
 
         assert_eq!(pdf.version(), PdfVersion::Pdf14);
+    }
+
+    #[test]
+    fn exposes_validated_standard_security_metadata() {
+        let fixtures: [(&[u8], u8, PasswordAuthentication); 4] = [
+            (
+                include_bytes!("../../hayro-tests/pdfs/custom/password_encrypted_rc4_40.pdf"),
+                2,
+                PasswordAuthentication::User,
+            ),
+            (
+                include_bytes!("../../hayro-tests/pdfs/custom/password_encrypted_rc4_128.pdf"),
+                3,
+                PasswordAuthentication::User,
+            ),
+            (
+                include_bytes!("../../hayro-tests/pdfs/custom/password_encrypted_aes_128.pdf"),
+                4,
+                PasswordAuthentication::User,
+            ),
+            (
+                include_bytes!("../../hayro-tests/pdfs/custom/password_encrypted_aes_256.pdf"),
+                6,
+                PasswordAuthentication::Owner,
+            ),
+        ];
+
+        for (bytes, revision, authentication) in fixtures {
+            let pdf = Pdf::new_with_password(bytes.to_vec(), "testpw").unwrap();
+            let info = pdf.encryption_info().unwrap();
+            assert_eq!(info.revision(), revision);
+            assert_eq!(info.permissions(), 0xffff_fffc);
+            assert_eq!(
+                info.authentication(),
+                authentication,
+                "unexpected authentication role for revision {revision}"
+            );
+            assert!(info.encrypt_metadata());
+        }
+    }
+
+    #[test]
+    fn rejects_tampered_revision_6_permission_block() {
+        let mut bytes =
+            include_bytes!("../../hayro-tests/pdfs/custom/password_encrypted_aes_256.pdf").to_vec();
+        let marker = b"/Perms <";
+        let marker_offset = bytes
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap();
+        let first_hex_digit = marker_offset + marker.len();
+        bytes[first_hex_digit] = if bytes[first_hex_digit] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+
+        match Pdf::new_with_password(bytes, "testpw") {
+            Err(error) => assert_eq!(
+                error,
+                LoadPdfError::Decryption(DecryptionError::InvalidEncryption)
+            ),
+            Ok(_) => panic!("tampered encrypted permissions were accepted"),
+        }
     }
 }

@@ -10,15 +10,16 @@ use crate::crypto::aes::{AES128Cipher, AES256Cipher};
 use crate::crypto::rc4::Rc4;
 use crate::object;
 use crate::object::dict::keys::{
-    CF, CFM, ENCRYPT_META_DATA, FILTER, LENGTH, O, OE, P, R, STM_F, STR_F, U, UE, V,
+    CF, CFM, ENCRYPT_META_DATA, FILTER, LENGTH, O, OE, P, PERMS, R, STM_F, STR_F, U, UE, V,
 };
 use crate::object::{Dict, Name, ObjectIdentifier};
 use crate::sync::HashMap;
 use alloc::string::ToString;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp;
+use core::fmt;
 use core::ops::Deref;
+use zeroize::Zeroizing;
 
 mod aes;
 mod md5;
@@ -46,6 +47,60 @@ pub enum DecryptionError {
     UnsupportedAlgorithm,
 }
 
+/// The password role that authenticated a Standard-security-handler document.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PasswordAuthentication {
+    /// The supplied password authenticated as the user password.
+    User,
+    /// The supplied password authenticated as the owner password.
+    Owner,
+}
+
+/// Validated encryption metadata for a Standard-security-handler document.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct EncryptionInfo {
+    revision: u8,
+    permissions: u32,
+    authentication: PasswordAuthentication,
+    encrypt_metadata: bool,
+}
+
+impl EncryptionInfo {
+    fn new(
+        revision: u8,
+        permissions: u32,
+        authentication: PasswordAuthentication,
+        encrypt_metadata: bool,
+    ) -> Self {
+        Self {
+            revision,
+            permissions,
+            authentication,
+            encrypt_metadata,
+        }
+    }
+
+    /// Return the Standard security handler revision.
+    pub fn revision(self) -> u8 {
+        self.revision
+    }
+
+    /// Return the validated raw permission bit field from the encryption dictionary.
+    pub fn permissions(self) -> u32 {
+        self.permissions
+    }
+
+    /// Return the password role that authenticated this document.
+    pub fn authentication(self) -> PasswordAuthentication {
+        self.authentication
+    }
+
+    /// Return whether document metadata is encrypted.
+    pub fn encrypt_metadata(self) -> bool {
+        self.encrypt_metadata
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum DecryptorTag {
     None,
@@ -65,12 +120,39 @@ impl DecryptorTag {
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) enum Decryptor {
     None,
-    Rc4 { key: Vec<u8> },
-    Aes128 { key: Vec<u8>, dict: DecryptorData },
-    Aes256 { key: Vec<u8>, dict: DecryptorData },
+    Rc4 {
+        key: Zeroizing<Vec<u8>>,
+    },
+    Aes128 {
+        key: Zeroizing<Vec<u8>>,
+        dict: DecryptorData,
+    },
+    Aes256 {
+        key: Zeroizing<Vec<u8>>,
+        dict: DecryptorData,
+    },
+}
+
+impl fmt::Debug for Decryptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => formatter.write_str("Decryptor::None"),
+            Self::Rc4 { .. } => formatter.write_str("Decryptor::Rc4 { key: <redacted> }"),
+            Self::Aes128 { dict, .. } => formatter
+                .debug_struct("Decryptor::Aes128")
+                .field("key", &"<redacted>")
+                .field("dict", dict)
+                .finish(),
+            Self::Aes256 { dict, .. } => formatter
+                .debug_struct("Decryptor::Aes256")
+                .field("key", &"<redacted>")
+                .field("dict", dict)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -110,7 +192,7 @@ pub(crate) fn get(
     dict: &Dict<'_>,
     id: &[u8],
     password: &[u8],
-) -> Result<Decryptor, DecryptionError> {
+) -> Result<(Decryptor, EncryptionInfo), DecryptionError> {
     let filter = dict.get::<Name<'_>>(FILTER).ok_or(InvalidEncryption)?;
 
     if filter.deref() != b"Standard" {
@@ -151,52 +233,56 @@ pub(crate) fn get(
 
     let owner_string = dict.get::<object::String<'_>>(O).ok_or(InvalidEncryption)?;
     let user_string = dict.get::<object::String<'_>>(U).ok_or(InvalidEncryption)?;
-    let permissions = {
-        let raw = dict.get::<i64>(P).ok_or(InvalidEncryption)?;
-
-        if raw < 0 {
-            u32::from_be_bytes((raw as i32).to_be_bytes())
-        } else {
-            raw as u32
-        }
+    let raw_permissions = dict.get::<i64>(P).ok_or(InvalidEncryption)?;
+    let permissions = if let Ok(value) = i32::try_from(raw_permissions) {
+        value as u32
+    } else {
+        u32::try_from(raw_permissions).map_err(|_| InvalidEncryption)?
     };
 
-    let mut decryption_key = if revision <= 4 {
-        let key = decryption_key_rev1234(
+    let (mut decryption_key, authentication) = if revision <= 4 {
+        authenticate_password_rev234(
             password,
             encrypt_metadata,
             revision,
             byte_length,
-            &owner_string,
+            owner_string.as_ref(),
             permissions,
             id,
-        )?;
-        authenticate_user_password_rev234(revision, &key, id, &user_string)?;
-
-        key
+            user_string.as_ref(),
+        )?
     } else {
         decryption_key_rev56(dict, revision, password, &owner_string, &user_string)?
     };
+
+    if revision >= 5 {
+        validate_permissions_rev56(dict, &decryption_key, permissions, encrypt_metadata)?;
+    }
 
     // See pdf.js issue 19484.
     if encryption_v == 4 && decryption_key.len() < 16 {
         decryption_key.resize(16, 0);
     }
 
-    match algorithm {
-        DecryptorTag::None => Ok(Decryptor::None),
-        DecryptorTag::Rc4 => Ok(Decryptor::Rc4 {
+    let decryptor = match algorithm {
+        DecryptorTag::None => Decryptor::None,
+        DecryptorTag::Rc4 => Decryptor::Rc4 {
             key: decryption_key,
-        }),
-        DecryptorTag::Aes128 => Ok(Decryptor::Aes128 {
-            key: decryption_key,
-            dict: data.unwrap(),
-        }),
-        DecryptorTag::Aes256 => Ok(Decryptor::Aes256 {
+        },
+        DecryptorTag::Aes128 => Decryptor::Aes128 {
             key: decryption_key,
             dict: data.unwrap(),
-        }),
-    }
+        },
+        DecryptorTag::Aes256 => Decryptor::Aes256 {
+            key: decryption_key,
+            dict: data.unwrap(),
+        },
+    };
+
+    Ok((
+        decryptor,
+        EncryptionInfo::new(revision, permissions, authentication, encrypt_metadata),
+    ))
 }
 
 /// Algorithm 1.A: Encryption of data using the AES algorithms
@@ -245,7 +331,7 @@ fn decrypt_rc_aes(
     // the string or stream to be encrypted (see 7.3.10, "Indirect objects"). If the
     // string is a direct object, use the identifier of the indirect object containing
     // it.
-    let mut key = key.to_vec();
+    let mut key = Zeroizing::new(key.to_vec());
 
     // b) For all strings and streams without crypt filter specifier; treating the
     // object number and generation number as binary integers, extend the original
@@ -264,7 +350,7 @@ fn decrypt_rc_aes(
 
     // c) Initialise the MD5 hash function and pass the result of step (b) as input
     // to this function.
-    let hash = md5::calculate(&key);
+    let hash = Zeroizing::new(md5::calculate(&key));
 
     // d) Use the first (n + 5) bytes, up to a maximum of 16, of the output
     // from the MD5 hash as the key for the RC4 or AES symmetric key algorithms,
@@ -351,11 +437,11 @@ fn compute_hash_rev56(
     validation_salt: &[u8],
     user_string: Option<&[u8]>,
     revision: u8,
-) -> Result<[u8; 32], DecryptionError> {
+) -> Result<Zeroizing<[u8; 32]>, DecryptionError> {
     // Take the SHA-256 hash of the original input to the algorithm and name the resulting
     // 32 bytes, K.
     let mut k = {
-        let mut input = Vec::new();
+        let mut input = Zeroizing::new(Vec::new());
         input.extend_from_slice(password);
         input.extend_from_slice(validation_salt);
 
@@ -367,10 +453,10 @@ fn compute_hash_rev56(
 
         // Apparently revision 5 only uses this hash.
         if revision == 5 {
-            return Ok(hash);
+            return Ok(Zeroizing::new(hash));
         }
 
-        hash.to_vec()
+        Zeroizing::new(hash.to_vec())
     };
 
     let mut round: u16 = 0;
@@ -383,15 +469,15 @@ fn compute_hash_rev56(
         // password or creating the user key, K1 is the concatenation of the input
         // password and K.
         let k1 = {
-            let mut single: Vec<u8> = vec![];
+            let mut single = Zeroizing::new(Vec::new());
             single.extend(password);
-            single.extend(&k);
+            single.extend_from_slice(&k);
 
             if let Some(user_string) = user_string {
                 single.extend(user_string);
             }
 
-            single.repeat(64)
+            Zeroizing::new(single.repeat(64))
         };
 
         // b) Encrypt K1 with the AES-128 (CBC, no padding) algorithm,
@@ -404,7 +490,7 @@ fn compute_hash_rev56(
             // Remove padding that was added by `encrypt_cbc`.
             res.truncate(k1.len());
 
-            res
+            Zeroizing::new(res)
         };
 
         // c) Taking the first 16 bytes of E as an unsigned big-endian integer,
@@ -415,12 +501,12 @@ fn compute_hash_rev56(
 
         // d) Using the hash algorithm determined in step c, take the hash of E.
         // The result is a new value of K, which will be 32, 48, or 64 bytes in length.
-        k = match num {
+        k = Zeroizing::new(match num {
             0 => sha256::calculate(&e).to_vec(),
             1 => sha384::calculate(&e).to_vec(),
             2 => sha512::calculate(&e).to_vec(),
             _ => unreachable!(),
-        };
+        });
 
         round += 1;
 
@@ -443,9 +529,107 @@ fn compute_hash_rev56(
     }
 
     // The first 32 bytes of the final K are the output of the algorithm.
-    let mut result = [0_u8; 32];
+    let mut result = Zeroizing::new([0_u8; 32]);
     result.copy_from_slice(&k[..32]);
     Ok(result)
+}
+
+fn padded_password(password: &[u8]) -> Zeroizing<[u8; 32]> {
+    let mut padded = Zeroizing::new([0_u8; 32]);
+    let copy_len = password.len().min(32);
+    padded[..copy_len].copy_from_slice(&password[..copy_len]);
+    if copy_len < 32 {
+        padded[copy_len..].copy_from_slice(&PASSWORD_PADDING[..(32 - copy_len)]);
+    }
+
+    padded
+}
+
+fn authenticate_password_rev234(
+    password: &[u8],
+    encrypt_metadata: bool,
+    revision: u8,
+    byte_length: u16,
+    owner_string: &[u8],
+    permissions: u32,
+    id: &[u8],
+    user_string: &[u8],
+) -> Result<(Zeroizing<Vec<u8>>, PasswordAuthentication), DecryptionError> {
+    let user_key = decryption_key_rev1234(
+        password,
+        encrypt_metadata,
+        revision,
+        byte_length,
+        owner_string,
+        permissions,
+        id,
+    )?;
+
+    match authenticate_user_password_rev234(revision, &user_key, id, user_string) {
+        Ok(()) => return Ok((user_key, PasswordAuthentication::User)),
+        Err(DecryptionError::PasswordProtected) => {}
+        Err(error) => return Err(error),
+    }
+
+    let recovered_user_password =
+        recover_user_password_rev234(password, revision, byte_length, owner_string)?;
+    let owner_key = decryption_key_rev1234(
+        &recovered_user_password,
+        encrypt_metadata,
+        revision,
+        byte_length,
+        owner_string,
+        permissions,
+        id,
+    )?;
+    authenticate_user_password_rev234(revision, &owner_key, id, user_string)?;
+
+    Ok((owner_key, PasswordAuthentication::Owner))
+}
+
+/// Algorithm 3.7: recover the padded user password using a candidate owner password.
+fn recover_user_password_rev234(
+    owner_password: &[u8],
+    revision: u8,
+    byte_length: u16,
+    owner_string: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, DecryptionError> {
+    if !matches!(revision, 2..=4) {
+        return Err(InvalidEncryption);
+    }
+
+    let key_len = usize::from(byte_length);
+    if key_len == 0 || key_len > 16 {
+        return Err(InvalidEncryption);
+    }
+
+    let owner_entry = owner_string.get(..32).ok_or(InvalidEncryption)?;
+    let padded_owner_password = padded_password(owner_password);
+    let mut hash = Zeroizing::new(md5::calculate(&padded_owner_password[..]));
+    if revision >= 3 {
+        for _ in 0..50 {
+            *hash = md5::calculate(&hash[..]);
+        }
+    }
+
+    let key = Zeroizing::new(hash[..key_len].to_vec());
+    let mut recovered = Zeroizing::new(owner_entry.to_vec());
+    if revision == 2 {
+        let mut rc = Rc4::new(&key);
+        *recovered = rc.decrypt(&recovered);
+    } else {
+        for round in (0_u8..=19).rev() {
+            let mut round_key = Zeroizing::new(key.to_vec());
+            for byte in round_key.iter_mut() {
+                *byte ^= round;
+            }
+
+            let mut rc = Rc4::new(&round_key);
+            *recovered = rc.decrypt(&recovered);
+        }
+    }
+
+    Ok(recovered)
 }
 
 /// Algorithm 2: Computing a file encryption key in order to encrypt a document (revision 4 and earlier)
@@ -454,28 +638,23 @@ fn decryption_key_rev1234(
     encrypt_metadata: bool,
     revision: u8,
     byte_length: u16,
-    owner_string: &object::String<'_>,
+    owner_string: &[u8],
     permissions: u32,
     id: &[u8],
-) -> Result<Vec<u8>, DecryptionError> {
-    let mut md5_input = vec![];
+) -> Result<Zeroizing<Vec<u8>>, DecryptionError> {
+    let mut md5_input = Zeroizing::new(Vec::new());
 
     // TODO: Convert to PDFDocEncoding.
     // a) Pad or truncate password to 32 bytes using PASSWORD_PADDING.
-    let mut padded_password = [0_u8; 32];
-    let copy_len = password.len().min(32);
-    padded_password[..copy_len].copy_from_slice(&password[..copy_len]);
-    if copy_len < 32 {
-        padded_password[copy_len..].copy_from_slice(&PASSWORD_PADDING[..(32 - copy_len)]);
-    }
+    let padded_password = padded_password(password);
 
     // b) Initialise the MD5 hash function and pass the
     // result of step a) as input to this function.
-    md5_input.extend(&padded_password);
+    md5_input.extend_from_slice(&padded_password[..]);
 
     // c) Pass the value of the encryption dictionary's O entry
     // to the MD5 hash function.
-    md5_input.extend(owner_string.as_ref());
+    md5_input.extend(owner_string);
 
     // d) Convert the integer value of the P entry to a 32-bit unsigned
     // binary number and pass these bytes to the MD5 hash function, low-order byte first.
@@ -491,7 +670,7 @@ fn decryption_key_rev1234(
     }
 
     // g) Finish the hash.
-    let mut hash = md5::calculate(&md5_input);
+    let mut hash = Zeroizing::new(md5::calculate(&md5_input));
 
     if byte_length as usize > hash.len() {
         return Err(InvalidEncryption);
@@ -503,11 +682,11 @@ fn decryption_key_rev1234(
     // of the encryption dictionary's `Length` entry.
     if revision >= 3 {
         for _ in 0..50 {
-            hash = md5::calculate(&hash[..byte_length as usize]);
+            *hash = md5::calculate(&hash[..byte_length as usize]);
         }
     }
 
-    let decryption_key = hash[..byte_length as usize].to_vec();
+    let decryption_key = Zeroizing::new(hash[..byte_length as usize].to_vec());
     Ok(decryption_key)
 }
 
@@ -516,7 +695,7 @@ fn authenticate_user_password_rev234(
     revision: u8,
     decryption_key: &[u8],
     id: &[u8],
-    user_string: &object::String<'_>,
+    user_string: &[u8],
 ) -> Result<(), DecryptionError> {
     // a) Perform all but the last step of Algorithm 4 (revision 2) or Algorithm 5 (revision 3 + 4).
     let result = match revision {
@@ -530,12 +709,12 @@ fn authenticate_user_password_rev234(
     // revision 3 or greater), the password supplied is the correct user password.
     match revision {
         2 => {
-            if result.as_slice() != user_string.as_ref() {
+            if result.as_slice() != user_string {
                 return Err(DecryptionError::PasswordProtected);
             }
         }
         3 | 4 => {
-            if Some(&result[..16]) != user_string.as_ref().get(0..16) {
+            if Some(&result[..16]) != user_string.get(0..16) {
                 return Err(DecryptionError::PasswordProtected);
             }
         }
@@ -547,32 +726,32 @@ fn authenticate_user_password_rev234(
 
 /// Algorithm 4: Computing the encryption dictionary’s U-entry value
 /// (Security handlers of revision 2).
-fn user_password_rev2(decryption_key: &[u8]) -> Vec<u8> {
+fn user_password_rev2(decryption_key: &[u8]) -> Zeroizing<Vec<u8>> {
     // a) Create a file encryption key based on the user password string.
     // b) Encrypt the 32-byte padding string using an RC4 encryption
     // function with the file encryption key from the preceding step.
     let mut rc = Rc4::new(decryption_key);
-    rc.decrypt(&PASSWORD_PADDING)
+    Zeroizing::new(rc.decrypt(&PASSWORD_PADDING))
 }
 
 /// Algorithm 5: Computing the encryption dictionary’s U (user password)
 /// value (Security handlers of revision 3 or 4).
-fn user_password_rev34(decryption_key: &[u8], id: &[u8]) -> Vec<u8> {
+fn user_password_rev34(decryption_key: &[u8], id: &[u8]) -> Zeroizing<Vec<u8>> {
     // a) Create a file encryption key based on the user password string.
     let mut rc = Rc4::new(decryption_key);
 
-    let mut input = vec![];
+    let mut input = Zeroizing::new(Vec::new());
     // b) Initialise the MD5 hash function and pass the 32-byte padding string.
     input.extend(PASSWORD_PADDING);
 
     // c) Pass the first element of the file's file identifier array to the hash function
     // and finish the hash.
     input.extend(id);
-    let hash = md5::calculate(&input);
+    let hash = Zeroizing::new(md5::calculate(&input));
 
     // d) Encrypt the 16-byte result of the hash, using an RC4 encryption function with
     // the encryption key from step (a).
-    let mut encrypted = rc.encrypt(&hash);
+    let mut encrypted = Zeroizing::new(rc.encrypt(&hash[..]));
 
     // e) Do the following 19 times: Take the output from the previous invocation of the
     // RC4 function and pass it as input to a new invocation of the function; use a file
@@ -580,13 +759,13 @@ fn user_password_rev34(decryption_key: &[u8], id: &[u8]) -> Vec<u8> {
     // obtained in step (a) and performing an XOR (exclusive or) operation between that
     // byte and the single-byte value of the iteration counter (from 1 to 19).
     for i in 1..=19 {
-        let mut key = decryption_key.to_vec();
-        for byte in &mut key {
+        let mut key = Zeroizing::new(decryption_key.to_vec());
+        for byte in key.iter_mut() {
             *byte ^= i;
         }
 
         let mut rc = Rc4::new(&key);
-        encrypted = rc.encrypt(&encrypted);
+        *encrypted = rc.encrypt(&encrypted);
     }
 
     encrypted.resize(32, 0);
@@ -600,7 +779,7 @@ fn decryption_key_rev56(
     password: &[u8],
     owner_string: &object::String<'_>,
     user_string: &object::String<'_>,
-) -> Result<Vec<u8>, DecryptionError> {
+) -> Result<(Zeroizing<Vec<u8>>, PasswordAuthentication), DecryptionError> {
     // a) The UTF-8 password string shall be generated from Unicode input by processing the input string with
     // the SASLprep (Internet RFC 4013) profile of stringprep (Internet RFC 3454) using the Normalize and BiDi
     // options, and then converting to a UTF-8 representation.
@@ -625,9 +804,9 @@ fn decryption_key_rev56(
     // with an input string consisting of the UTF-8 password concatenated with the 8 bytes of
     // owner Validation Salt, concatenated with the 48-byte U string. If the 32-byte result
     // matches the first 32 bytes of the O string, this is the owner password.
-    if compute_hash_rev56(password, owner_validation_salt, Some(trimmed_us), revision)?
-        == owner_hash
-    {
+    let owner_validation_hash =
+        compute_hash_rev56(password, owner_validation_salt, Some(trimmed_us), revision)?;
+    if &owner_validation_hash[..] == owner_hash {
         // d) Compute an intermediate owner key by computing a hash using algorithm 2.B with an input string
         // consisting of the UTF-8 owner password concatenated with the 8 bytes of owner Key Salt,
         // concatenated with the 48-byte U string. The 32-byte result is the key used to decrypt the 32-byte OE string
@@ -643,11 +822,20 @@ fn decryption_key_rev56(
             return Err(InvalidEncryption);
         }
 
-        let cipher = AES256Cipher::new(&intermediate_owner_key).ok_or(InvalidEncryption)?;
+        let cipher = AES256Cipher::new(&intermediate_owner_key[..]).ok_or(InvalidEncryption)?;
         let zero_iv = [0_u8; 16];
 
-        Ok(cipher.decrypt_cbc(&oe_string, &zero_iv, false))
-    } else if compute_hash_rev56(password, user_validation_salt, None, revision)? == user_hash {
+        Ok((
+            Zeroizing::new(cipher.decrypt_cbc(&oe_string, &zero_iv, false)),
+            PasswordAuthentication::Owner,
+        ))
+    } else {
+        let user_validation_hash =
+            compute_hash_rev56(password, user_validation_salt, None, revision)?;
+        if &user_validation_hash[..] != user_hash {
+            return Err(DecryptionError::PasswordProtected);
+        }
+
         // e) Compute an intermediate user key by computing a hash using algorithm 2.B with an input string
         // consisting of the UTF-8 user password concatenated with the 8 bytes of user Key Salt. The 32-byte result
         // is the key used to decrypt the 32-byte UE string using AES-256 in CBC mode with no padding and an
@@ -662,17 +850,194 @@ fn decryption_key_rev56(
             return Err(InvalidEncryption);
         }
 
-        let cipher = AES256Cipher::new(&intermediate_key).ok_or(InvalidEncryption)?;
+        let cipher = AES256Cipher::new(&intermediate_key[..]).ok_or(InvalidEncryption)?;
         let zero_iv = [0_u8; 16];
 
-        Ok(cipher.decrypt_cbc(&ue_string, &zero_iv, false))
-    } else {
-        Err(DecryptionError::PasswordProtected)
+        Ok((
+            Zeroizing::new(cipher.decrypt_cbc(&ue_string, &zero_iv, false)),
+            PasswordAuthentication::User,
+        ))
+    }
+}
+
+/// Algorithm 2.A, step f: authenticate the encrypted permission block.
+fn validate_permissions_rev56(
+    dict: &Dict<'_>,
+    decryption_key: &[u8],
+    permissions: u32,
+    encrypt_metadata: bool,
+) -> Result<(), DecryptionError> {
+    let encrypted_permissions = dict
+        .get::<object::String<'_>>(PERMS)
+        .ok_or(InvalidEncryption)?;
+    let encrypted_permissions: &[u8; 16] = encrypted_permissions
+        .as_ref()
+        .try_into()
+        .map_err(|_| InvalidEncryption)?;
+    validate_permissions_block(
+        encrypted_permissions,
+        decryption_key,
+        permissions,
+        encrypt_metadata,
+    )
+}
+
+fn validate_permissions_block(
+    encrypted_permissions: &[u8; 16],
+    decryption_key: &[u8],
+    permissions: u32,
+    encrypt_metadata: bool,
+) -> Result<(), DecryptionError> {
+    let cipher = AES256Cipher::new(decryption_key).ok_or(InvalidEncryption)?;
+    let decrypted = Zeroizing::new(cipher.decrypt_block(encrypted_permissions));
+
+    let stored_permissions =
+        u32::from_le_bytes(decrypted[..4].try_into().map_err(|_| InvalidEncryption)?);
+    let metadata_flag = if encrypt_metadata { b'T' } else { b'F' };
+    if stored_permissions != permissions
+        || decrypted[4..8] != [0xff; 4]
+        || decrypted[8] != metadata_flag
+        || &decrypted[9..12] != b"adb"
+    {
+        return Err(InvalidEncryption);
     }
 
-    // TODO:
-    // f) Decrypt the 16-byte Perms string using AES-256 in ECB mode with an initialization vector of zero and
-    // the file encryption key as the key. Verify that bytes 9-11 of the result are the characters "a", "d",
-    // "b". Bytes 0-3 of the decrypted Perms entry, treated as a little-endian integer, are the user
-    // permissions. They shall match the value in the P key.
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owner_entry(
+        owner_password: &[u8],
+        user_password: &[u8],
+        revision: u8,
+        key_len: usize,
+    ) -> Zeroizing<Vec<u8>> {
+        let padded_owner = padded_password(owner_password);
+        let mut hash = Zeroizing::new(md5::calculate(&padded_owner[..]));
+        if revision >= 3 {
+            for _ in 0..50 {
+                *hash = md5::calculate(&hash[..]);
+            }
+        }
+
+        let key = Zeroizing::new(hash[..key_len].to_vec());
+        let mut encrypted = Zeroizing::new(padded_password(user_password).to_vec());
+        if revision == 2 {
+            let mut rc = Rc4::new(&key);
+            *encrypted = rc.encrypt(&encrypted);
+        } else {
+            for round in 0_u8..=19 {
+                let mut round_key = Zeroizing::new(key.to_vec());
+                for byte in round_key.iter_mut() {
+                    *byte ^= round;
+                }
+
+                let mut rc = Rc4::new(&round_key);
+                *encrypted = rc.encrypt(&encrypted);
+            }
+        }
+
+        encrypted
+    }
+
+    #[test]
+    fn authenticates_distinct_owner_and_user_passwords_for_legacy_revisions() {
+        let id = b"0123456789abcdef";
+        let permissions = 0xffff_fffc;
+        for (revision, byte_length) in [(2, 5), (3, 16), (4, 16)] {
+            let owner = owner_entry(b"owner-secret", b"user-secret", revision, byte_length);
+            let user_key = decryption_key_rev1234(
+                b"user-secret",
+                true,
+                revision,
+                byte_length as u16,
+                &owner,
+                permissions,
+                id,
+            )
+            .unwrap();
+            let user = match revision {
+                2 => user_password_rev2(&user_key),
+                3 | 4 => user_password_rev34(&user_key, id),
+                _ => unreachable!(),
+            };
+
+            let (_, user_authentication) = authenticate_password_rev234(
+                b"user-secret",
+                true,
+                revision,
+                byte_length as u16,
+                &owner,
+                permissions,
+                id,
+                &user,
+            )
+            .unwrap();
+            assert_eq!(user_authentication, PasswordAuthentication::User);
+
+            let (_, owner_authentication) = authenticate_password_rev234(
+                b"owner-secret",
+                true,
+                revision,
+                byte_length as u16,
+                &owner,
+                permissions,
+                id,
+                &user,
+            )
+            .unwrap();
+            assert_eq!(owner_authentication, PasswordAuthentication::Owner);
+
+            assert_eq!(
+                authenticate_password_rev234(
+                    b"wrong",
+                    true,
+                    revision,
+                    byte_length as u16,
+                    &owner,
+                    permissions,
+                    id,
+                    &user,
+                )
+                .unwrap_err(),
+                DecryptionError::PasswordProtected
+            );
+        }
+    }
+
+    #[test]
+    fn validates_revision_56_permission_block() {
+        let key = [0x42; 32];
+        let permissions = 0xffff_f2c4_u32;
+        let mut clear = [0x91; 16];
+        clear[..4].copy_from_slice(&permissions.to_le_bytes());
+        clear[4..8].fill(0xff);
+        clear[8] = b'F';
+        clear[9..12].copy_from_slice(b"adb");
+
+        let cipher = AES256Cipher::new(&key).unwrap();
+        let encrypted = cipher.encrypt_block(&clear);
+        assert_eq!(
+            validate_permissions_block(&encrypted, &key, permissions, false),
+            Ok(())
+        );
+        assert_eq!(
+            validate_permissions_block(&encrypted, &key, permissions ^ 0x10, false),
+            Err(InvalidEncryption)
+        );
+        assert_eq!(
+            validate_permissions_block(&encrypted, &key, permissions, true),
+            Err(InvalidEncryption)
+        );
+
+        let mut corrupted = encrypted;
+        corrupted[0] ^= 1;
+        assert_eq!(
+            validate_permissions_block(&corrupted, &key, permissions, false),
+            Err(InvalidEncryption)
+        );
+    }
 }

@@ -30,6 +30,7 @@ rustc-hash = { workspace = true, optional = true }
 smallvec = { workspace = true }
 flate2 = { workspace = true, optional = true, features = ["zlib-rs"] }
 memchr = { workspace = true, optional = true }
+zeroize.workspace = true
 
 zune-jpeg = { workspace = true, optional = true }
 hayro-ccitt = { workspace = true, optional = true }

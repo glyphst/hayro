@@ -76,7 +76,7 @@ use alloc::vec::Vec;
 use crate::error::{bail, err};
 use crate::j2c::Header;
 use crate::jp2::ImageBoxes;
-use crate::jp2::cdef::{ChannelAssociation, ChannelType};
+use crate::jp2::cdef::ChannelAssociation;
 use crate::jp2::cmap::ComponentMappingType;
 use crate::jp2::colr::{CieLab, EnumeratedColorspace};
 use crate::jp2::icc::ICCMetadata;
@@ -224,7 +224,7 @@ impl<'a> Image<'a> {
                 .zip(
                     cdef.channel_definitions
                         .iter()
-                        .map(|c| match c._association {
+                        .map(|c| match c.association {
                             ChannelAssociation::WholeImage => u16::MAX,
                             ChannelAssociation::Colour(c) => c,
                         }),
@@ -260,8 +260,18 @@ pub(crate) fn resolve_alpha_and_color_space(
     let mut has_alpha = false;
 
     if let Some(cdef) = &boxes.channel_definition {
-        let last = cdef.channel_definitions.last().unwrap();
-        has_alpha = last.channel_type == ChannelType::Opacity;
+        let mut opacity_channels = cdef
+            .channel_definitions
+            .iter()
+            .filter(|definition| definition.channel_type.is_opacity());
+        if let Some(opacity) = opacity_channels.next() {
+            if opacity.association != ChannelAssociation::WholeImage
+                || opacity_channels.next().is_some()
+            {
+                bail!(ValidationError::InvalidComponentMetadata);
+            }
+            has_alpha = true;
+        }
     }
 
     let mut color_space = get_color_space(boxes, num_components)?;

@@ -361,7 +361,10 @@ pub enum ImageColorSpace {
 
 /// Additional data that is extracted from some image streams.
 pub struct ImageData {
-    /// An optional alpha channel of the image.
+    /// An optional normalized eight-bit alpha channel of the image.
+    ///
+    /// Unlike `FilterResult::data`, these samples remain unpacked even when
+    /// the image color components are repacked to another declared bit depth.
     pub alpha: Option<Vec<u8>>,
     /// The color space of the image.
     pub color_space: Option<ImageColorSpace>,

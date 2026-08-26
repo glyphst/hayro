@@ -70,6 +70,15 @@ impl CacheKey for StencilImage<'_, '_> {
 pub struct RasterImage<'a>(pub(crate) ImageXObject<'a>);
 
 impl RasterImage<'_> {
+    /// Return how a JPEG 2000 opacity channel is associated with its color samples.
+    ///
+    /// `None` means that the image does not have an active embedded opacity
+    /// channel. In particular, `/SMaskInData` is ignored for non-JPX images as
+    /// required by PDF.
+    pub fn embedded_alpha_mode(&self) -> Option<EmbeddedImageAlphaMode> {
+        self.0.embedded_alpha_mode()
+    }
+
     /// Return typed source/effective color-space properties for this image.
     ///
     /// The decoded pixels returned by [`Self::with_rgba`] already reflect the
@@ -132,6 +141,15 @@ impl RasterImage<'_> {
     pub fn height(&self) -> u32 {
         self.0.height()
     }
+}
+
+/// The association between JPEG 2000 color samples and an embedded opacity channel.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum EmbeddedImageAlphaMode {
+    /// Color samples are independent of the opacity samples (`/SMaskInData 1`).
+    Unassociated,
+    /// Color samples are preblended with a matte (`/SMaskInData 2`).
+    Premultiplied,
 }
 
 /// Typed source/effective color-space properties for a raster image.

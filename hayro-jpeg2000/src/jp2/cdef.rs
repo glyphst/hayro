@@ -23,7 +23,7 @@ pub(crate) fn parse(boxes: &mut ImageBoxes, data: &[u8]) -> Result<()> {
         definitions.push(ChannelDefinition {
             channel_index,
             channel_type: ChannelType::from_raw(channel_type).ok_or(FormatError::InvalidBox)?,
-            _association: ChannelAssociation::from_raw(association)
+            association: ChannelAssociation::from_raw(association)
                 .ok_or(FormatError::InvalidBox)?,
         });
     }
@@ -53,13 +53,14 @@ pub(crate) struct ChannelDefinitionBox {
 pub(crate) struct ChannelDefinition {
     pub(crate) channel_index: u16,
     pub(crate) channel_type: ChannelType,
-    pub(crate) _association: ChannelAssociation,
+    pub(crate) association: ChannelAssociation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChannelType {
     Colour,
     Opacity,
+    PremultipliedOpacity,
 }
 
 impl ChannelType {
@@ -67,9 +68,13 @@ impl ChannelType {
         match value {
             0 => Some(Self::Colour),
             1 => Some(Self::Opacity),
-            // We don't support the others.
+            2 => Some(Self::PremultipliedOpacity),
             _ => None,
         }
+    }
+
+    pub(crate) fn is_opacity(self) -> bool {
+        matches!(self, Self::Opacity | Self::PremultipliedOpacity)
     }
 }
 
@@ -87,5 +92,36 @@ impl ChannelAssociation {
             u16::MAX => None,
             v => Some(Self::Colour(v)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChannelAssociation, ChannelType, parse};
+    use crate::jp2::ImageBoxes;
+
+    #[test]
+    fn parses_premultiplied_opacity_channel_definition() {
+        let mut boxes = ImageBoxes::default();
+        parse(
+            &mut boxes,
+            &[
+                0, 2, // channel count
+                0, 0, 0, 0, 0, 1, // color channel 0, association 1
+                0, 1, 0, 2, 0, 0, // channel 1, premultiplied opacity, whole image
+            ],
+        )
+        .expect("premultiplied cdef");
+
+        let definitions = &boxes
+            .channel_definition
+            .expect("channel definition")
+            .channel_definitions;
+        assert_eq!(
+            definitions[1].channel_type,
+            ChannelType::PremultipliedOpacity
+        );
+        assert_eq!(definitions[1].association, ChannelAssociation::WholeImage);
+        assert!(definitions[1].channel_type.is_opacity());
     }
 }

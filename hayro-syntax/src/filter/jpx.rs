@@ -51,7 +51,7 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
     let mut decoder_context = hayro_jpeg2000::DecoderContext::default();
     let bitmap = image.decode(&mut decoder_context).ok()?.data_u8();
 
-    let (mut data, mut alpha) = if !has_alpha {
+    let (mut data, alpha) = if !has_alpha {
         (bitmap, None)
     } else {
         // Extract the alpha channel.
@@ -74,7 +74,6 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
     // ourselves.
     if bpc != 8 {
         data = scale(&data, bpc, cs.num_components(), width, height)?;
-        alpha = alpha.and_then(|alpha| scale(&alpha, bpc, cs.num_components(), width, height));
     }
 
     Some(FilterResult {

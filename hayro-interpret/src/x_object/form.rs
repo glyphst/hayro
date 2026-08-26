@@ -418,11 +418,12 @@ mod tests {
     use crate::color::ColorSpaceKind;
     use crate::font::GlyphRun;
     use crate::{
-        BlendMode, DrawMode, DrawProps, Image, ImageColorSpaceProperties, ImageData,
-        ImageDrawProps, InterpreterSettings, InterpreterWarning, LinkBorder, LinkBorderColor,
-        LinkBorderGeometry, LinkBorderStyle, MarkedContentProperties, MarkedContentProperty,
-        MarkedContentPropertyValue, MaskType, SoftMask, interpret_page,
+        BlendMode, DrawMode, DrawProps, EmbeddedImageAlphaMode, Image, ImageColorSpaceProperties,
+        ImageData, ImageDrawProps, InterpreterSettings, InterpreterWarning, LinkBorder,
+        LinkBorderColor, LinkBorderGeometry, LinkBorderStyle, MarkedContentProperties,
+        MarkedContentProperty, MarkedContentPropertyValue, MaskType, SoftMask, interpret_page,
     };
+    use base64::Engine as _;
     use hayro_syntax::Pdf;
     use hayro_syntax::object::Name;
     use kurbo::BezPath;
@@ -530,6 +531,15 @@ mod tests {
             image_data,
         )
         .into_bytes()
+    }
+
+    fn embedded_jpx_alpha_pdf() -> Vec<u8> {
+        let encoded = include_str!("../../../hayro-tests/assets/jpx_smaskindata.pdf.b64")
+            .split_ascii_whitespace()
+            .collect::<String>();
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("decode pdf.js JPX alpha fixture")
     }
 
     fn explicit_srgb_icc_image_pdf() -> Vec<u8> {
@@ -698,6 +708,8 @@ mod tests {
         alpha_constants: Vec<f32>,
         text_knockout: Vec<bool>,
         raster_images: Vec<(ImageColorSpaceProperties, Vec<u8>)>,
+        raster_alpha_modes: Vec<Option<EmbeddedImageAlphaMode>>,
+        raster_alpha_planes: Vec<Option<Vec<u8>>>,
     }
 
     impl RecordingDevice {
@@ -770,13 +782,16 @@ mod tests {
         fn draw_image(&mut self, image: Image<'a, '_>, _: ImageDrawProps<'a>) {
             if let Image::Raster(image) = image {
                 let properties = image.color_space_properties();
+                let alpha_mode = image.embedded_alpha_mode();
                 image.with_rgba(
-                    |data, _| {
+                    |data, alpha| {
                         let bytes = match data {
                             ImageData::Rgb(data) => data.data,
                             ImageData::Luma(data) => data.data,
                         };
                         self.raster_images.push((properties, bytes));
+                        self.raster_alpha_modes.push(alpha_mode);
+                        self.raster_alpha_planes.push(alpha.map(|alpha| alpha.data));
                     },
                     None,
                 );
@@ -886,6 +901,43 @@ mod tests {
         );
         assert_eq!(properties.color_space_components(), Some(3));
         assert!(!properties.color_space_is_default_overridden());
+    }
+
+    #[test]
+    fn embedded_jpx_alpha_modes_decode_and_reverse_source_preblending() {
+        let device = interpret_bytes(embedded_jpx_alpha_pdf(), false);
+        assert_eq!(device.raster_images.len(), 4);
+        assert_eq!(
+            device.raster_alpha_modes,
+            [
+                Some(EmbeddedImageAlphaMode::Premultiplied),
+                Some(EmbeddedImageAlphaMode::Premultiplied),
+                Some(EmbeddedImageAlphaMode::Premultiplied),
+                Some(EmbeddedImageAlphaMode::Unassociated),
+            ]
+        );
+        assert_eq!(
+            device.raster_alpha_planes,
+            [
+                Some(vec![128, 0]),
+                Some(vec![128, 255]),
+                Some(vec![128, 0]),
+                Some(vec![128, 255]),
+            ]
+        );
+        assert_eq!(
+            device
+                .raster_images
+                .iter()
+                .map(|(_, pixels)| pixels.as_slice())
+                .collect::<Vec<_>>(),
+            [
+                [255, 255, 255, 0, 255, 0].as_slice(),
+                [255, 0, 0, 0, 0, 200].as_slice(),
+                [255, 255, 255, 0, 0, 255].as_slice(),
+                [255, 0, 0, 0, 255, 0].as_slice(),
+            ]
+        );
     }
 
     #[test]

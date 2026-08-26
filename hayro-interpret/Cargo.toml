@@ -24,6 +24,7 @@ bitflags = { workspace = true }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
 image = { workspace = true, features = ["png"] }
 
 [features]

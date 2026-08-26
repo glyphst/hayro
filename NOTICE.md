@@ -9,6 +9,9 @@ under the Apache 2.0 license:
 - The CalRGB and CalGray conversion code.
 - The flate decoder.
 - The implementation of AES, MD5, SHA and RC4.
+- The `jpx_smaskindata.pdf` regression fixture, stored as Base64 under
+  `hayro-tests/assets`, from pdf.js commit
+  `f554d0c9c89b8e4bb837f2193c767f63ea8869a0`.
 
 The following parts of code have been copied from the [png crate](https://github.com/image-rs/image-png), available under the Apache 2.0:
 - Decoding of PNG predictors.

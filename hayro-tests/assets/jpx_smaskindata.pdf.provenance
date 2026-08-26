@@ -1,0 +1,7 @@
+Source: https://github.com/mozilla/pdf.js/blob/f554d0c9c89b8e4bb837f2193c767f63ea8869a0/test/pdfs/jpx_smaskindata.pdf
+Source commit: f554d0c9c89b8e4bb837f2193c767f63ea8869a0
+Original SHA-256: a82813559c74f074b0caf92c80875fc018acb737269a2af5508c7e083b2a5fd3
+Original byte length: 2515
+Stored representation: Base64 with whitespace removed by the test loader
+License: Apache-2.0 (pdf.js)
+Purpose: End-to-end JPEG 2000 /SMaskInData 1 and 2 decoding regression

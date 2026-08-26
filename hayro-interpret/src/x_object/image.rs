@@ -10,11 +10,11 @@ use crate::context::Context;
 use crate::device::Device;
 use crate::interpret::state::ActiveTransferFunction;
 use crate::{
-    BlendMode, CacheKey, Image, ImageColorSpaceProperties, ImageDrawProps, RasterImage,
-    StencilImage,
+    BlendMode, CacheKey, EmbeddedImageAlphaMode, Image, ImageColorSpaceProperties, ImageDrawProps,
+    RasterImage, StencilImage,
 };
 use hayro_syntax::object::dict::keys::*;
-use hayro_syntax::object::{Name, Object, Stream};
+use hayro_syntax::object::{Array, Dict, Name, Object, Stream};
 use kurbo::Affine;
 
 #[derive(Clone)]
@@ -269,6 +269,10 @@ impl<'a> ImageXObject<'a> {
         self.height
     }
 
+    pub(crate) fn embedded_alpha_mode(&self) -> Option<EmbeddedImageAlphaMode> {
+        embedded_alpha_mode(self.stream.dict())
+    }
+
     pub(crate) fn stream(&self) -> &Stream<'a> {
         &self.stream
     }
@@ -276,9 +280,7 @@ impl<'a> ImageXObject<'a> {
     fn has_mask(&self) -> bool {
         let dict = self.stream.dict();
 
-        smask_in_data_has_alpha(dict.get::<u8>(SMASK_IN_DATA))
-            || dict.contains_key(SMASK)
-            || dict.contains_key(MASK)
+        embedded_alpha_mode(dict).is_some() || dict.contains_key(SMASK) || dict.contains_key(MASK)
     }
 }
 
@@ -301,8 +303,29 @@ fn mask_color_space_properties() -> ImageColorSpaceProperties {
     }
 }
 
-fn smask_in_data_has_alpha(value: Option<u8>) -> bool {
-    matches!(value, Some(1 | 2))
+fn embedded_alpha_mode(dict: &Dict<'_>) -> Option<EmbeddedImageAlphaMode> {
+    if !uses_jpx_decode(dict) {
+        return None;
+    }
+
+    match dict.get::<u8>(SMASK_IN_DATA) {
+        Some(1) => Some(EmbeddedImageAlphaMode::Unassociated),
+        Some(2) => Some(EmbeddedImageAlphaMode::Premultiplied),
+        _ => None,
+    }
+}
+
+fn uses_jpx_decode(dict: &Dict<'_>) -> bool {
+    let is_jpx = |name: &Name<'_>| name.as_ref() == JPX_DECODE;
+
+    dict.get::<Name<'_>>(F)
+        .or_else(|| dict.get::<Name<'_>>(FILTER))
+        .as_ref()
+        .is_some_and(is_jpx)
+        || dict
+            .get::<Array<'_>>(F)
+            .or_else(|| dict.get::<Array<'_>>(FILTER))
+            .is_some_and(|filters| filters.iter::<Name<'_>>().any(|name| is_jpx(&name)))
 }
 
 impl CacheKey for ImageXObject<'_> {
@@ -313,14 +336,32 @@ impl CacheKey for ImageXObject<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::smask_in_data_has_alpha;
+    use super::embedded_alpha_mode;
+    use crate::EmbeddedImageAlphaMode;
+    use hayro_syntax::object::{Dict, FromBytes};
 
     #[test]
-    fn explicit_zero_smask_in_data_does_not_discard_graphics_state_mask() {
-        assert!(!smask_in_data_has_alpha(None));
-        assert!(!smask_in_data_has_alpha(Some(0)));
-        assert!(smask_in_data_has_alpha(Some(1)));
-        assert!(smask_in_data_has_alpha(Some(2)));
-        assert!(!smask_in_data_has_alpha(Some(3)));
+    fn embedded_alpha_requires_jpx_and_a_supported_mode() {
+        let mode = |entries: &[u8]| {
+            let dict = Dict::from_bytes(entries).expect("image dictionary");
+            embedded_alpha_mode(&dict)
+        };
+
+        assert_eq!(
+            mode(b"<< /Filter /JPXDecode /SMaskInData 1 >>"),
+            Some(EmbeddedImageAlphaMode::Unassociated)
+        );
+        assert_eq!(
+            mode(b"<< /Filter [/ASCII85Decode /JPXDecode] /SMaskInData 2 >>"),
+            Some(EmbeddedImageAlphaMode::Premultiplied)
+        );
+        assert_eq!(
+            mode(b"<< /F /JPXDecode /SMaskInData 2 >>"),
+            Some(EmbeddedImageAlphaMode::Premultiplied)
+        );
+        assert_eq!(mode(b"<< /Filter /JPXDecode /SMaskInData 0 >>"), None);
+        assert_eq!(mode(b"<< /Filter /JPXDecode /SMaskInData 3 >>"), None);
+        assert_eq!(mode(b"<< /Filter /FlateDecode /SMaskInData 2 >>"), None);
+        assert_eq!(mode(b"<< /SMaskInData 2 >>"), None);
     }
 }

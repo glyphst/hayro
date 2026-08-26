@@ -202,6 +202,15 @@ pub(crate) fn get(
     let encryption_v = dict.get::<u8>(V).ok_or(InvalidEncryption)?;
     let encrypt_metadata = dict.get::<bool>(ENCRYPT_META_DATA).unwrap_or(true);
     let revision = dict.get::<u8>(R).ok_or(InvalidEncryption)?;
+    if !matches!(revision, 2..=6) {
+        return Err(DecryptionError::UnsupportedAlgorithm);
+    }
+    if !matches!(
+        (encryption_v, revision),
+        (1, 2) | (2, 3) | (4, 4) | (5, 5 | 6)
+    ) {
+        return Err(InvalidEncryption);
+    }
     let length = match encryption_v {
         1 => 40,
         2 => dict.get::<u16>(LENGTH).unwrap_or(40),

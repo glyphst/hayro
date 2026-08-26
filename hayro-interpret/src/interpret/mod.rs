@@ -394,6 +394,21 @@ pub enum InterpreterWarning {
     AnnotationAppearanceFailure(crate::AnnotationAppearanceError),
     /// A Link annotation's synthesized border could not be resolved exactly.
     LinkBorderFailure(crate::LinkBorderError),
+    /// An `EMC` operator had no matching `BMC` or `BDC` in this content scope
+    /// and was ignored.
+    UnmatchedMarkedContentEnd,
+    /// A marked-content sequence reached the end of its content scope without
+    /// an `EMC` and was closed there.
+    UnterminatedMarkedContent,
+    /// An `ET` operator had no matching `BT` in this content scope and was
+    /// ignored.
+    UnmatchedTextObjectEnd,
+    /// A text object reached the next graphics object or the end of its
+    /// content scope without an `ET` and was closed at that boundary.
+    UnterminatedTextObject,
+    /// A nested `BT` closed the already active text object before beginning a
+    /// new one.
+    NestedTextObject,
 }
 
 /// interpret the contents of the page and render them into the device.
@@ -458,13 +473,35 @@ pub fn interpret<'a>(
     device: &mut impl Device<'a>,
 ) {
     let num_states = context.num_states();
+    let initial_marked_content_depth = context.ocg_state.marked_content_depth();
     let mut font_dict_cache = FxHashMap::<Name<'a>, Dict<'a>>::default();
+    let mut text_object_active = false;
+    let mut warned_unmatched_marked_content_end = false;
+    let mut warned_unterminated_marked_content = false;
+    let mut warned_unmatched_text_object_end = false;
+    let mut warned_unterminated_text_object = false;
+    let mut warned_nested_text_object = false;
 
     context.save_state();
 
     while let Some(op) = ops.next() {
         if device.is_cancelled() {
             break;
+        }
+        if text_object_active && matches!(&op, TypedInstruction::BeginText(_)) {
+            if !warned_nested_text_object {
+                (context.settings.warning_sink)(InterpreterWarning::NestedTextObject);
+                warned_nested_text_object = true;
+            }
+            close_text_object(context, device);
+            text_object_active = false;
+        } else if text_object_active && starts_graphics_object(&op) {
+            if !warned_unterminated_text_object {
+                (context.settings.warning_sink)(InterpreterWarning::UnterminatedTextObject);
+                warned_unterminated_text_object = true;
+            }
+            close_text_object(context, device);
+            text_object_active = false;
         }
         match op {
             TypedInstruction::SaveState(_) => context.save_state(),
@@ -786,10 +823,15 @@ pub fn interpret<'a>(
             }
             TypedInstruction::MarkedContentPointWithProperties(_) => {}
             TypedInstruction::EndMarkedContent(_) => {
-                if context.ocg_state.end_marked_content() {
-                    device.end_optional_content();
+                if context.ocg_state.marked_content_depth() > initial_marked_content_depth {
+                    if context.ocg_state.end_marked_content() {
+                        device.end_optional_content();
+                    }
+                    device.end_marked_content();
+                } else if !warned_unmatched_marked_content_end {
+                    (context.settings.warning_sink)(InterpreterWarning::UnmatchedMarkedContentEnd);
+                    warned_unmatched_marked_content_end = true;
                 }
-                device.end_marked_content();
             }
             TypedInstruction::MarkedContentPoint(_) => {}
             TypedInstruction::BeginMarkedContent(bmc) => {
@@ -800,6 +842,7 @@ pub fn interpret<'a>(
                 context.get_mut().text_state.text_matrix = Affine::IDENTITY;
                 context.get_mut().text_state.text_line_matrix = Affine::IDENTITY;
                 device.begin_text_object(context.get().graphics_state.text_knockout);
+                text_object_active = true;
             }
             TypedInstruction::SetTextMatrix(m) => {
                 let m = Affine::new([
@@ -814,26 +857,13 @@ pub fn interpret<'a>(
                 context.get_mut().text_state.text_matrix = m;
             }
             TypedInstruction::EndText(_) => {
-                let has_outline = context
-                    .get()
-                    .text_state
-                    .clip_paths
-                    .segments()
-                    .next()
-                    .is_some();
-
-                // The text object's implicit knockout group contains only its
-                // glyph paints. A clipping text mode takes effect after the
-                // text object has been evaluated.
-                device.end_text_object();
-
-                if has_outline {
-                    let clip_path = context.get().ctm * context.get().text_state.clip_paths.clone();
-
-                    context.push_clip_path(clip_path, FillRule::NonZero, device);
+                if text_object_active {
+                    close_text_object(context, device);
+                    text_object_active = false;
+                } else if !warned_unmatched_text_object_end {
+                    (context.settings.warning_sink)(InterpreterWarning::UnmatchedTextObjectEnd);
+                    warned_unmatched_text_object_end = true;
                 }
-
-                context.get_mut().text_state.clip_paths.truncate(0);
             }
             TypedInstruction::TextFont(t) => {
                 let name = t.0;
@@ -1030,7 +1060,80 @@ pub fn interpret<'a>(
         }
     }
 
+    let cancelled = device.is_cancelled();
+    if text_object_active {
+        if !cancelled && !warned_unterminated_text_object {
+            (context.settings.warning_sink)(InterpreterWarning::UnterminatedTextObject);
+        }
+        close_text_object(context, device);
+    }
+    while context.ocg_state.marked_content_depth() > initial_marked_content_depth {
+        if !cancelled && !warned_unterminated_marked_content {
+            (context.settings.warning_sink)(InterpreterWarning::UnterminatedMarkedContent);
+            warned_unterminated_marked_content = true;
+        }
+        if context.ocg_state.end_marked_content() {
+            device.end_optional_content();
+        }
+        device.end_marked_content();
+    }
+
     while context.num_states() > num_states {
         context.restore_state(device);
     }
+}
+
+fn close_text_object<'a>(context: &mut Context<'a>, device: &mut impl Device<'a>) {
+    let has_outline = context
+        .get()
+        .text_state
+        .clip_paths
+        .segments()
+        .next()
+        .is_some();
+
+    // The text object's implicit knockout group contains only its glyph
+    // paints. A clipping text mode takes effect after the text object has been
+    // evaluated.
+    device.end_text_object();
+
+    if has_outline {
+        let clip_path = context.get().ctm * context.get().text_state.clip_paths.clone();
+        context.push_clip_path(clip_path, FillRule::NonZero, device);
+    }
+
+    context.get_mut().text_state.clip_paths.truncate(0);
+}
+
+fn starts_graphics_object(instruction: &TypedInstruction<'_, '_>) -> bool {
+    matches!(
+        instruction,
+        TypedInstruction::SaveState(_)
+            | TypedInstruction::RestoreState(_)
+            | TypedInstruction::Transform(_)
+            | TypedInstruction::MoveTo(_)
+            | TypedInstruction::LineTo(_)
+            | TypedInstruction::CubicTo(_)
+            | TypedInstruction::CubicStartTo(_)
+            | TypedInstruction::CubicEndTo(_)
+            | TypedInstruction::RectPath(_)
+            | TypedInstruction::ClosePath(_)
+            | TypedInstruction::StrokePath(_)
+            | TypedInstruction::CloseAndStrokePath(_)
+            | TypedInstruction::FillPathNonZero(_)
+            | TypedInstruction::FillPathEvenOdd(_)
+            | TypedInstruction::FillPathNonZeroCompatibility(_)
+            | TypedInstruction::FillAndStrokeNonZero(_)
+            | TypedInstruction::FillAndStrokeEvenOdd(_)
+            | TypedInstruction::CloseFillAndStrokeNonZero(_)
+            | TypedInstruction::CloseFillAndStrokeEvenOdd(_)
+            | TypedInstruction::EndPath(_)
+            | TypedInstruction::ClipNonZero(_)
+            | TypedInstruction::ClipEvenOdd(_)
+            | TypedInstruction::XObject(_)
+            | TypedInstruction::InlineImage(_)
+            | TypedInstruction::Shading(_)
+            | TypedInstruction::ShapeGlyph(_)
+            | TypedInstruction::ColorGlyph(_)
+    )
 }

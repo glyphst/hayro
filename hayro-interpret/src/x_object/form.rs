@@ -468,6 +468,20 @@ mod tests {
         .into_bytes()
     }
 
+    fn content_pdf(contents: &str) -> Vec<u8> {
+        format!(
+            "%PDF-1.7\n\
+             1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+             2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+             3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<<>>/Contents 4 0 R>> endobj\n\
+             4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
+             trailer <</Root 1 0 R>>\n%%EOF",
+            contents.len(),
+            contents,
+        )
+        .into_bytes()
+    }
+
     fn luminosity_soft_mask_pdf() -> Vec<u8> {
         luminosity_soft_mask_pdf_with_backdrop("/BC[0.1 0.2 0.3]")
     }
@@ -728,6 +742,23 @@ mod tests {
             self.events.push("end-text");
         }
 
+        fn begin_marked_content(&mut self, _: &[u8], _: Option<i32>) {
+            self.events.push("begin-marked");
+        }
+
+        fn begin_marked_content_with_properties(
+            &mut self,
+            _: &[u8],
+            properties: MarkedContentProperties,
+        ) {
+            self.events.push("begin-marked");
+            self.marked_properties.push(properties);
+        }
+
+        fn end_marked_content(&mut self) {
+            self.events.push("end-marked");
+        }
+
         fn begin_combined_fill_stroke(&mut self) {
             self.events.push("begin-fill-stroke");
         }
@@ -774,14 +805,6 @@ mod tests {
         fn pop_clip(&mut self) {}
 
         fn pop_transparency_group(&mut self) {}
-
-        fn begin_marked_content_with_properties(
-            &mut self,
-            _: &[u8],
-            properties: MarkedContentProperties,
-        ) {
-            self.marked_properties.push(properties);
-        }
     }
 
     fn interpret(retained: bool) -> RecordingDevice {
@@ -912,6 +935,95 @@ mod tests {
         };
         interpret_page(&pdf.pages()[0], &mut context, &mut device);
         device
+    }
+
+    #[test]
+    fn malformed_text_object_boundaries_are_repaired_and_reported_once() {
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let warning_target = warnings.clone();
+        let settings = InterpreterSettings {
+            warning_sink: Arc::new(move |warning| {
+                warning_target.lock().unwrap().push(warning);
+            }),
+            ..InterpreterSettings::default()
+        };
+        let device = interpret_bytes_with_settings(
+            content_pdf("ET BT BT ET BT 0 0 10 10 re f"),
+            false,
+            settings,
+        );
+
+        assert_eq!(
+            device.events,
+            [
+                "begin-text",
+                "end-text",
+                "begin-text",
+                "end-text",
+                "begin-text",
+                "end-text",
+                "path",
+            ]
+        );
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| matches!(warning, InterpreterWarning::UnmatchedTextObjectEnd))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| matches!(warning, InterpreterWarning::NestedTextObject))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| matches!(warning, InterpreterWarning::UnterminatedTextObject))
+        );
+    }
+
+    #[test]
+    fn malformed_marked_content_boundaries_are_repaired_and_reported_once() {
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let warning_target = warnings.clone();
+        let settings = InterpreterSettings {
+            warning_sink: Arc::new(move |warning| {
+                warning_target.lock().unwrap().push(warning);
+            }),
+            ..InterpreterSettings::default()
+        };
+        let device = interpret_bytes_with_settings(
+            content_pdf("EMC EMC /Span BMC /Inner BMC 0 0 10 10 re f EMC"),
+            false,
+            settings,
+        );
+
+        assert_eq!(
+            device.events,
+            [
+                "begin-marked",
+                "begin-marked",
+                "path",
+                "end-marked",
+                "end-marked",
+            ]
+        );
+        let warnings = warnings.lock().unwrap();
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| matches!(warning, InterpreterWarning::UnmatchedMarkedContentEnd))
+                .count(),
+            1
+        );
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| matches!(warning, InterpreterWarning::UnterminatedMarkedContent))
+                .count(),
+            1
+        );
     }
 
     #[test]

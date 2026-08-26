@@ -133,6 +133,10 @@ impl OcgState {
             .is_some_and(|frame| frame.emit_optional_callback)
     }
 
+    pub(crate) fn marked_content_depth(&self) -> usize {
+        self.visibility_stack.len()
+    }
+
     pub(crate) fn is_visible(&self) -> bool {
         self.preserve_optional_content || self.effective_visibility()
     }

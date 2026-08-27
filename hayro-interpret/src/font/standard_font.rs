@@ -15,7 +15,9 @@ use kurbo::BezPath;
 use rustc_hash::FxHashMap;
 use skrifa::GlyphId;
 use skrifa::raw::TableProvider;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+const UNMAPPED_GLYPH: u32 = u32::MAX;
 
 /// The 14 standard fonts of PDF.
 #[derive(Copy, Clone, Debug)]
@@ -364,8 +366,7 @@ pub(crate) struct StandardKind {
     widths: Vec<Width>,
     missing_width: f32,
     fallback: bool,
-    code_to_glyph: Mutex<FxHashMap<u8, GlyphId>>,
-    glyph_to_code: Mutex<FxHashMap<GlyphId, u8>>,
+    code_to_glyph: Box<[AtomicU32; 256]>,
     encodings: FxHashMap<u8, String>,
 }
 
@@ -401,8 +402,7 @@ impl StandardKind {
             widths,
             missing_width,
             encodings: encoding_map,
-            code_to_glyph: Mutex::new(FxHashMap::default()),
-            glyph_to_code: Mutex::new(FxHashMap::default()),
+            code_to_glyph: Box::new(std::array::from_fn(|_| AtomicU32::new(UNMAPPED_GLYPH))),
             fallback,
             encoding,
         })
@@ -421,13 +421,9 @@ impl StandardKind {
     }
 
     pub(crate) fn map_code(&self, code: u8) -> GlyphId {
-        let mut code_to_glyph = self
-            .code_to_glyph
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-
-        if let Some(glyph) = code_to_glyph.get(&code).copied() {
-            return glyph;
+        let cached = self.code_to_glyph[code as usize].load(Ordering::Relaxed);
+        if cached != UNMAPPED_GLYPH {
+            return GlyphId::new(cached);
         }
 
         let result = self
@@ -442,32 +438,21 @@ impl StandardKind {
                 })
             })
             .unwrap_or(GlyphId::NOTDEF);
-        code_to_glyph.insert(code, result);
-        self.glyph_to_code
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(result, code);
+        self.code_to_glyph[code as usize].store(result.to_u32(), Ordering::Relaxed);
 
         result
     }
 
-    pub(crate) fn outline_glyph(&self, glyph: GlyphId) -> BezPath {
+    pub(crate) fn outline_glyph(&self, glyph: GlyphId, code: u8) -> BezPath {
         let path = self.base_font_blob.outline_glyph(glyph);
 
         // If the font is not embedded, we might need to stretch it so that
         // it matches the metrics of the actual underlying font blob.
 
-        if let Some(code) = self
-            .glyph_to_code
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&glyph)
-            .copied()
-            && let Some(actual_width) = self.base_font_blob.advance_width(glyph).or_else(|| {
-                self.code_to_ps_name(code)
-                    .and_then(|name| self.base_font.get_width(name))
-            })
-        {
+        if let Some(actual_width) = self.base_font_blob.advance_width(glyph).or_else(|| {
+            self.code_to_ps_name(code)
+                .and_then(|name| self.base_font.get_width(name))
+        }) {
             // From my experiments: Most PDF viewers, if they detect a font is a
             // standard font, they completely ignore the widths array, even if
             // different widths are indicated there. So only if it's an unknown

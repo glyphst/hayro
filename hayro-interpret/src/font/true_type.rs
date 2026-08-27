@@ -21,9 +21,11 @@ use skrifa::raw::TableProvider;
 use skrifa::raw::tables::cmap::PlatformId;
 use skrifa::{GlyphId, MetadataProvider};
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub(crate) const MAX_EMBEDDED_UNICODE_CMAP_MAPPINGS: usize = 262_144;
+const UNMAPPED_GLYPH: u32 = u32::MAX;
 
 #[derive(Debug)]
 pub(crate) struct TrueTypeFont {
@@ -96,10 +98,10 @@ impl TrueTypeFont {
         }
     }
 
-    pub(crate) fn outline_glyph(&self, glyph: GlyphId) -> BezPath {
+    pub(crate) fn outline_glyph(&self, glyph: GlyphId, code: u8) -> BezPath {
         match &self.kind {
             Kind::Embedded(e) => e.outline_glyph(glyph),
-            Kind::Standard(s) => s.outline_glyph(glyph),
+            Kind::Standard(s) => s.outline_glyph(glyph, code),
         }
     }
 
@@ -220,7 +222,7 @@ struct EmbeddedKind {
     // CFF font.
     cff_blob: Option<CffFontBlob>,
     differences: FxHashMap<u8, String>,
-    cached_mappings: Mutex<FxHashMap<u8, GlyphId>>,
+    cached_mappings: Box<[AtomicU32; 256]>,
     /// PostScript name from the PDF.
     postscript_name: Option<String>,
 }
@@ -283,7 +285,7 @@ impl EmbeddedKind {
             embedded_unicodes,
             font_flags,
             encoding,
-            cached_mappings: Mutex::new(FxHashMap::default()),
+            cached_mappings: Box::new(std::array::from_fn(|_| AtomicU32::new(UNMAPPED_GLYPH))),
             postscript_name,
         })
     }
@@ -333,13 +335,9 @@ impl EmbeddedKind {
     }
 
     fn map_code(&self, code: u8) -> GlyphId {
-        if let Some(glyph) = self
-            .cached_mappings
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&code)
-        {
-            return *glyph;
+        let cached = self.cached_mappings[code as usize].load(Ordering::Relaxed);
+        if cached != UNMAPPED_GLYPH {
+            return GlyphId::new(cached);
         }
 
         if let Some(blob) = self.cff_blob.as_ref() {
@@ -421,10 +419,7 @@ impl EmbeddedKind {
         }
 
         let glyph = glyph.unwrap_or(GlyphId::NOTDEF);
-        self.cached_mappings
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(code, glyph);
+        self.cached_mappings[code as usize].store(glyph.to_u32(), Ordering::Relaxed);
 
         glyph
     }

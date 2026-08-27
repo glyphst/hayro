@@ -119,9 +119,9 @@ impl Type1Font {
         }
     }
 
-    pub(crate) fn outline_glyph(&self, glyph: GlyphId) -> BezPath {
+    pub(crate) fn outline_glyph(&self, glyph: GlyphId, code: u8) -> BezPath {
         match &self.kind {
-            Kind::Standard(s) => s.outline_glyph(glyph),
+            Kind::Standard(s) => s.outline_glyph(glyph, code),
             Kind::Cff(c) => c.outline_glyph(glyph),
             Kind::Type1(t) => t.outline_glyph(glyph),
         }

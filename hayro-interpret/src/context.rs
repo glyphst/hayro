@@ -1,6 +1,7 @@
 use crate::cache::{Cache, CacheKey};
 use crate::color::{Color, ColorSpace};
 use crate::convert::convert_transform;
+use crate::font::outline::OutlineFont;
 use crate::font::{Font, PositionedGlyph, StandardFont};
 use crate::interpret::state::{ClipType, State, TextStateFont};
 use crate::ocg::OcgState;
@@ -9,24 +10,279 @@ use crate::{ClipPath, Device, DrawProps, FillRule, InterpreterSettings, Paint, S
 use hayro_syntax::content::ops::Transform;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::Name;
+use hayro_syntax::object::dict::keys::{SUBTYPE, TYPE3};
 use hayro_syntax::page::Resources;
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, BezPath, PathEl, Point, Rect, Shape};
 use rustc_hash::FxHashMap;
 use smallvec::smallvec;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Maximum nesting depth for interpreting `XObject`'s/patterns/streams.
 pub(crate) const MAX_NESTED_INTERPRETATION_DEPTH: u32 = 50;
 
-/// A cache used by the interpreter.
+/// Resource bounds for a document's shared interpreter cache.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterpreterCacheLimits {
+    /// Maximum number of parsed outline fonts retained by a document.
+    pub max_outline_fonts: usize,
+    /// Maximum estimated bytes retained by parsed outline fonts.
+    pub max_outline_font_bytes: u64,
+    /// Maximum number of decoded or resolved interpreter objects retained by a document.
+    pub max_objects: usize,
+}
+
+impl Default for InterpreterCacheLimits {
+    fn default() -> Self {
+        Self {
+            max_outline_fonts: 512,
+            max_outline_font_bytes: 256 * 1024 * 1024,
+            max_objects: 8_192,
+        }
+    }
+}
+
+/// A point-in-time snapshot of a document's shared interpreter cache.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InterpreterCacheStats {
+    /// Number of parsed outline-font entries currently retained.
+    pub outline_fonts: usize,
+    /// Estimated bytes currently retained by parsed outline fonts.
+    pub outline_font_bytes: u64,
+    /// Number of outline-font cache hits since construction.
+    pub outline_font_hits: u64,
+    /// Number of outline-font cache misses since construction.
+    pub outline_font_misses: u64,
+    /// Number of outline-font entries evicted since construction.
+    pub outline_font_evictions: u64,
+    /// Number of decoded or resolved object entries currently retained.
+    pub objects: usize,
+    /// Number of decoded or resolved object cache hits since construction.
+    pub object_hits: u64,
+    /// Number of decoded or resolved object cache misses since construction.
+    pub object_misses: u64,
+    /// Number of decoded or resolved object entries evicted since construction.
+    pub object_evictions: u64,
+}
+
+struct OutlineFontSlot {
+    value: OnceLock<Option<OutlineFont>>,
+    accounted: AtomicBool,
+}
+
+struct OutlineFontEntry {
+    slot: Arc<OutlineFontSlot>,
+    estimated_bytes: u64,
+    last_used: u64,
+}
+
+struct OutlineFontCache {
+    entries: FxHashMap<u128, OutlineFontEntry>,
+    recency: VecDeque<(u128, u64)>,
+    clock: u64,
+    estimated_bytes: u64,
+    limits: InterpreterCacheLimits,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+}
+
+impl OutlineFontCache {
+    fn touch(&mut self, cache_key: u128) {
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(entry) = self.entries.get_mut(&cache_key) {
+            entry.last_used = self.clock;
+            self.recency.push_back((cache_key, self.clock));
+        }
+
+        if self.recency.len() > self.entries.len().saturating_mul(4).saturating_add(32) {
+            let mut current = self
+                .entries
+                .iter()
+                .map(|(key, entry)| (*key, entry.last_used))
+                .collect::<Vec<_>>();
+            current.sort_unstable_by_key(|(_, last_used)| *last_used);
+            self.recency = current.into();
+        }
+    }
+
+    fn evict_to_limits(&mut self) {
+        while self.entries.len() > self.limits.max_outline_fonts
+            || self.estimated_bytes > self.limits.max_outline_font_bytes
+        {
+            let Some((cache_key, last_used)) = self.recency.pop_front() else {
+                break;
+            };
+            let is_current = self
+                .entries
+                .get(&cache_key)
+                .is_some_and(|entry| entry.last_used == last_used);
+            if !is_current {
+                continue;
+            }
+            if let Some(entry) = self.entries.remove(&cache_key) {
+                self.estimated_bytes = self.estimated_bytes.saturating_sub(entry.estimated_bytes);
+                self.evictions = self.evictions.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// A bounded, thread-safe interpreter cache shared by all pages of one document.
 ///
-/// Ideally, such a cache should be constructed once per PDF and then reused across
-/// multiple interpreter invocations on the same document.
+/// Outline fonts and owned decoded objects are reusable across concurrent page
+/// interpretations. Type 3 fonts remain in the page-local [`InterpreterCache`]
+/// because their programs borrow page resources.
+#[derive(Clone)]
+pub struct SharedInterpreterCache {
+    outline_fonts: Arc<Mutex<OutlineFontCache>>,
+    object_cache: Cache,
+}
+
+impl Default for SharedInterpreterCache {
+    fn default() -> Self {
+        Self::new(InterpreterCacheLimits::default())
+    }
+}
+
+impl SharedInterpreterCache {
+    /// Construct an empty document cache with explicit resource limits.
+    pub fn new(limits: InterpreterCacheLimits) -> Self {
+        Self {
+            outline_fonts: Arc::new(Mutex::new(OutlineFontCache {
+                entries: FxHashMap::default(),
+                recency: VecDeque::new(),
+                clock: 0,
+                estimated_bytes: 0,
+                limits,
+                hits: 0,
+                misses: 0,
+                evictions: 0,
+            })),
+            object_cache: Cache::with_max_entries(limits.max_objects),
+        }
+    }
+
+    /// Return the configured cache resource limits.
+    pub fn limits(&self) -> InterpreterCacheLimits {
+        self.outline_fonts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .limits
+    }
+
+    /// Return current residency and cumulative hit/miss statistics.
+    pub fn stats(&self) -> InterpreterCacheStats {
+        let fonts = self
+            .outline_fonts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let objects = self.object_cache.stats();
+        InterpreterCacheStats {
+            outline_fonts: fonts.entries.len(),
+            outline_font_bytes: fonts.estimated_bytes,
+            outline_font_hits: fonts.hits,
+            outline_font_misses: fonts.misses,
+            outline_font_evictions: fonts.evictions,
+            objects: objects.entries,
+            object_hits: objects.hits,
+            object_misses: objects.misses,
+            object_evictions: objects.evictions,
+        }
+    }
+
+    /// Drop all currently retained entries while preserving cumulative statistics.
+    pub fn clear(&self) {
+        let mut fonts = self
+            .outline_fonts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        fonts.entries.clear();
+        fonts.recency.clear();
+        fonts.estimated_bytes = 0;
+        drop(fonts);
+        self.object_cache.clear();
+    }
+
+    fn outline_font(
+        &self,
+        cache_key: u128,
+        build: impl FnOnce() -> Option<OutlineFont>,
+    ) -> Option<OutlineFont> {
+        let slot = {
+            let mut cache = self
+                .outline_fonts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if cache.entries.contains_key(&cache_key) {
+                cache.hits = cache.hits.saturating_add(1);
+                cache.touch(cache_key);
+                cache
+                    .entries
+                    .get(&cache_key)
+                    .map(|entry| entry.slot.clone())
+                    .expect("an outline-font entry checked above must remain present")
+            } else {
+                cache.misses = cache.misses.saturating_add(1);
+                cache.clock = cache.clock.wrapping_add(1);
+                let last_used = cache.clock;
+                let slot = Arc::new(OutlineFontSlot {
+                    value: OnceLock::new(),
+                    accounted: AtomicBool::new(false),
+                });
+                cache.entries.insert(
+                    cache_key,
+                    OutlineFontEntry {
+                        slot: slot.clone(),
+                        estimated_bytes: 0,
+                        last_used,
+                    },
+                );
+                cache.recency.push_back((cache_key, last_used));
+                cache.evict_to_limits();
+                slot
+            }
+        };
+
+        let font = slot.value.get_or_init(build).clone();
+        if !slot.accounted.swap(true, Ordering::AcqRel) {
+            let estimated_bytes = font
+                .as_ref()
+                .map(OutlineFont::estimated_cache_bytes)
+                .unwrap_or(64);
+            let mut cache = self
+                .outline_fonts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let is_current = cache
+                .entries
+                .get(&cache_key)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.slot, &slot));
+            if is_current {
+                if let Some(entry) = cache.entries.get_mut(&cache_key) {
+                    entry.estimated_bytes = estimated_bytes;
+                }
+                cache.estimated_bytes = cache.estimated_bytes.saturating_add(estimated_bytes);
+                cache.evict_to_limits();
+            }
+        }
+        font
+    }
+}
+
+/// A page-local cache used by the interpreter.
+///
+/// Construct this from a document-owned [`SharedInterpreterCache`] to reuse parsed
+/// outline fonts and decoded objects across pages. Borrowing Type 3 fonts remain
+/// local to this cache.
 #[derive(Clone)]
 pub struct InterpreterCache<'a> {
-    pub(crate) font_cache: Rc<RefCell<FxHashMap<u128, Option<Font<'a>>>>>,
+    pub(crate) type3_font_cache: Rc<RefCell<FxHashMap<u128, Option<Font<'a>>>>>,
+    shared: SharedInterpreterCache,
     pub(crate) object_cache: Cache,
 }
 
@@ -39,10 +295,36 @@ impl<'a> Default for InterpreterCache<'a> {
 impl<'a> InterpreterCache<'a> {
     /// Create a new interpreter cache.
     pub fn new() -> Self {
+        Self::from_shared(&SharedInterpreterCache::default())
+    }
+
+    /// Create a page-local interpreter cache backed by a document cache.
+    pub fn from_shared(shared: &SharedInterpreterCache) -> Self {
         Self {
-            font_cache: Rc::new(RefCell::new(FxHashMap::default())),
-            object_cache: Cache::new(),
+            type3_font_cache: Rc::new(RefCell::new(FxHashMap::default())),
+            shared: shared.clone(),
+            object_cache: shared.object_cache.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod shared_cache_tests {
+    use super::{InterpreterCacheLimits, SharedInterpreterCache};
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn shared_cache_is_send_sync_and_reports_its_limits() {
+        assert_send_sync::<SharedInterpreterCache>();
+        let limits = InterpreterCacheLimits {
+            max_outline_fonts: 7,
+            max_outline_font_bytes: 8_192,
+            max_objects: 11,
+        };
+        let cache = SharedInterpreterCache::new(limits);
+        assert_eq!(cache.limits(), limits);
+        assert_eq!(cache.stats(), Default::default());
     }
 }
 
@@ -354,18 +636,26 @@ impl<'a> Context<'a> {
     pub(crate) fn resolve_font(&mut self, font_dict: &Dict<'a>) -> Option<TextStateFont<'a>> {
         let cache_key = font_dict.cache_key();
 
-        let resolved = {
-            let mut font_cache = self.interpreter_cache.font_cache.borrow_mut();
+        let is_type3 = font_dict
+            .get::<Name<'_>>(SUBTYPE)
+            .is_some_and(|subtype| subtype.as_ref() == TYPE3);
+        let resolved = if is_type3 {
+            let mut font_cache = self.interpreter_cache.type3_font_cache.borrow_mut();
             font_cache
                 .entry(cache_key)
-                .or_insert_with(|| {
-                    Font::new(
+                .or_insert_with(|| Font::new_type3(font_dict, &self.settings.cmap_resolver))
+                .clone()
+        } else {
+            self.interpreter_cache
+                .shared
+                .outline_font(cache_key, || {
+                    Font::new_outline(
                         font_dict,
                         &self.settings.font_resolver,
                         &self.settings.cmap_resolver,
                     )
                 })
-                .clone()
+                .map(|font| Font::from_outline(cache_key, font))
         };
 
         if let Some(resolved) = resolved {

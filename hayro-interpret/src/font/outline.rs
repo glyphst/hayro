@@ -6,7 +6,7 @@ use hayro_cmap::BfString;
 use kurbo::BezPath;
 use skrifa::GlyphId;
 use skrifa::outline::OutlinePen;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Font data and metadata for downstream use.
 #[derive(Clone)]
@@ -76,9 +76,9 @@ impl OutlinePen for OutlinePath {
 
 #[derive(Debug, Clone)]
 pub(crate) enum OutlineFont {
-    Type1(Rc<Type1Font>),
-    TrueType(Rc<TrueTypeFont>),
-    Type0(Rc<Type0Font>),
+    Type1(Arc<Type1Font>),
+    TrueType(Arc<TrueTypeFont>),
+    Type0(Arc<Type0Font>),
 }
 
 impl CacheKey for OutlineFont {
@@ -226,5 +226,13 @@ impl OutlineFont {
                 is_monospace: t.is_monospace(),
             }),
         }
+    }
+
+    pub(crate) fn estimated_cache_bytes(&self) -> u64 {
+        const FONT_OVERHEAD_BYTES: u64 = 64 * 1024;
+        self.font_data()
+            .map(|data| data.data.as_ref().as_ref().len() as u64)
+            .unwrap_or_default()
+            .saturating_add(FONT_OVERHEAD_BYTES)
     }
 }

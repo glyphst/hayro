@@ -20,9 +20,8 @@ use skrifa::attribute::Style;
 use skrifa::raw::TableProvider;
 use skrifa::raw::tables::cmap::PlatformId;
 use skrifa::{GlyphId, MetadataProvider};
-use std::cell::RefCell;
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub(crate) const MAX_EMBEDDED_UNICODE_CMAP_MAPPINGS: usize = 262_144;
 
@@ -221,7 +220,7 @@ struct EmbeddedKind {
     // CFF font.
     cff_blob: Option<CffFontBlob>,
     differences: FxHashMap<u8, String>,
-    cached_mappings: RefCell<FxHashMap<u8, GlyphId>>,
+    cached_mappings: Mutex<FxHashMap<u8, GlyphId>>,
     /// PostScript name from the PDF.
     postscript_name: Option<String>,
 }
@@ -284,7 +283,7 @@ impl EmbeddedKind {
             embedded_unicodes,
             font_flags,
             encoding,
-            cached_mappings: RefCell::new(FxHashMap::default()),
+            cached_mappings: Mutex::new(FxHashMap::default()),
             postscript_name,
         })
     }
@@ -334,7 +333,12 @@ impl EmbeddedKind {
     }
 
     fn map_code(&self, code: u8) -> GlyphId {
-        if let Some(glyph) = self.cached_mappings.borrow().get(&code) {
+        if let Some(glyph) = self
+            .cached_mappings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&code)
+        {
             return *glyph;
         }
 
@@ -417,7 +421,10 @@ impl EmbeddedKind {
         }
 
         let glyph = glyph.unwrap_or(GlyphId::NOTDEF);
-        self.cached_mappings.borrow_mut().insert(code, glyph);
+        self.cached_mappings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(code, glyph);
 
         glyph
     }

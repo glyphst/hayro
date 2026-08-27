@@ -15,7 +15,7 @@ use kurbo::BezPath;
 use rustc_hash::FxHashMap;
 use skrifa::GlyphId;
 use skrifa::raw::TableProvider;
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 /// The 14 standard fonts of PDF.
 #[derive(Copy, Clone, Debug)]
@@ -364,8 +364,8 @@ pub(crate) struct StandardKind {
     widths: Vec<Width>,
     missing_width: f32,
     fallback: bool,
-    code_to_glyph: RefCell<FxHashMap<u8, GlyphId>>,
-    glyph_to_code: RefCell<FxHashMap<GlyphId, u8>>,
+    code_to_glyph: Mutex<FxHashMap<u8, GlyphId>>,
+    glyph_to_code: Mutex<FxHashMap<GlyphId, u8>>,
     encodings: FxHashMap<u8, String>,
 }
 
@@ -401,8 +401,8 @@ impl StandardKind {
             widths,
             missing_width,
             encodings: encoding_map,
-            code_to_glyph: RefCell::new(FxHashMap::default()),
-            glyph_to_code: RefCell::new(FxHashMap::default()),
+            code_to_glyph: Mutex::new(FxHashMap::default()),
+            glyph_to_code: Mutex::new(FxHashMap::default()),
             fallback,
             encoding,
         })
@@ -421,7 +421,10 @@ impl StandardKind {
     }
 
     pub(crate) fn map_code(&self, code: u8) -> GlyphId {
-        let mut code_to_glyph = self.code_to_glyph.borrow_mut();
+        let mut code_to_glyph = self
+            .code_to_glyph
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
 
         if let Some(glyph) = code_to_glyph.get(&code).copied() {
             return glyph;
@@ -440,7 +443,10 @@ impl StandardKind {
             })
             .unwrap_or(GlyphId::NOTDEF);
         code_to_glyph.insert(code, result);
-        self.glyph_to_code.borrow_mut().insert(result, code);
+        self.glyph_to_code
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(result, code);
 
         result
     }
@@ -451,7 +457,12 @@ impl StandardKind {
         // If the font is not embedded, we might need to stretch it so that
         // it matches the metrics of the actual underlying font blob.
 
-        if let Some(code) = self.glyph_to_code.borrow().get(&glyph).copied()
+        if let Some(code) = self
+            .glyph_to_code
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&glyph)
+            .copied()
             && let Some(actual_width) = self.base_font_blob.advance_width(glyph).or_else(|| {
                 self.code_to_ps_name(code)
                     .and_then(|name| self.base_font.get_width(name))

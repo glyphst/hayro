@@ -496,36 +496,53 @@ impl CacheKey for Type3Glyph<'_> {
 pub(crate) struct Font<'a>(u128, FontType<'a>);
 
 impl<'a> Font<'a> {
-    pub(crate) fn new(
-        dict: &Dict<'a>,
+    pub(crate) fn new_outline(
+        dict: &Dict<'_>,
         font_resolver: &FontResolverFn,
         cmap_resolver: &CMapResolverFn,
-    ) -> Option<Self> {
-        let f_type = match dict.get::<Name<'_>>(SUBTYPE)?.deref() {
-            TYPE1 | MM_TYPE1 => {
-                FontType::Type1(Rc::new(Type1Font::new(dict, font_resolver, cmap_resolver)?))
-            }
-            // PDFBOX-5463: PDF viewers seem to accept OpenType as well.
-            TRUE_TYPE | OPEN_TYPE => FontType::TrueType(Rc::new(TrueTypeFont::new(
+    ) -> Option<OutlineFont> {
+        match dict.get::<Name<'_>>(SUBTYPE)?.deref() {
+            TYPE1 | MM_TYPE1 => Some(OutlineFont::Type1(Arc::new(Type1Font::new(
                 dict,
                 font_resolver,
                 cmap_resolver,
-            )?)),
-            TYPE0 => FontType::Type0(Rc::new(Type0Font::new(dict, font_resolver, cmap_resolver)?)),
-            TYPE3 => FontType::Type3(Rc::new(Type3::new(dict, cmap_resolver)?)),
-            f => {
+            )?))),
+            // PDFBOX-5463: PDF viewers seem to accept OpenType as well.
+            TRUE_TYPE | OPEN_TYPE => Some(OutlineFont::TrueType(Arc::new(TrueTypeFont::new(
+                dict,
+                font_resolver,
+                cmap_resolver,
+            )?))),
+            TYPE0 => Some(OutlineFont::Type0(Arc::new(Type0Font::new(
+                dict,
+                font_resolver,
+                cmap_resolver,
+            )?))),
+            TYPE3 => None,
+            font_type => {
                 warn!(
                     "unimplemented font type {:?}",
-                    std::str::from_utf8(f).unwrap_or("unknown type")
+                    std::str::from_utf8(font_type).unwrap_or("unknown type")
                 );
-
-                return None;
+                None
             }
+        }
+    }
+
+    pub(crate) fn from_outline(cache_key: u128, font: OutlineFont) -> Self {
+        let font_type = match font {
+            OutlineFont::Type1(font) => FontType::Type1(font),
+            OutlineFont::TrueType(font) => FontType::TrueType(font),
+            OutlineFont::Type0(font) => FontType::Type0(font),
         };
+        Self(cache_key, font_type)
+    }
 
-        let cache_key = dict.cache_key();
-
-        Some(Self(cache_key, f_type))
+    pub(crate) fn new_type3(dict: &Dict<'a>, cmap_resolver: &CMapResolverFn) -> Option<Self> {
+        Some(Self(
+            dict.cache_key(),
+            FontType::Type3(Rc::new(Type3::new(dict, cmap_resolver)?)),
+        ))
     }
 
     pub(crate) fn new_standard(
@@ -534,7 +551,7 @@ impl<'a> Font<'a> {
     ) -> Option<Self> {
         let font = Type1Font::new_standard(standard_font, font_resolver)?;
 
-        Some(Self(0, FontType::Type1(Rc::new(font))))
+        Some(Self(0, FontType::Type1(Arc::new(font))))
     }
 
     pub(crate) fn map_code(&self, code: u32) -> GlyphId {
@@ -666,9 +683,9 @@ impl CacheKey for Font<'_> {
 
 #[derive(Clone, Debug)]
 enum FontType<'a> {
-    Type1(Rc<Type1Font>),
-    TrueType(Rc<TrueTypeFont>),
-    Type0(Rc<Type0Font>),
+    Type1(Arc<Type1Font>),
+    TrueType(Arc<TrueTypeFont>),
+    Type0(Arc<Type0Font>),
     Type3(Rc<Type3<'a>>),
 }
 

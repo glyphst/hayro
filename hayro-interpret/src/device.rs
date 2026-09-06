@@ -206,6 +206,20 @@ pub trait Device<'a> {
     /// to page coordinates by `transform`. Existing devices retain their
     /// previous behaviour through the default no-op.
     fn draw_text_markup(&mut self, _markup: &TextMarkup, _transform: Affine) {}
+    /// Draw a bounded Square, Circle or Ink default appearance at its exact
+    /// annotation-array position. Coordinates are mapped by `transform`.
+    /// Existing devices keep their previous behavior through this default.
+    fn draw_geometric_annotation(
+        &mut self,
+        _appearance: &crate::GeometricAnnotation,
+        _transform: Affine,
+    ) {
+    }
+    /// Optional host remainder before allocating annotation geometry. This
+    /// intersects the page synthesis budget with already retained content.
+    fn remaining_annotation_geometry_budget(&self) -> Option<crate::AnnotationGeometryBudget> {
+        None
+    }
     /// Pop the last clip path or clip rectangle from the clip stack.
     fn pop_clip(&mut self);
     /// Pop the last transparency group from the blend stack.

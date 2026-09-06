@@ -3,6 +3,14 @@ under the Apache 2.0 license.
  - The encoding maps for some of the standard fonts.
  - The evaluator for type 0 functions.
  - The list of common dictionary keys.
+ - The bounded rectangle/ellipse cloudy-border geometry in
+   `hayro-interpret/src/annotation/geometric/cloudy.rs`, adapted from
+   PDFBox 3.0.8 `CloudyBorder.java`.
+
+Apache PDFBox — Copyright 2014 The Apache Software Foundation.
+This product includes software developed at The Apache Software Foundation
+(http://www.apache.org/). Based on source code originally developed in the
+PDFBox and FontBox projects, Copyright (c) 2002-2007, www.pdfbox.org.
 
 The following parts of code have been adapted/translated from [pdf.js](https://github.com/mozilla/pdf.js), available
 under the Apache 2.0 license:

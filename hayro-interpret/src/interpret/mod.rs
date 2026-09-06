@@ -1,7 +1,7 @@
 use crate::FillRule;
 use crate::annotation::{
-    annotation_is_visible_on_screen, resolve_annotation_appearance, resolve_link_border_with_limit,
-    resolve_text_markup,
+    annotation_is_visible_on_screen, resolve_annotation_appearance, resolve_geometric_annotation,
+    resolve_link_border_with_limit, resolve_text_markup,
 };
 use crate::color::ColorSpace;
 use crate::context::Context;
@@ -353,6 +353,8 @@ pub struct InterpreterSettings {
     pub max_link_quads_per_annotation: usize,
     /// Maximum aggregate text-markup quadrilaterals resolved for one page.
     pub max_text_markup_quads_per_page: usize,
+    /// Aggregate geometry budget for synthesized Square, Circle and Ink appearances.
+    pub annotation_geometry_budget: crate::AnnotationGeometryBudget,
 }
 
 impl Default for InterpreterSettings {
@@ -377,6 +379,7 @@ impl Default for InterpreterSettings {
             max_marked_content_property_depth: 64,
             max_link_quads_per_annotation: 65_536,
             max_text_markup_quads_per_page: 65_536,
+            annotation_geometry_budget: crate::AnnotationGeometryBudget::default(),
         }
     }
 }
@@ -400,6 +403,8 @@ pub enum InterpreterWarning {
     LinkBorderFailure(crate::LinkBorderError),
     /// A synthesized text-markup appearance could not be resolved exactly.
     TextMarkupFailure(crate::TextMarkupError),
+    /// A synthesized geometric annotation could not be resolved exactly.
+    GeometricAnnotationFailure(crate::GeometricAnnotationError),
     /// An `EMC` operator had no matching `BMC` or `BDC` in this content scope
     /// and was ignored.
     UnmatchedMarkedContentEnd,
@@ -430,7 +435,16 @@ pub fn interpret_page<'a>(
         && let Some(annot_arr) = page.raw().get::<Array<'_>>(ANNOTS)
     {
         let mut remaining_markup_quads = context.settings.max_text_markup_quads_per_page;
+        let mut geometry_budget = context.settings.annotation_geometry_budget;
         for annot in annot_arr.iter::<Dict<'_>>() {
+            if device.is_cancelled() {
+                break;
+            }
+            if let Some(remaining) = device.remaining_annotation_geometry_budget() {
+                geometry_budget.verbs = geometry_budget.verbs.min(remaining.verbs);
+                geometry_budget.draws = geometry_budget.draws.min(remaining.draws);
+                geometry_budget.bytes = geometry_budget.bytes.min(remaining.bytes);
+            }
             // Print is intentionally irrelevant for this screen device.
             if !annotation_is_visible_on_screen(&annot) {
                 continue;
@@ -463,7 +477,18 @@ pub fn interpret_page<'a>(
                             remaining_markup_quads -= markup.quads.len();
                             device.draw_text_markup(&markup, context.root_transform());
                         }
-                        Ok(None) => {}
+                        Ok(None) => match resolve_geometric_annotation(
+                            &annot,
+                            &mut geometry_budget,
+                            &|| device.is_cancelled(),
+                        ) {
+                            Ok(Some(appearance)) => device
+                                .draw_geometric_annotation(&appearance, context.root_transform()),
+                            Ok(None) => {}
+                            Err(error) => (context.settings.warning_sink)(
+                                InterpreterWarning::GeometricAnnotationFailure(error),
+                            ),
+                        },
                         Err(error) => (context.settings.warning_sink)(
                             InterpreterWarning::TextMarkupFailure(error),
                         ),

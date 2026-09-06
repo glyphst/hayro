@@ -51,11 +51,12 @@ pub mod shading;
 pub mod util;
 
 pub use annotation::{
-    AnnotationAppearanceError, LinkBorder, LinkBorderColor, LinkBorderError, LinkBorderGeometry,
+    AnnotationAppearanceError, AnnotationGeometryBudget, GeometricAnnotation,
+    GeometricAnnotationError, LinkBorder, LinkBorderColor, LinkBorderError, LinkBorderGeometry,
     LinkBorderStyle, LinkQuadPointsError, LinkQuadrilateral, TextMarkup, TextMarkupError,
-    TextMarkupKind, annotation_is_visible_on_screen, resolve_link_border,
-    resolve_link_border_with_limit, resolve_link_quad_points, resolve_text_markup,
-    select_annotation_normal_appearance,
+    TextMarkupKind, annotation_is_visible_on_screen, resolve_geometric_annotation,
+    resolve_link_border, resolve_link_border_with_limit, resolve_link_quad_points,
+    resolve_text_markup, select_annotation_normal_appearance,
 };
 pub use cache::CacheKey;
 pub use context::*;

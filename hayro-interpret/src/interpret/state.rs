@@ -438,9 +438,9 @@ pub(crate) fn handle_gs_single<'a>(
     Some(())
 }
 
-fn convert_blend_mode(name: &str) -> Option<BlendMode> {
+pub(crate) fn convert_blend_mode(name: &str) -> Option<BlendMode> {
     let bm = match name {
-        "Normal" => BlendMode::Normal,
+        "Normal" | "Compatible" => BlendMode::Normal,
         "Multiply" => BlendMode::Multiply,
         "Screen" => BlendMode::Screen,
         "Overlay" => BlendMode::Overlay,

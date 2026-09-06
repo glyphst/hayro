@@ -1,3 +1,9 @@
+mod geometric;
+pub use geometric::{
+    AnnotationGeometryBudget, GeometricAnnotation, GeometricAnnotationError,
+    resolve_geometric_annotation,
+};
+
 use crate::RectExt;
 use crate::color::{Color, ColorSpace};
 use crate::x_object::FormXObject;
@@ -410,52 +416,7 @@ pub fn resolve_link_border_with_limit(
     let color = annotation_color(annotation)?;
 
     let (geometry, width, style) = if annotation.contains_key(BS) {
-        let style_dict = annotation
-            .get::<Dict<'_>>(BS)
-            .ok_or(LinkBorderError::InvalidStyleDictionary)?;
-        if style_dict.contains_key(TYPE)
-            && style_dict
-                .get::<Name<'_>>(TYPE)
-                .as_ref()
-                .is_none_or(|kind| kind.as_ref() != b"Border")
-        {
-            return Err(LinkBorderError::InvalidStyleType);
-        }
-        let width =
-            optional_nonnegative_f32(&style_dict, W, 1.0).ok_or(LinkBorderError::InvalidWidth)?;
-        if style_dict.contains_key(D) && style_dict.get::<Array<'_>>(D).is_none() {
-            return Err(LinkBorderError::InvalidDashArray);
-        }
-        let style = match style_dict.get::<Name<'_>>(S) {
-            Some(style) if style.as_ref() == b"S" => {
-                validate_unused_dash(&style_dict)?;
-                LinkBorderStyle::Solid
-            }
-            Some(style) if style.as_ref() == b"D" => LinkBorderStyle::Dashed {
-                dash_array: match style_dict.get::<Array<'_>>(D) {
-                    Some(dash) => dash_array(&dash)?,
-                    None => vec![3.0],
-                },
-            },
-            Some(style) if style.as_ref() == b"B" => {
-                validate_unused_dash(&style_dict)?;
-                LinkBorderStyle::Beveled
-            }
-            Some(style) if style.as_ref() == b"I" => {
-                validate_unused_dash(&style_dict)?;
-                LinkBorderStyle::Inset
-            }
-            Some(style) if style.as_ref() == b"U" => {
-                validate_unused_dash(&style_dict)?;
-                LinkBorderStyle::Underline
-            }
-            Some(_) => return Err(LinkBorderError::InvalidStyle),
-            None if style_dict.contains_key(S) => return Err(LinkBorderError::InvalidStyle),
-            None => {
-                validate_unused_dash(&style_dict)?;
-                LinkBorderStyle::Solid
-            }
-        };
+        let (width, style) = border_style(annotation, MAX_LINK_BORDER_DASH_ITEMS)?;
         let geometry = match resolve_link_quad_points(annotation, max_quads)
             .map_err(LinkBorderError::InvalidQuadPoints)?
         {
@@ -464,7 +425,7 @@ pub fn resolve_link_border_with_limit(
         };
         (geometry, width, style)
     } else {
-        let border = legacy_border(annotation)?;
+        let border = legacy_border(annotation, MAX_LINK_BORDER_DASH_ITEMS)?;
         let style = match border.dash_array {
             Some(dash_array) => LinkBorderStyle::Dashed { dash_array },
             None => LinkBorderStyle::Solid,
@@ -641,7 +602,10 @@ struct LegacyBorder {
     dash_array: Option<Vec<f32>>,
 }
 
-fn legacy_border(annotation: &Dict<'_>) -> Result<LegacyBorder, LinkBorderError> {
+fn legacy_border(
+    annotation: &Dict<'_>,
+    max_dash_items: usize,
+) -> Result<LegacyBorder, LinkBorderError> {
     if !annotation.contains_key(BORDER) {
         return Ok(LegacyBorder {
             horizontal_radius: 0.0,
@@ -674,7 +638,7 @@ fn legacy_border(annotation: &Dict<'_>) -> Result<LegacyBorder, LinkBorderError>
         let dash = values
             .next::<Array<'_>>()
             .ok_or(LinkBorderError::InvalidDashArray)?;
-        Some(dash_array(&dash)?)
+        Some(dash_array(&dash, max_dash_items)?)
     } else {
         None
     };
@@ -686,25 +650,81 @@ fn legacy_border(annotation: &Dict<'_>) -> Result<LegacyBorder, LinkBorderError>
     })
 }
 
-fn validate_unused_dash(style: &Dict<'_>) -> Result<(), LinkBorderError> {
+fn border_style(
+    annotation: &Dict<'_>,
+    max_dash_items: usize,
+) -> Result<(f32, LinkBorderStyle), LinkBorderError> {
+    let style_dict = annotation
+        .get::<Dict<'_>>(BS)
+        .ok_or(LinkBorderError::InvalidStyleDictionary)?;
+    if style_dict.contains_key(TYPE)
+        && style_dict
+            .get::<Name<'_>>(TYPE)
+            .as_ref()
+            .is_none_or(|kind| kind.as_ref() != b"Border")
+    {
+        return Err(LinkBorderError::InvalidStyleType);
+    }
+    let width =
+        optional_nonnegative_f32(&style_dict, W, 1.0).ok_or(LinkBorderError::InvalidWidth)?;
+    if style_dict.contains_key(D) && style_dict.get::<Array<'_>>(D).is_none() {
+        return Err(LinkBorderError::InvalidDashArray);
+    }
+    let style = match style_dict.get::<Name<'_>>(S) {
+        Some(style) if style.as_ref() == b"S" => {
+            validate_unused_dash(&style_dict, max_dash_items)?;
+            LinkBorderStyle::Solid
+        }
+        Some(style) if style.as_ref() == b"D" => LinkBorderStyle::Dashed {
+            dash_array: match style_dict.get::<Array<'_>>(D) {
+                Some(dash) => dash_array(&dash, max_dash_items)?,
+                None => vec![3.0],
+            },
+        },
+        Some(style) if style.as_ref() == b"B" => {
+            validate_unused_dash(&style_dict, max_dash_items)?;
+            LinkBorderStyle::Beveled
+        }
+        Some(style) if style.as_ref() == b"I" => {
+            validate_unused_dash(&style_dict, max_dash_items)?;
+            LinkBorderStyle::Inset
+        }
+        Some(style) if style.as_ref() == b"U" => {
+            validate_unused_dash(&style_dict, max_dash_items)?;
+            LinkBorderStyle::Underline
+        }
+        Some(_) => return Err(LinkBorderError::InvalidStyle),
+        None if style_dict.contains_key(S) => return Err(LinkBorderError::InvalidStyle),
+        None => {
+            validate_unused_dash(&style_dict, max_dash_items)?;
+            LinkBorderStyle::Solid
+        }
+    };
+    Ok((width, style))
+}
+
+fn validate_unused_dash(style: &Dict<'_>, max_dash_items: usize) -> Result<(), LinkBorderError> {
     if let Some(dash) = style.get::<Array<'_>>(D) {
-        dash_array(&dash)?;
+        dash_array(&dash, max_dash_items)?;
     }
     Ok(())
 }
 
-fn dash_array(array: &Array<'_>) -> Result<Vec<f32>, LinkBorderError> {
-    let count = array.raw_iter().count();
-    if count > MAX_LINK_BORDER_DASH_ITEMS {
-        return Err(LinkBorderError::DashArrayLimit);
-    }
-    let numbers = array.iter::<Number>().collect::<Vec<_>>();
-    if numbers.len() != count {
+fn dash_array(array: &Array<'_>, max_items: usize) -> Result<Vec<f32>, LinkBorderError> {
+    let count = array.raw_iter().take(max_items.saturating_add(1)).count();
+    if count > max_items {
         return Err(LinkBorderError::InvalidDashArray);
     }
-    let mut values = Vec::with_capacity(numbers.len());
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| LinkBorderError::InvalidDashArray)?;
+    let mut numbers = array.flex_iter();
     let mut any_positive = false;
-    for number in numbers {
+    for _ in 0..count {
+        let number = numbers
+            .next::<Number>()
+            .ok_or(LinkBorderError::InvalidDashArray)?;
         let value =
             finite_nonnegative_f32(number.as_f64()).ok_or(LinkBorderError::InvalidDashArray)?;
         any_positive |= value > 0.0;
@@ -717,13 +737,21 @@ fn dash_array(array: &Array<'_>) -> Result<Vec<f32>, LinkBorderError> {
 }
 
 fn annotation_color(annotation: &Dict<'_>) -> Result<LinkBorderColor, LinkBorderError> {
-    if !annotation.contains_key(C) {
-        return Ok(LinkBorderColor::Gray([0.0]));
+    direct_annotation_color(annotation, C, LinkBorderColor::Gray([0.0]))
+}
+
+fn direct_annotation_color(
+    annotation: &Dict<'_>,
+    key: &[u8],
+    default: LinkBorderColor,
+) -> Result<LinkBorderColor, LinkBorderError> {
+    if !annotation.contains_key(key) {
+        return Ok(default);
     }
     let color = annotation
-        .get::<Array<'_>>(C)
+        .get::<Array<'_>>(key)
         .ok_or(LinkBorderError::InvalidColor)?;
-    let count = color.raw_iter().count();
+    let count = color.raw_iter().take(5).count();
     if !matches!(count, 0 | 1 | 3 | 4) {
         return Err(LinkBorderError::InvalidColor);
     }

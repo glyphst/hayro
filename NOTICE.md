@@ -3,9 +3,12 @@ under the Apache 2.0 license.
  - The encoding maps for some of the standard fonts.
  - The evaluator for type 0 functions.
  - The list of common dictionary keys.
- - The bounded rectangle/ellipse cloudy-border geometry in
+ - The bounded rectangle/ellipse/polygon cloudy-border geometry in
    `hayro-interpret/src/annotation/geometric/cloudy.rs`, adapted from
    PDFBox 3.0.8 `CloudyBorder.java`.
+ - Geometric annotation endpoint proportions based on PDFBox 3.0.8
+   `PDAbstractAppearanceHandler.java`; endpoint anchoring and circular arcs
+   follow the Glyphst viewer policy.
 
 Apache PDFBox — Copyright 2014 The Apache Software Foundation.
 This product includes software developed at The Apache Software Foundation

@@ -10,11 +10,11 @@
 // limitations under the License.
 //
 // Adapted from Apache PDFBox 3.0.8 CloudyBorder.java. This Rust version emits
-// bounded Kurbo paths, handles only rectangles/ellipses, and rejects geometry
+// bounded Kurbo paths, handles rectangles, ellipses and simple polygon contours, and rejects geometry
 // that cannot meet its subdivision tolerance or the host's resource budget.
 
 use super::{Error, PathBuilder, ellipse};
-use kurbo::{CubicBez, ParamCurve, PathEl, Point, Rect};
+use kurbo::{BezPath, CubicBez, ParamCurve, PathEl, Point, Rect};
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 const A34: f64 = 34.0 * PI / 180.0;
@@ -38,6 +38,114 @@ pub(super) fn draw(
         out.push(PathEl::ClosePath)?;
     }
     Ok(())
+}
+
+/// The existing curl generator consumes a closed, positively oriented contour.
+/// Curves are subdivided before cloud construction, never replaced by chords.
+pub(super) fn polygon(
+    out: &mut PathBuilder<'_>,
+    source: &BezPath,
+    intensity: f64,
+    width: f64,
+) -> Result<(), Error> {
+    let mut points = Vec::new();
+    let mut previous = Point::ZERO;
+    for element in source.elements() {
+        out.checkpoint()?;
+        match *element {
+            PathEl::MoveTo(p) | PathEl::LineTo(p) => {
+                out.budget.reserve(&mut points, 1)?;
+                points.push(p);
+                previous = p;
+            }
+            PathEl::CurveTo(a, b, p) => {
+                flatten(out, CubicBez::new(previous, a, b, p), 0, &mut points)?;
+                previous = p;
+            }
+            _ => return Err(Error::InvalidGeometry),
+        }
+    }
+    let first = *points.first().ok_or(Error::InvalidGeometry)?;
+    if points.last() != Some(&first) {
+        out.budget.reserve(&mut points, 1)?;
+        points.push(first);
+    }
+    // Match the existing cloud policy's half-point adjacent-point filter,
+    // preserving the closing point even when the final segment is tiny.
+    let len = points.len();
+    let mut kept = 1;
+    previous = first;
+    for i in 1..len {
+        out.checkpoint()?;
+        let point = points[i];
+        if i + 1 == len
+            || (point.x - previous.x).abs() >= 0.5
+            || (point.y - previous.y).abs() >= 0.5
+        {
+            points[kept] = point;
+            kept += 1;
+        }
+        previous = point;
+    }
+    points.truncate(kept);
+    let area = simple_contour(out, &points)?;
+    if area < 0.0 {
+        points.reverse();
+    }
+    draw_polygon(out, &points, (4.0 * intensity + 0.5 * width).max(0.5))?;
+    out.push(PathEl::ClosePath)
+}
+
+fn simple_contour(out: &mut PathBuilder<'_>, points: &[Point]) -> Result<f64, Error> {
+    if points.len() < 4 {
+        return Err(Error::InvalidGeometry);
+    }
+    let edges = points.len() - 1;
+    let mut area = 0.0;
+    for i in 0..edges {
+        out.checkpoint()?;
+        let (a, b, c) = (points[(i + edges - 1) % edges], points[i], points[i + 1]);
+        if a == b || b == c || ((a - b).cross(c - b) == 0.0 && (a - b).dot(c - b) > 0.0) {
+            return Err(Error::InvalidGeometry);
+        }
+        area += b.x * c.y - b.y * c.x;
+    }
+    if !area.is_finite() || area == 0.0 {
+        return Err(Error::InvalidGeometry);
+    }
+    out.budget.intersections = out.budget.intersections.min(1_000_000);
+    // ponytail: bounded quadratic scan; add a spatial index if large cloudy
+    // annotations regularly reach the one-million-comparison page ceiling.
+    for i in 0..edges {
+        for j in i + 2..edges {
+            if i == 0 && j + 1 == edges {
+                continue;
+            }
+            out.checkpoint()?;
+            out.budget.intersections = out
+                .budget
+                .intersections
+                .checked_sub(1)
+                .ok_or(Error::WorkLimit)?;
+            if intersects(points[i], points[i + 1], points[j], points[j + 1]) {
+                return Err(Error::InvalidGeometry);
+            }
+        }
+    }
+    Ok(area)
+}
+
+fn intersects(a: Point, b: Point, c: Point, d: Point) -> bool {
+    if a.x.max(b.x) < c.x.min(d.x)
+        || c.x.max(d.x) < a.x.min(b.x)
+        || a.y.max(b.y) < c.y.min(d.y)
+        || c.y.max(d.y) < a.y.min(b.y)
+    {
+        return false;
+    }
+    let opposite = |u: f64, v: f64| u == 0.0 || v == 0.0 || (u > 0.0) != (v > 0.0);
+    opposite((b - a).cross(c - a), (b - a).cross(d - a))
+        && opposite((d - c).cross(a - c), (d - c).cross(b - c))
 }
 
 fn count(out: &PathBuilder<'_>, value: f64) -> Result<usize, Error> {
@@ -80,6 +188,10 @@ fn rectangle(out: &mut PathBuilder<'_>, rect: Rect, radius: f64) -> Result<(), E
     if polygon.len() < 2 {
         return Ok(());
     }
+    draw_polygon(out, polygon, radius)
+}
+
+fn draw_polygon(out: &mut PathBuilder<'_>, polygon: &[Point], radius: f64) -> Result<(), Error> {
     let k = A34.cos();
     let advance = 2.0 * k * radius;
     let previous = polygon[polygon.len() - 2];

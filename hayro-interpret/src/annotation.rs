@@ -1,7 +1,7 @@
 mod geometric;
 pub use geometric::{
     AnnotationGeometryBudget, GeometricAnnotation, GeometricAnnotationError,
-    resolve_geometric_annotation,
+    GeometricAnnotationPath, resolve_geometric_annotation,
 };
 
 use crate::RectExt;

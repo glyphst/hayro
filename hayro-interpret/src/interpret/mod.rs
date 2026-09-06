@@ -353,7 +353,7 @@ pub struct InterpreterSettings {
     pub max_link_quads_per_annotation: usize,
     /// Maximum aggregate text-markup quadrilaterals resolved for one page.
     pub max_text_markup_quads_per_page: usize,
-    /// Aggregate geometry budget for synthesized Square, Circle and Ink appearances.
+    /// Aggregate geometry budget for synthesized geometric annotation appearances.
     pub annotation_geometry_budget: crate::AnnotationGeometryBudget,
     /// Aggregate owned optional-content expression budget for annotations.
     pub annotation_optional_content_budget: crate::OptionalContentBudget,
@@ -450,6 +450,8 @@ pub fn interpret_page<'a>(
                 geometry_budget.verbs = geometry_budget.verbs.min(remaining.verbs);
                 geometry_budget.draws = geometry_budget.draws.min(remaining.draws);
                 geometry_budget.bytes = geometry_budget.bytes.min(remaining.bytes);
+                geometry_budget.intersections =
+                    geometry_budget.intersections.min(remaining.intersections);
             }
             // Print is intentionally irrelevant for this screen device.
             if !annotation_is_visible_on_screen(&annot) {

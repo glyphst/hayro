@@ -1,6 +1,7 @@
-//! Bounded default appearances for Square, Circle and Ink annotations.
+//! Bounded default appearances for geometric annotations.
 
 mod cloudy;
+mod polygon;
 
 use super::{
     LinkBorderColor, LinkBorderError, LinkBorderStyle, border_style, direct_annotation_color,
@@ -22,6 +23,8 @@ pub struct AnnotationGeometryBudget {
     pub draws: u64,
     /// Remaining temporary and retained geometry bytes.
     pub bytes: u64,
+    /// Remaining cloudy-contour intersection comparisons for the page.
+    pub intersections: u64,
 }
 
 impl Default for AnnotationGeometryBudget {
@@ -30,6 +33,7 @@ impl Default for AnnotationGeometryBudget {
             verbs: 65_536,
             draws: 65_536,
             bytes: 64 * 1024 * 1024,
+            intersections: 1_000_000,
         }
     }
 }
@@ -70,12 +74,21 @@ impl AnnotationGeometryBudget {
     }
 }
 
+/// An independently painted path in a geometric annotation.
+#[derive(Clone, Debug)]
+pub struct GeometricAnnotationPath {
+    /// Geometry in PDF source coordinates.
+    pub path: BezPath,
+    /// Whether the annotation's interior colour applies to this path.
+    pub fill: bool,
+}
+
 /// Validated default appearance in PDF source coordinates. Every Ink path
 /// remains a separate paint; filled shapes use a combined fill/stroke object.
 #[derive(Clone, Debug)]
 pub struct GeometricAnnotation {
     /// Source paths, independent of an inaccurate annotation rectangle.
-    pub paths: Vec<BezPath>,
+    pub paths: Vec<GeometricAnnotationPath>,
     /// Original direct stroke colour, or transparent.
     pub color: LinkBorderColor,
     /// Original direct interior colour, or transparent (always so for Ink).
@@ -128,6 +141,12 @@ pub enum GeometricAnnotationError {
     InvalidEffect,
     /// Missing or malformed InkList/Path, including unresolved array entries.
     InvalidInk,
+    /// Missing, malformed or non-finite Polygon/PolyLine vertices.
+    InvalidVertices,
+    /// Malformed PDF 2.0 path operands.
+    InvalidPath,
+    /// Malformed or unknown `PolyLine` endpoint styles.
+    InvalidLineEnding,
     /// Non-finite derived geometry or an unmet bounded subdivision tolerance.
     InvalidGeometry,
     /// Aggregate generated path operator budget exceeded.
@@ -136,6 +155,8 @@ pub enum GeometricAnnotationError {
     DrawLimit,
     /// Aggregate geometry byte budget exceeded.
     ByteLimit,
+    /// Aggregate cloudy-contour validation work exceeded its allowance.
+    WorkLimit,
     /// Fallible allocation failed.
     AllocationFailed,
     /// The host cancelled resolution.
@@ -144,7 +165,7 @@ pub enum GeometricAnnotationError {
 
 type Error = GeometricAnnotationError;
 
-/// Resolve an absent Square, Circle or Ink appearance. Explicit `/AP` always
+/// Resolve an absent geometric annotation appearance. Explicit `/AP` always
 /// takes precedence. Budgets are consumed across annotations, even if a later
 /// field is invalid; callers must not use a partially resolved page.
 pub fn resolve_geometric_annotation(
@@ -160,6 +181,8 @@ pub fn resolve_geometric_annotation(
         Some(b"Square") => 0,
         Some(b"Circle") => 1,
         Some(b"Ink") => 2,
+        Some(b"Polygon") => 3,
+        Some(b"PolyLine") => 4,
         _ => return Ok(None),
     };
     if cancelled() {
@@ -232,40 +255,18 @@ pub fn resolve_geometric_annotation(
             ..StrokeProps::default()
         },
     };
-    if kind == 2 {
+    if kind >= 3 {
+        polygon::resolve(annotation, kind == 3, &mut result, budget, cancelled)?;
+    } else if kind == 2 {
         if annotation.contains_key(b"Path") {
             let array = annotation
                 .get::<Array<'_>>(b"Path")
                 .ok_or(Error::InvalidInk)?;
-            let mut path = PathBuilder::new(budget, cancelled);
-            let mut values = array.flex_iter();
-            let mut first = true;
-            for _ in array.raw_iter() {
-                let operands = values.next::<Array<'_>>().ok_or(Error::InvalidInk)?;
-                let count = operands.raw_iter().take(7).count();
-                let element = match (first, count) {
-                    (true, 2) => {
-                        let [x, y] = coordinates(&operands)?;
-                        PathEl::MoveTo(Point::new(x, y))
-                    }
-                    (false, 2) => {
-                        let [x, y] = coordinates(&operands)?;
-                        PathEl::LineTo(Point::new(x, y))
-                    }
-                    (false, 6) => {
-                        let [a, b, c, d, e, f] = coordinates(&operands)?;
-                        PathEl::CurveTo(Point::new(a, b), Point::new(c, d), Point::new(e, f))
-                    }
-                    _ => return Err(Error::InvalidInk),
-                };
-                path.push(element)?;
-                first = false;
-            }
-            if first {
-                return Err(Error::InvalidInk);
-            }
-            let path = path.finish();
-            append_path(&mut result, path, budget)?;
+            let path = operator_path(&array, budget, cancelled).map_err(|error| match error {
+                Error::InvalidPath => Error::InvalidInk,
+                other => other,
+            })?;
+            append_path(&mut result, path, false, budget)?;
         } else {
             let array = annotation
                 .get::<Array<'_>>(b"InkList")
@@ -279,26 +280,8 @@ pub fn resolve_geometric_annotation(
                     return Err(Error::DrawLimit);
                 }
                 let operands = lists.next::<Array<'_>>().ok_or(Error::InvalidInk)?;
-                let mut numbers = operands.flex_iter();
-                let mut raw = operands.raw_iter();
-                let mut path = PathBuilder::new(budget, cancelled);
-                let mut first = true;
-                while raw.next().is_some() {
-                    if raw.next().is_none() {
-                        return Err(Error::InvalidInk);
-                    }
-                    let x = coordinate(numbers.next::<Number>().ok_or(Error::InvalidInk)?)?;
-                    let y = coordinate(numbers.next::<Number>().ok_or(Error::InvalidInk)?)?;
-                    let point = Point::new(x, y);
-                    path.push(if first {
-                        PathEl::MoveTo(point)
-                    } else {
-                        PathEl::LineTo(point)
-                    })?;
-                    first = false;
-                }
-                let path = path.finish();
-                append_path(&mut result, path, budget)?;
+                let path = vertex_path(&operands, budget, cancelled)?;
+                append_path(&mut result, path, false, budget)?;
             }
         }
     } else {
@@ -366,7 +349,7 @@ pub fn resolve_geometric_annotation(
             path.push(PathEl::ClosePath)?;
         }
         let path = path.finish();
-        append_path(&mut result, path, budget)?;
+        append_path(&mut result, path, true, budget)?;
     }
     Ok(Some(result))
 }
@@ -374,17 +357,82 @@ pub fn resolve_geometric_annotation(
 fn append_path(
     result: &mut GeometricAnnotation,
     path: BezPath,
+    fill: bool,
     budget: &mut AnnotationGeometryBudget,
 ) -> Result<(), Error> {
-    let paints =
-        u64::from(result.stroke_color().is_some()) + u64::from(result.fill_color().is_some());
+    let paints = u64::from(result.stroke_color().is_some())
+        + u64::from(fill && result.fill_color().is_some());
     budget.draws = budget
         .draws
         .checked_sub(paints.max(1))
         .ok_or(Error::DrawLimit)?;
     budget.reserve(&mut result.paths, 1)?;
-    result.paths.push(path);
+    result.paths.push(GeometricAnnotationPath { path, fill });
     Ok(())
+}
+
+// Both legacy InkList and Polygon/PolyLine vertices use the same strict pair
+// parser. Ink permits empty lists; the polygon resolver validates its contour.
+fn vertex_path(
+    array: &Array<'_>,
+    budget: &mut AnnotationGeometryBudget,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<BezPath, Error> {
+    let mut numbers = array.flex_iter();
+    let mut raw = array.raw_iter();
+    let mut path = PathBuilder::new(budget, cancelled);
+    let mut first = true;
+    while raw.next().is_some() {
+        if raw.next().is_none() {
+            return Err(Error::InvalidInk);
+        }
+        let x = coordinate(numbers.next::<Number>().ok_or(Error::InvalidInk)?)?;
+        let y = coordinate(numbers.next::<Number>().ok_or(Error::InvalidInk)?)?;
+        let point = Point::new(x, y);
+        path.push(if first {
+            PathEl::MoveTo(point)
+        } else {
+            PathEl::LineTo(point)
+        })?;
+        first = false;
+    }
+    Ok(path.finish())
+}
+
+fn operator_path(
+    array: &Array<'_>,
+    budget: &mut AnnotationGeometryBudget,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<BezPath, Error> {
+    let mut path = PathBuilder::new(budget, cancelled);
+    let mut values = array.flex_iter();
+    let mut first = true;
+    for _ in array.raw_iter() {
+        path.checkpoint()?;
+        let operands = values.next::<Array<'_>>().ok_or(Error::InvalidPath)?;
+        let count = operands.raw_iter().take(7).count();
+        let element = match (first, count) {
+            (true, 2) => {
+                let [x, y] = coordinates(&operands).map_err(|_| Error::InvalidPath)?;
+                PathEl::MoveTo(Point::new(x, y))
+            }
+            (false, 2) => {
+                let [x, y] = coordinates(&operands).map_err(|_| Error::InvalidPath)?;
+                PathEl::LineTo(Point::new(x, y))
+            }
+            (false, 6) => {
+                let [a, b, c, d, e, f] = coordinates(&operands).map_err(|_| Error::InvalidPath)?;
+                PathEl::CurveTo(Point::new(a, b), Point::new(c, d), Point::new(e, f))
+            }
+            _ => return Err(Error::InvalidPath),
+        };
+        path.push(element)?;
+        first = false;
+    }
+    if first {
+        return Err(Error::InvalidPath);
+    }
+    Ok(path.finish())
 }
 
 fn opacity(annotation: &Dict<'_>, key: &[u8], default: f32) -> Result<f32, Error> {
@@ -519,7 +567,7 @@ mod tests {
     fn geometry_style_and_precedence() {
         let shape = resolve("<</Subtype/Square/Rect[100 90 10 20]/RD[12 4 6 8]/BS<</W 4/D[3]>>/Border false/C[0 1 0 0]/IC[0.4]/CA 0.5/BM/Multiply>>").unwrap();
         assert_eq!(
-            shape.paths[0].bounding_box(),
+            shape.paths[0].path.bounding_box(),
             Rect::new(24.0, 30.0, 92.0, 84.0)
         );
         assert!(shape.stroke.dash_array.is_empty());
@@ -528,7 +576,7 @@ mod tests {
         assert_eq!(shape.blend_mode, BlendMode::Multiply);
         let ink = resolve("<</Subtype/Ink/Rect[0 0 0 0]/InkList false/Path[[10 20][20 30][30 40 40 50 50 40]]/BS<</S/D>>/CA 0/ca 1>>").unwrap();
         assert_eq!(
-            ink.paths[0].elements(),
+            ink.paths[0].path.elements(),
             &[
                 PathEl::MoveTo((10.0, 20.0).into()),
                 PathEl::LineTo((20.0, 30.0).into()),
@@ -545,7 +593,7 @@ mod tests {
         let ink =
             resolve("<</Subtype/Ink/Rect[3 3 1 1]/InkList[[0 0 0 0 10 10][10 10 20 0]]>>").unwrap();
         assert_eq!(ink.paths.len(), 2);
-        assert_eq!(ink.paths[0].elements().len(), 3);
+        assert_eq!(ink.paths[0].path.elements().len(), 3);
         let shape =
             resolve("<</Subtype/Circle/Rect[0 0 50 30]/Border[0 0 0]/IC[1 0 0]/CA 0/ca 1>>")
                 .unwrap();

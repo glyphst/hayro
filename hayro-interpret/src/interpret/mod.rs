@@ -355,6 +355,8 @@ pub struct InterpreterSettings {
     pub max_text_markup_quads_per_page: usize,
     /// Aggregate geometry budget for synthesized Square, Circle and Ink appearances.
     pub annotation_geometry_budget: crate::AnnotationGeometryBudget,
+    /// Aggregate owned optional-content expression budget for annotations.
+    pub annotation_optional_content_budget: crate::OptionalContentBudget,
 }
 
 impl Default for InterpreterSettings {
@@ -380,6 +382,7 @@ impl Default for InterpreterSettings {
             max_link_quads_per_annotation: 65_536,
             max_text_markup_quads_per_page: 65_536,
             annotation_geometry_budget: crate::AnnotationGeometryBudget::default(),
+            annotation_optional_content_budget: crate::OptionalContentBudget::default(),
         }
     }
 }
@@ -396,6 +399,8 @@ pub enum InterpreterWarning {
     /// An optional-content membership dictionary could not be converted into
     /// an owned visibility expression.
     OptionalContentExpressionFailure,
+    /// An annotation membership failed bounded expression resolution.
+    AnnotationOptionalContentFailure(crate::OptionalContentError),
     /// A visible annotation's normal appearance could not be selected or
     /// mapped exactly.
     AnnotationAppearanceFailure(crate::AnnotationAppearanceError),
@@ -436,6 +441,7 @@ pub fn interpret_page<'a>(
     {
         let mut remaining_markup_quads = context.settings.max_text_markup_quads_per_page;
         let mut geometry_budget = context.settings.annotation_geometry_budget;
+        let mut optional_budget = context.settings.annotation_optional_content_budget;
         for annot in annot_arr.iter::<Dict<'_>>() {
             if device.is_cancelled() {
                 break;
@@ -447,6 +453,34 @@ pub fn interpret_page<'a>(
             }
             // Print is intentionally irrelevant for this screen device.
             if !annotation_is_visible_on_screen(&annot) {
+                continue;
+            }
+
+            let has_oc = match crate::resolve_optional_content(
+                &annot,
+                context.xref,
+                &mut optional_budget,
+                &|| device.is_cancelled(),
+            ) {
+                Ok(Some(expression)) => {
+                    let expression = context.ocg_state.begin_resolved(expression);
+                    if context.settings.preserve_optional_content {
+                        device.begin_optional_content(&expression);
+                    }
+                    true
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    (context.settings.warning_sink)(
+                        InterpreterWarning::AnnotationOptionalContentFailure(error),
+                    );
+                    continue;
+                }
+            };
+            if !context.ocg_state.is_visible() {
+                if has_oc && context.ocg_state.end_marked_content() {
+                    device.end_optional_content();
+                }
                 continue;
             }
 
@@ -502,6 +536,9 @@ pub fn interpret_page<'a>(
                 Err(error) => (context.settings.warning_sink)(
                     InterpreterWarning::AnnotationAppearanceFailure(error),
                 ),
+            }
+            if has_oc && context.ocg_state.end_marked_content() {
+                device.end_optional_content();
             }
         }
     }

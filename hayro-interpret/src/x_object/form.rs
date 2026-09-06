@@ -725,6 +725,13 @@ mod tests {
     }
 
     impl<'a> Device<'a> for RecordingDevice {
+        fn begin_optional_content(&mut self, _: &crate::OptionalContentExpression) {
+            self.events.push("begin-oc");
+        }
+        fn end_optional_content(&mut self) {
+            self.events.push("end-oc");
+        }
+
         fn draw_path(&mut self, _: &BezPath, mut props: DrawProps<'a>, mode: &DrawMode) {
             self.events.push("path");
             self.path_transforms.push(props.transform);
@@ -1429,6 +1436,53 @@ mod tests {
                 crate::AnnotationAppearanceError::MissingAppearanceState
             )]
         ));
+    }
+
+    #[test]
+    fn annotation_membership_scopes_explicit_and_synthesized_appearances() {
+        let form = annotation_form(8, "[0 0 10 10]", "[1 0 0 1 0 0]", "0 0 10 10 re f");
+        let bytes = annotation_pdf(
+            "5 0 R 6 0 R 7 0 R",
+            &format!(
+                "5 0 obj <</Subtype/Square/Rect[0 0 10 10]/OC 9 0 R/AP<</N 8 0 R>>>> endobj\n\
+             6 0 obj <</Subtype/Link/Rect[20 0 30 10]/OC 9 0 R>> endobj\n\
+             7 0 obj <</Subtype/Square/Rect[40 0 50 10]/AP<</N 8 0 R>>>> endobj\n\
+             9 0 obj <</Type/OCG/Name(Hidden)>> endobj\n{form}"
+            ),
+        );
+        let bytes = String::from_utf8(bytes)
+            .unwrap()
+            .replace(
+                "/Type/Catalog/Pages 2 0 R",
+                "/Type/Catalog/Pages 2 0 R/OCProperties<</OCGs[9 0 R]/D<</OFF[9 0 R]>>>>",
+            )
+            .into_bytes();
+        let filtered = interpret_bytes(bytes.clone(), false);
+        assert_eq!(filtered.events, ["form", "path"]);
+        assert!(filtered.link_borders.is_empty());
+        let retained = interpret_bytes_with_settings(
+            bytes,
+            false,
+            InterpreterSettings {
+                preserve_optional_content: true,
+                ..InterpreterSettings::default()
+            },
+        );
+        assert_eq!(
+            retained.events,
+            [
+                "begin-oc",
+                "form",
+                "path",
+                "end-oc",
+                "begin-oc",
+                "link-border",
+                "end-oc",
+                "form",
+                "path"
+            ]
+        );
+        assert_eq!(retained.link_borders.len(), 1);
     }
 
     #[test]

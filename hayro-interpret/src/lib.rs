@@ -65,6 +65,7 @@ pub use function::{CalculatorFunction, CalculatorInstruction, Function, Transfer
 pub use hayro_cmap;
 pub use hayro_syntax;
 pub use interpret::*;
+pub use ocg::{OptionalContentBudget, OptionalContentError, resolve_optional_content};
 pub use types::*;
 pub use util::{RectExt, TransformExt};
 pub use x_object::soft_mask::*;

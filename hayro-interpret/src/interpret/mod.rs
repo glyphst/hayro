@@ -1,6 +1,7 @@
 use crate::FillRule;
 use crate::annotation::{
     annotation_is_visible_on_screen, resolve_annotation_appearance, resolve_link_border_with_limit,
+    resolve_text_markup,
 };
 use crate::color::ColorSpace;
 use crate::context::Context;
@@ -350,6 +351,8 @@ pub struct InterpreterSettings {
     pub max_marked_content_property_depth: u32,
     /// Maximum activation quadrilaterals retained from one Link annotation.
     pub max_link_quads_per_annotation: usize,
+    /// Maximum aggregate text-markup quadrilaterals resolved for one page.
+    pub max_text_markup_quads_per_page: usize,
 }
 
 impl Default for InterpreterSettings {
@@ -373,6 +376,7 @@ impl Default for InterpreterSettings {
             max_marked_content_property_bytes: 64 * 1024 * 1024,
             max_marked_content_property_depth: 64,
             max_link_quads_per_annotation: 65_536,
+            max_text_markup_quads_per_page: 65_536,
         }
     }
 }
@@ -394,6 +398,8 @@ pub enum InterpreterWarning {
     AnnotationAppearanceFailure(crate::AnnotationAppearanceError),
     /// A Link annotation's synthesized border could not be resolved exactly.
     LinkBorderFailure(crate::LinkBorderError),
+    /// A synthesized text-markup appearance could not be resolved exactly.
+    TextMarkupFailure(crate::TextMarkupError),
     /// An `EMC` operator had no matching `BMC` or `BDC` in this content scope
     /// and was ignored.
     UnmatchedMarkedContentEnd,
@@ -423,6 +429,7 @@ pub fn interpret_page<'a>(
     if context.settings.render_annotations
         && let Some(annot_arr) = page.raw().get::<Array<'_>>(ANNOTS)
     {
+        let mut remaining_markup_quads = context.settings.max_text_markup_quads_per_page;
         for annot in annot_arr.iter::<Dict<'_>>() {
             // Print is intentionally irrelevant for this screen device.
             if !annotation_is_visible_on_screen(&annot) {
@@ -450,7 +457,17 @@ pub fn interpret_page<'a>(
                     Ok(Some(border)) if border.is_visible() => {
                         device.draw_link_border(&border, context.root_transform());
                     }
-                    Ok(Some(_) | None) => {}
+                    Ok(Some(_)) => {}
+                    Ok(None) => match resolve_text_markup(&annot, remaining_markup_quads) {
+                        Ok(Some(markup)) => {
+                            remaining_markup_quads -= markup.quads.len();
+                            device.draw_text_markup(&markup, context.root_transform());
+                        }
+                        Ok(None) => {}
+                        Err(error) => (context.settings.warning_sink)(
+                            InterpreterWarning::TextMarkupFailure(error),
+                        ),
+                    },
                     Err(error) => {
                         (context.settings.warning_sink)(InterpreterWarning::LinkBorderFailure(
                             error,

@@ -50,6 +50,138 @@ pub struct LinkQuadrilateral {
     pub top_left: kurbo::Point,
 }
 
+/// Standard text-markup appearance synthesized when `/AP` is absent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextMarkupKind {
+    /// Filled text highlight.
+    Highlight,
+    /// Straight underline.
+    Underline,
+    /// Line through the text centre.
+    StrikeOut,
+    /// Jagged underline.
+    Squiggly,
+}
+
+/// Validated text markup in PDF default user space. The quadrilaterals use
+/// the same bottom-edge-first representation as Link activation regions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextMarkup {
+    /// The appearance to synthesize.
+    pub kind: TextMarkupKind,
+    /// Convex, oriented quadrilaterals, independent of an inaccurate `/Rect`.
+    pub quads: Vec<LinkQuadrilateral>,
+    /// Original direct device colour, or explicitly transparent colour.
+    pub color: LinkBorderColor,
+    /// Constant opacity, including zero.
+    pub opacity: f32,
+}
+
+impl TextMarkup {
+    /// Preserve the original colour components and unquantized opacity.
+    #[must_use]
+    pub fn paint_color(&self) -> Option<Color> {
+        self.color.to_color_with_opacity(self.opacity)
+    }
+}
+
+/// Failure to resolve a missing text-markup appearance without guessing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TextMarkupError {
+    /// Required `/QuadPoints` are absent.
+    MissingQuadPoints,
+    /// Coordinates, topology, or the caller's aggregate budget are invalid.
+    InvalidQuadPoints(LinkQuadPointsError),
+    /// The required rectangle is not finite and non-degenerate.
+    InvalidRectangle,
+    /// `/C` is not a valid direct device colour array.
+    InvalidColor,
+    /// `/CA` is not a finite value in the range zero to one.
+    InvalidOpacity,
+    /// PDF 2.0 `/BM` or `/ca` needs a separate appearance policy.
+    UnsupportedAppearanceControl,
+}
+
+/// Resolve one of the four standard text-markup types without an `/AP` entry.
+/// `max_quads` is the caller's remaining aggregate page budget. The source
+/// rectangle never replaces, clips, or reorders valid text-markup quads.
+pub fn resolve_text_markup(
+    annotation: &Dict<'_>,
+    max_quads: usize,
+) -> Result<Option<TextMarkup>, TextMarkupError> {
+    if annotation.contains_key(AP) {
+        return Ok(None);
+    }
+    let kind = match annotation
+        .get::<Name<'_>>(SUBTYPE)
+        .as_ref()
+        .map(Name::as_ref)
+    {
+        Some(b"Highlight") => TextMarkupKind::Highlight,
+        Some(b"Underline") => TextMarkupKind::Underline,
+        Some(b"StrikeOut") => TextMarkupKind::StrikeOut,
+        Some(b"Squiggly") => TextMarkupKind::Squiggly,
+        _ => return Ok(None),
+    };
+    if annotation.contains_key(b"BM") || annotation.contains_key(b"ca") {
+        return Err(TextMarkupError::UnsupportedAppearanceControl);
+    }
+    let rect = annotation
+        .get::<Rect>(RECT)
+        .ok_or(TextMarkupError::InvalidRectangle)?
+        .to_kurbo();
+    if !finite_rect(rect) || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return Err(TextMarkupError::InvalidRectangle);
+    }
+    let color = if !annotation.contains_key(C) && kind == TextMarkupKind::Highlight {
+        LinkBorderColor::Rgb([1.0, 1.0, 0.0])
+    } else {
+        annotation_color(annotation).map_err(|_| TextMarkupError::InvalidColor)?
+    };
+    let opacity = match annotation.get::<Number>(CA) {
+        Some(number) => normalized_f32(number.as_f64()).ok_or(TextMarkupError::InvalidOpacity)?,
+        None if annotation.contains_key(CA) => return Err(TextMarkupError::InvalidOpacity),
+        None => 1.0,
+    };
+    if !annotation.contains_key(QUADPOINTS) {
+        return Err(TextMarkupError::MissingQuadPoints);
+    }
+    let quads = read_quad_points(annotation, max_quads)
+        .and_then(|raw| {
+            raw.into_iter()
+                .map(|points| {
+                    if points
+                        .iter()
+                        .any(|p| !(p.x as f32).is_finite() || !(p.y as f32).is_finite())
+                    {
+                        return Err(LinkQuadPointsError::InvalidCoordinate);
+                    }
+                    let quad = normalize_quad(points)?;
+                    let points = [
+                        quad.bottom_left,
+                        quad.bottom_right,
+                        quad.top_right,
+                        quad.top_left,
+                    ];
+                    if !(0..4).all(|i| {
+                        orientation(points[i], points[(i + 1) % 4], points[(i + 2) % 4]) > 0.0
+                    }) {
+                        return Err(LinkQuadPointsError::InvalidGeometry);
+                    }
+                    Ok(quad)
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(TextMarkupError::InvalidQuadPoints)?;
+    Ok(Some(TextMarkup {
+        kind,
+        quads,
+        color,
+        opacity,
+    }))
+}
+
 /// A reason why a visible annotation's normal appearance could not be
 /// selected or mapped exactly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -189,22 +321,26 @@ impl LinkBorderColor {
     /// color family and components.
     #[must_use]
     pub fn to_color(self) -> Option<Color> {
+        self.to_color_with_opacity(1.0)
+    }
+
+    fn to_color_with_opacity(self, opacity: f32) -> Option<Color> {
         match self {
             Self::Transparent => None,
             Self::Gray(components) => Some(Color::new(
                 ColorSpace::device_gray(),
                 smallvec![components[0]],
-                1.0,
+                opacity,
             )),
             Self::Rgb(components) => Some(Color::new(
                 ColorSpace::device_rgb(),
                 smallvec![components[0], components[1], components[2]],
-                1.0,
+                opacity,
             )),
             Self::Cmyk(components) => Some(Color::new(
                 ColorSpace::device_cmyk(),
                 smallvec![components[0], components[1], components[2], components[3]],
-                1.0,
+                opacity,
             )),
         }
     }
@@ -372,6 +508,25 @@ pub fn resolve_link_quad_points(
     if !finite_rect(rect) || rect.width() <= 0.0 || rect.height() <= 0.0 {
         return Err(LinkQuadPointsError::InvalidRectangle);
     }
+    let raw_quads = read_quad_points(annotation, max_quads)?;
+    if raw_quads
+        .iter()
+        .flatten()
+        .any(|p| p.x < rect.x0 || p.x > rect.x1 || p.y < rect.y0 || p.y > rect.y1)
+    {
+        return Ok(None);
+    }
+    raw_quads
+        .into_iter()
+        .map(normalize_quad)
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn read_quad_points(
+    annotation: &Dict<'_>,
+    max_quads: usize,
+) -> Result<Vec<[kurbo::Point; 4]>, LinkQuadPointsError> {
     let array = annotation
         .get::<Array<'_>>(QUADPOINTS)
         .ok_or(LinkQuadPointsError::InvalidArray)?;
@@ -386,7 +541,6 @@ pub fn resolve_link_quad_points(
 
     let mut values = array.flex_iter();
     let mut raw_quads = Vec::with_capacity(quad_count);
-    let mut outside_rect = false;
     for _ in 0..quad_count {
         let mut points = [kurbo::Point::ZERO; 4];
         for point in &mut points {
@@ -401,35 +555,30 @@ pub fn resolve_link_quad_points(
                 .filter(|value| value.is_finite())
                 .ok_or(LinkQuadPointsError::InvalidCoordinate)?;
             *point = kurbo::Point::new(x, y);
-            outside_rect |= x < rect.x0 || x > rect.x1 || y < rect.y0 || y > rect.y1;
         }
         raw_quads.push(points);
     }
-    if outside_rect {
-        return Ok(None);
-    }
+    Ok(raw_quads)
+}
 
-    let mut quads = Vec::with_capacity(quad_count);
-    for points in raw_quads {
-        let normalized = if valid_counter_clockwise_quad(points) {
-            points
-        } else if quad_self_intersects(points) {
-            let adobe_z_order = [points[2], points[3], points[1], points[0]];
-            if !valid_counter_clockwise_quad(adobe_z_order) {
-                return Err(LinkQuadPointsError::InvalidGeometry);
-            }
-            adobe_z_order
-        } else {
+fn normalize_quad(points: [kurbo::Point; 4]) -> Result<LinkQuadrilateral, LinkQuadPointsError> {
+    let normalized = if valid_counter_clockwise_quad(points) {
+        points
+    } else if quad_self_intersects(points) {
+        let adobe_z_order = [points[2], points[3], points[1], points[0]];
+        if !valid_counter_clockwise_quad(adobe_z_order) {
             return Err(LinkQuadPointsError::InvalidGeometry);
-        };
-        quads.push(LinkQuadrilateral {
-            bottom_left: normalized[0],
-            bottom_right: normalized[1],
-            top_right: normalized[2],
-            top_left: normalized[3],
-        });
-    }
-    Ok(Some(quads))
+        }
+        adobe_z_order
+    } else {
+        return Err(LinkQuadPointsError::InvalidGeometry);
+    };
+    Ok(LinkQuadrilateral {
+        bottom_left: normalized[0],
+        bottom_right: normalized[1],
+        top_right: normalized[2],
+        top_left: normalized[3],
+    })
 }
 
 fn valid_counter_clockwise_quad(points: [kurbo::Point; 4]) -> bool {

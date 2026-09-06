@@ -703,6 +703,7 @@ mod tests {
         soft_masks: Vec<(MaskType, ColorSpaceKind, bool, Vec<f32>)>,
         marked_properties: Vec<MarkedContentProperties>,
         link_borders: Vec<(LinkBorder, Affine)>,
+        text_markups: Vec<(crate::TextMarkup, Affine)>,
         events: Vec<&'static str>,
         alpha_is_shape: Vec<bool>,
         alpha_constants: Vec<f32>,
@@ -815,6 +816,11 @@ mod tests {
         fn draw_link_border(&mut self, border: &LinkBorder, transform: Affine) {
             self.events.push("link-border");
             self.link_borders.push((border.clone(), transform));
+        }
+
+        fn draw_text_markup(&mut self, markup: &crate::TextMarkup, transform: Affine) {
+            self.events.push("text-markup");
+            self.text_markups.push((markup.clone(), transform));
         }
 
         fn pop_clip(&mut self) {}
@@ -1543,6 +1549,108 @@ mod tests {
                 rect: Rect::new(230.0, 20.0, 330.0, 70.0),
             }
         );
+    }
+
+    #[test]
+    fn text_markup_preserves_order_quads_and_appearance_precedence() {
+        let objects = format!(
+            "5 0 obj <</Type/Annot/Subtype/Highlight/Rect[1 1 2 2]/QuadPoints[20 25 100 25 90 60 30 60]/CA 0.25>> endobj\n\
+            6 0 obj <</Type/Annot/Subtype/Link/Rect[120 20 220 70]/Border[0 0 2]>> endobj\n\
+            7 0 obj <</Type/Annot/Subtype/StrikeOut/Rect[1 1 2 2]/QuadPoints[30 60 90 60 20 25 100 25]/C[0.2]/CA 0>> endobj\n\
+            8 0 obj <</Type/Annot/Subtype/Underline/Rect[10 20 30 40]/QuadPoints(null)/C(null)/CA(null)/AP<</N 10 0 R>>>> endobj\n\
+            9 0 obj <</Type/Annot/Subtype/Squiggly/Rect[1 1 2 2]/QuadPoints[20 25 100 25 90 60 30 60]/C[0.1 0.2 0.3 0.4]>> endobj\n{}",
+            annotation_form(10, "[0 0 10 10]", "[1 0 0 1 0 0]", "0 0 10 10 re f")
+        );
+        let bytes = annotation_pdf("5 0 R 6 0 R 7 0 R 8 0 R 9 0 R", &objects);
+        let device = interpret_bytes(bytes.clone(), true);
+        assert_eq!(
+            device.events,
+            [
+                "text-markup",
+                "link-border",
+                "text-markup",
+                "form",
+                "path",
+                "text-markup"
+            ]
+        );
+        assert_eq!(device.text_markups.len(), 3);
+        let first = &device.text_markups[0].0;
+        assert_eq!(first.kind, crate::TextMarkupKind::Highlight);
+        assert_eq!(first.color, LinkBorderColor::Rgb([1.0, 1.0, 0.0]));
+        assert_eq!(first.opacity, 0.25);
+        assert_eq!(first.quads, device.text_markups[1].0.quads);
+        assert_eq!(device.text_markups[1].0.opacity, 0.0);
+        assert_eq!(
+            device.text_markups[2].0.color,
+            LinkBorderColor::Cmyk([0.1, 0.2, 0.3, 0.4])
+        );
+        let disabled = interpret_bytes_with_settings(
+            bytes,
+            true,
+            InterpreterSettings {
+                render_annotations: false,
+                ..InterpreterSettings::default()
+            },
+        );
+        assert!(disabled.events.is_empty());
+    }
+
+    #[test]
+    fn text_markup_rejects_invalid_inputs_and_enforces_an_aggregate_budget() {
+        use crate::{LinkQuadPointsError as Q, TextMarkupError as E};
+        let quads = "/QuadPoints[10 20 30 20 30 40 10 40]";
+        let cases = [
+            (String::new(), E::MissingQuadPoints),
+            (
+                "/QuadPoints[1 2]".into(),
+                E::InvalidQuadPoints(Q::InvalidLength),
+            ),
+            (
+                "/QuadPoints[10 20 30 20 30 40 null 40]".into(),
+                E::InvalidQuadPoints(Q::InvalidCoordinate),
+            ),
+            (
+                "/QuadPoints[10 20 30 20 15 25 10 40]".into(),
+                E::InvalidQuadPoints(Q::InvalidGeometry),
+            ),
+            (format!("{quads}/C[1 2 3]"), E::InvalidColor),
+            (format!("{quads}/CA -1"), E::InvalidOpacity),
+            (format!("{quads}/ca 0.5"), E::UnsupportedAppearanceControl),
+        ];
+        for (entries, expected) in cases {
+            let warnings = Arc::new(Mutex::new(Vec::new()));
+            let target = Arc::clone(&warnings);
+            let settings = InterpreterSettings {
+                warning_sink: Arc::new(move |warning| target.lock().unwrap().push(warning)),
+                ..InterpreterSettings::default()
+            };
+            let objects = format!("5 0 obj <</Subtype/Underline/Rect[1 1 2 2]{entries}>> endobj");
+            let device =
+                interpret_bytes_with_settings(annotation_pdf("5 0 R", &objects), true, settings);
+            assert!(device.text_markups.is_empty(), "{entries}");
+            assert!(
+                matches!(warnings.lock().unwrap().as_slice(), [InterpreterWarning::TextMarkupFailure(error)] if *error == expected),
+                "{entries}"
+            );
+        }
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let target = Arc::clone(&warnings);
+        let settings = InterpreterSettings {
+            max_text_markup_quads_per_page: 1,
+            warning_sink: Arc::new(move |warning| target.lock().unwrap().push(warning)),
+            ..InterpreterSettings::default()
+        };
+        let objects = format!("5 0 obj <</Subtype/Underline/Rect[1 1 2 2]{quads}>> endobj");
+        let device =
+            interpret_bytes_with_settings(annotation_pdf("5 0 R 5 0 R", &objects), true, settings);
+        assert_eq!(device.text_markups.len(), 1);
+        assert!(matches!(
+            warnings.lock().unwrap().as_slice(),
+            [InterpreterWarning::TextMarkupFailure(E::InvalidQuadPoints(
+                Q::ItemLimit
+            ))]
+        ));
     }
 
     #[test]

@@ -52,8 +52,9 @@ pub mod util;
 
 pub use annotation::{
     AnnotationAppearanceError, LinkBorder, LinkBorderColor, LinkBorderError, LinkBorderGeometry,
-    LinkBorderStyle, LinkQuadPointsError, LinkQuadrilateral, annotation_is_visible_on_screen,
-    resolve_link_border, resolve_link_border_with_limit, resolve_link_quad_points,
+    LinkBorderStyle, LinkQuadPointsError, LinkQuadrilateral, TextMarkup, TextMarkupError,
+    TextMarkupKind, annotation_is_visible_on_screen, resolve_link_border,
+    resolve_link_border_with_limit, resolve_link_quad_points, resolve_text_markup,
     select_annotation_normal_appearance,
 };
 pub use cache::CacheKey;

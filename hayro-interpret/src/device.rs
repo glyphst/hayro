@@ -2,7 +2,7 @@ use crate::font::GlyphRun;
 use crate::x_object::soft_mask::SoftMask;
 use crate::{BlendMode, ClipPath, FillRule, Image};
 use crate::{DrawMode, DrawProps, ImageDrawProps};
-use crate::{FormInvocation, LinkBorder};
+use crate::{FormInvocation, LinkBorder, TextMarkup};
 use kurbo::{Affine, BezPath, Rect, Shape};
 
 /// Owned metadata stream attached to a marked-content property list.
@@ -201,6 +201,11 @@ pub trait Device<'a> {
     /// An explicit annotation appearance stream takes precedence, so this
     /// callback is emitted only when no `/AP` entry is present.
     fn draw_link_border(&mut self, _border: &LinkBorder, _transform: Affine) {}
+    /// Draw text markup without an explicit appearance at its position in the
+    /// annotation array. Geometry remains in PDF default user space, mapped
+    /// to page coordinates by `transform`. Existing devices retain their
+    /// previous behaviour through the default no-op.
+    fn draw_text_markup(&mut self, _markup: &TextMarkup, _transform: Affine) {}
     /// Pop the last clip path or clip rectangle from the clip stack.
     fn pop_clip(&mut self);
     /// Pop the last transparency group from the blend stack.

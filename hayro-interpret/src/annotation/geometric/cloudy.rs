@@ -70,6 +70,18 @@ pub(super) fn polygon(
         out.budget.reserve(&mut points, 1)?;
         points.push(first);
     }
+    // Repeated points are harmless, but a small crossing must not disappear
+    // in the half-point filter before the source contour is validated.
+    let mut kept = 1;
+    for i in 1..points.len() {
+        out.checkpoint()?;
+        if points[i] != points[kept - 1] {
+            points[kept] = points[i];
+            kept += 1;
+        }
+    }
+    points.truncate(kept);
+    let source_area = simple_contour(out, &points)?;
     // Match the existing cloud policy's half-point adjacent-point filter,
     // preserving the closing point even when the final segment is tiny.
     let len = points.len();
@@ -88,7 +100,11 @@ pub(super) fn polygon(
         previous = point;
     }
     points.truncate(kept);
-    let area = simple_contour(out, &points)?;
+    let area = if kept == len {
+        source_area
+    } else {
+        simple_contour(out, &points)?
+    };
     if area < 0.0 {
         points.reverse();
     }

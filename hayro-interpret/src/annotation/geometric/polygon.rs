@@ -335,6 +335,10 @@ mod tests {
                 "/Subtype/Polygon/Vertices[0 0 100 0 50 0 0 100]/BE<</S/C/I 1>>",
                 Error::InvalidGeometry,
             ),
+            (
+                "/Subtype/Polygon/Vertices[0 0 0.1 0.1 0 0.1 0.1 0 80 0 80 60 0 60]/BE<</S/C/I 1>>",
+                Error::InvalidGeometry,
+            ),
         ] {
             assert!(
                 matches!(resolve(entries), Err(error) if error == expected),

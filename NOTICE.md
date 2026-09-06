@@ -3,6 +3,9 @@ under the Apache 2.0 license.
  - The encoding maps for some of the standard fonts.
  - The evaluator for type 0 functions.
  - The list of common dictionary keys.
+ - The signed Line leader convention in
+   `hayro-interpret/src/annotation/geometric/line.rs`, following
+   PDFBox 3.0.8 `PDLineAppearanceHandler.java`.
  - The bounded rectangle/ellipse/polygon cloudy-border geometry in
    `hayro-interpret/src/annotation/geometric/cloudy.rs`, adapted from
    PDFBox 3.0.8 `CloudyBorder.java`.

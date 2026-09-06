@@ -58,27 +58,39 @@ pub(super) fn resolve(
         };
         append_path(result, path, true, budget)?;
     } else {
-        let styles = endings(annotation)?;
         let ends = endpoints(&source, cancelled)?;
-        append_path(result, source, false, budget)?;
-        // Symbols scale with the border width; zero width cannot create hairlines.
-        if result.stroke.line_width > 0.0 {
-            for (i, (style, (point, tangent))) in styles.into_iter().zip(ends).enumerate() {
-                if style == Ending::None {
-                    continue;
-                }
-                let mut out = PathBuilder::new(budget, cancelled);
-                let fill = decoration(
-                    &mut out,
-                    style,
-                    point,
-                    tangent,
-                    i == 1,
-                    f64::from(result.stroke.line_width),
-                )?;
-                let path = out.finish();
-                append_path(result, path, fill, budget)?;
+        append_decorated_path(annotation, source, ends, result, budget, cancelled)?;
+    }
+    Ok(())
+}
+
+pub(super) fn append_decorated_path(
+    annotation: &Dict<'_>,
+    path: BezPath,
+    ends: [(Point, Option<Vec2>); 2],
+    result: &mut GeometricAnnotation,
+    budget: &mut AnnotationGeometryBudget,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), Error> {
+    let styles = endings(annotation)?;
+    append_path(result, path, false, budget)?;
+    // Symbols scale with the border width; zero width cannot create hairlines.
+    if result.stroke.line_width > 0.0 {
+        for (i, (style, (point, tangent))) in styles.into_iter().zip(ends).enumerate() {
+            if style == Ending::None {
+                continue;
             }
+            let mut out = PathBuilder::new(budget, cancelled);
+            let fill = decoration(
+                &mut out,
+                style,
+                point,
+                tangent,
+                i == 1,
+                f64::from(result.stroke.line_width),
+            )?;
+            let path = out.finish();
+            append_path(result, path, fill, budget)?;
         }
     }
     Ok(())

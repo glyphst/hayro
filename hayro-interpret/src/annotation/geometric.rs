@@ -1,6 +1,7 @@
 //! Bounded default appearances for geometric annotations.
 
 mod cloudy;
+mod line;
 mod polygon;
 
 use super::{
@@ -145,8 +146,12 @@ pub enum GeometricAnnotationError {
     InvalidVertices,
     /// Malformed PDF 2.0 path operands.
     InvalidPath,
-    /// Malformed or unknown `PolyLine` endpoint styles.
+    /// Malformed or unknown Line/PolyLine endpoint styles.
     InvalidLineEnding,
+    /// Missing or malformed Line coordinates, leader parameters or caption flag.
+    InvalidLine,
+    /// A generated Line caption needs a text appearance policy.
+    UnsupportedCaption,
     /// Non-finite derived geometry or an unmet bounded subdivision tolerance.
     InvalidGeometry,
     /// Aggregate generated path operator budget exceeded.
@@ -183,6 +188,7 @@ pub fn resolve_geometric_annotation(
         Some(b"Ink") => 2,
         Some(b"Polygon") => 3,
         Some(b"PolyLine") => 4,
+        Some(b"Line") => 5,
         _ => return Ok(None),
     };
     if cancelled() {
@@ -255,7 +261,9 @@ pub fn resolve_geometric_annotation(
             ..StrokeProps::default()
         },
     };
-    if kind >= 3 {
+    if kind == 5 {
+        line::resolve(annotation, &mut result, budget, cancelled)?;
+    } else if kind >= 3 {
         polygon::resolve(annotation, kind == 3, &mut result, budget, cancelled)?;
     } else if kind == 2 {
         if annotation.contains_key(b"Path") {

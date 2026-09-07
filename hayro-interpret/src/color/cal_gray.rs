@@ -25,6 +25,10 @@ impl CalGray {
             })))
         })
     }
+
+    pub(super) fn convert_value(&self, input: f32) -> [u8; 3] {
+        self.transform.convert_components([f64::from(input); 3])
+    }
 }
 
 impl ToRgb for CalGray {

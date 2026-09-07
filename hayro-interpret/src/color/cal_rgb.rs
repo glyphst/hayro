@@ -116,10 +116,12 @@ impl CalRgb {
     }
 
     pub(super) fn convert_pixel(&self, input: [u8; 3]) -> [u8; 3] {
+        self.convert_components(input.map(|value| f64::from(value) / 255.0))
+    }
+
+    pub(super) fn convert_components(&self, input: [f64; 3]) -> [u8; 3] {
         let decoded = Vector3d {
-            v: core::array::from_fn(|i| {
-                (f64::from(input[i]) / 255.0).powf(f64::from(self.gamma[i]))
-            }),
+            v: core::array::from_fn(|i| input[i].clamp(0.0, 1.0).powf(f64::from(self.gamma[i]))),
         };
         let linear = self.matrix.mul_vector(decoded);
         core::array::from_fn(|i| {
@@ -278,6 +280,23 @@ mod tests {
         let mut inplace = vec![128; 3];
         calibrated.convert_in_place(&mut inplace).unwrap();
         assert_eq!(inplace, rgb(&calibrated, &[128; 3]));
+    }
+
+    #[test]
+    fn calibrated_paint_components_are_not_quantized_before_gamma() {
+        for definition in [
+            "[/CalGray <</WhitePoint[1 1 1]>>]",
+            "[/CalRGB <</WhitePoint[1 1 1]>>]",
+        ] {
+            let calibrated = space(definition);
+            for (value, expected) in [(0.001, 3), (0.002, 7), (0.003, 10)] {
+                let mut output = [0; 3];
+                calibrated
+                    .convert_values(&vec![value; calibrated.component_count()], &mut output)
+                    .unwrap();
+                assert_eq!(output, [expected; 3]);
+            }
+        }
     }
 
     #[test]

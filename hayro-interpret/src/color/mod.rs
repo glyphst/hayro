@@ -480,6 +480,24 @@ impl ColorSpace {
     }
 
     pub(crate) fn convert_values(&self, input: &[f32], output: &mut [u8]) -> Option<()> {
+        // Calibrated paints and sampled shadings carry real components.
+        // Quantizing before gamma creates large steps in their dark colors.
+        let calibrated = match self.0.as_ref() {
+            ColorSpaceType::CalGray(gray) => Some(gray.convert_value(*input.first()?)),
+            ColorSpaceType::CalRgb(rgb) => Some(rgb.convert_components([
+                f64::from(*input.first()?),
+                f64::from(*input.get(1)?),
+                f64::from(*input.get(2)?),
+            ])),
+            ColorSpaceType::Pattern(pattern) => {
+                return pattern.color_space().convert_values(input, output);
+            }
+            _ => None,
+        };
+        if let Some(calibrated) = calibrated {
+            output.get_mut(..3)?.copy_from_slice(&calibrated);
+            return Some(());
+        }
         let converted = self.encode_values(input);
         self.convert(&converted, output)
     }

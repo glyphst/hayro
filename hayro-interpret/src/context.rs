@@ -598,12 +598,17 @@ impl<'a> Context<'a> {
         resources: &Resources<'_>,
         name: &Name<'_>,
     ) -> Option<ColorSpace> {
-        let cs_object = resources.get_color_space(name)?;
-        self.interpreter_cache
-            .object_cache
-            .get_or_insert_with(cs_object.cache_key(), || {
-                ColorSpace::new(cs_object.clone(), &self.interpreter_cache.object_cache)
-            })
+        let color_space = resources.get_color_space(name).and_then(|cs_object| {
+            self.interpreter_cache
+                .object_cache
+                .get_or_insert_with(cs_object.cache_key(), || {
+                    ColorSpace::new(cs_object.clone(), &self.interpreter_cache.object_cache)
+                })
+        });
+        if color_space.is_none() {
+            (self.settings.warning_sink)(crate::InterpreterWarning::ColorSpaceFailure);
+        }
+        color_space
     }
 
     pub(crate) fn stroke_props(&self) -> StrokeProps {

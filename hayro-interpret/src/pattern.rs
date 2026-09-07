@@ -44,6 +44,7 @@ impl<'a> Pattern<'a> {
                 &dict,
                 &ctx.interpreter_cache.object_cache,
                 ctx.get().graphics_state.non_stroke_alpha,
+                &ctx.settings.warning_sink,
             )?)),
             Object::Stream(stream) => Some(Self::Tiling(Box::new(TilingPattern::new(
                 stream, ctx, resources,
@@ -100,11 +101,16 @@ pub struct ShadingPattern {
 }
 
 impl ShadingPattern {
-    pub(crate) fn new(dict: &Dict<'_>, cache: &Cache, opacity: f32) -> Option<Self> {
+    pub(crate) fn new(
+        dict: &Dict<'_>,
+        cache: &Cache,
+        opacity: f32,
+        warning_sink: &interpret::WarningSinkFn,
+    ) -> Option<Self> {
         let shading = dict.get::<Object<'_>>(SHADING).and_then(|o| {
             let (dict, stream) = dict_or_stream(&o)?;
 
-            Shading::new(dict, stream, cache)
+            Shading::new(dict, stream, cache, warning_sink)
         })?;
         let matrix = dict
             .get::<[f64; 6]>(MATRIX)

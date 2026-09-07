@@ -988,6 +988,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invalid_calibrated_paints_and_shadings_emit_a_warning() {
+        let shading = "<</ShadingType 2/ColorSpace[/CalGray<<>>]/Coords[0 0 100 0]/Function<</FunctionType 2/Domain[0 1]/C0[0]/C1[1]/N 1>>>>";
+        let resources = format!(
+            "/Resources<</ColorSpace<</C[/CalGray<<>>]>>/Shading<</S {shading}>>/Pattern<</P<</PatternType 2/Shading {shading}>>>>>>"
+        );
+        for content in [
+            "/C cs 0.5 sc 0 0 50 50 re f",
+            "/C CS 0.5 SC 0 0 m 50 50 l S",
+            "/S sh",
+            "/Pattern cs /P scn 0 0 50 50 re f",
+        ] {
+            let bytes = String::from_utf8(content_pdf(content))
+                .unwrap()
+                .replace("/Resources<<>>", &resources)
+                .into_bytes();
+            let warnings = Arc::new(Mutex::new(Vec::new()));
+            let target = warnings.clone();
+            let settings = InterpreterSettings {
+                warning_sink: Arc::new(move |warning| target.lock().unwrap().push(warning)),
+                ..InterpreterSettings::default()
+            };
+            interpret_bytes_with_settings(bytes, false, settings);
+            assert!(
+                warnings
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|warning| matches!(warning, InterpreterWarning::ColorSpaceFailure)),
+                "{content}"
+            );
+        }
+    }
+
     fn interpret_bytes(bytes: Vec<u8>, retained: bool) -> RecordingDevice {
         interpret_bytes_with_settings(bytes, retained, InterpreterSettings::default())
     }

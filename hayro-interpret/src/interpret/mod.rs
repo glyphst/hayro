@@ -398,6 +398,8 @@ pub enum InterpreterWarning {
     ImageDecodeFailure,
     /// An image color-space declaration or selected default could not be resolved.
     ImageColorSpace(crate::color::ImageColorSpaceError),
+    /// A selected paint or shading color space could not be resolved exactly.
+    ColorSpaceFailure,
     /// An optional-content membership dictionary could not be converted into
     /// an owned visibility expression.
     OptionalContentExpressionFailure,
@@ -1096,7 +1098,12 @@ pub fn interpret<'a>(
                     .get_shading(s.0)
                     .and_then(|o| {
                         let (dict, stream) = dict_or_stream(&o)?;
-                        Shading::new(dict, stream, &context.interpreter_cache.object_cache)
+                        Shading::new(
+                            dict,
+                            stream,
+                            &context.interpreter_cache.object_cache,
+                            &context.settings.warning_sink,
+                        )
                     })
                     .map(|s| {
                         Pattern::Shading(ShadingPattern {

@@ -238,25 +238,33 @@ impl ColorSpaceType {
                     })?;
                     // Only the profile itself is independent of resource scope.
                     // Resolve a selected Alternate outside the shared cache.
-                    return profile
-                        .or_else(|| {
-                            dict.get::<Object<'_>>(ALTERNATE)
+                    return profile.or_else(|| {
+                        if dict.contains_key(ALTERNATE) {
+                            return dict
+                                .get::<Object<'_>>(ALTERNATE)
                                 .and_then(&mut *resolve)
-                                .map(|space| space.0.as_ref().clone())
-                        })
-                        .or_else(|| match dict.get::<u8>(N) {
+                                .map(|space| space.0.as_ref().clone());
+                        }
+                        match dict.get::<u8>(N) {
                             Some(1) => Some(Self::DeviceGray(DeviceGray)),
                             Some(3) => Some(Self::DeviceRgb(DeviceRgb)),
                             Some(4) => Some(Self::DeviceCmyk(DeviceCmyk)),
                             _ => None,
-                        });
+                        }
+                    });
                 }
                 CALCMYK => return Some(Self::DeviceCmyk(DeviceCmyk)),
                 CALGRAY => {
+                    if color_array.raw_iter().take(3).count() != 2 {
+                        return None;
+                    }
                     let cal_dict = iter.next::<Dict<'_>>()?;
                     return Some(Self::CalGray(CalGray::new(&cal_dict)?));
                 }
                 CALRGB => {
+                    if color_array.raw_iter().take(3).count() != 2 {
+                        return None;
+                    }
                     let cal_dict = iter.next::<Dict<'_>>()?;
                     return Some(Self::CalRgb(CalRgb::new(&cal_dict)?));
                 }
@@ -277,11 +285,11 @@ impl ColorSpaceType {
                     return Some(Self::DeviceN(DeviceN::new(&color_array, resolve)?));
                 }
                 PATTERN => {
-                    let _ = iter.next::<Name<'_>>();
-                    let cs = iter
-                        .next::<Object<'_>>()
-                        .and_then(|o| ColorSpace::new(o, cache))
-                        .unwrap_or(ColorSpace::device_rgb());
+                    let cs = if color_array.raw_iter().take(2).count() == 1 {
+                        ColorSpace::device_rgb()
+                    } else {
+                        resolve(iter.next::<Object<'_>>()?)?
+                    };
                     return Some(Self::Pattern(Pattern::new(cs)));
                 }
                 _ => {

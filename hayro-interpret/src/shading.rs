@@ -159,12 +159,23 @@ pub struct Shading {
 }
 
 impl Shading {
-    pub(crate) fn new(dict: &Dict<'_>, stream: Option<&Stream<'_>>, cache: &Cache) -> Option<Self> {
+    pub(crate) fn new(
+        dict: &Dict<'_>,
+        stream: Option<&Stream<'_>>,
+        cache: &Cache,
+        warning_sink: &crate::interpret::WarningSinkFn,
+    ) -> Option<Self> {
         let cache_key = dict.cache_key();
 
         let shading_num = dict.get::<u8>(SHADING_TYPE)?;
 
-        let color_space = ColorSpace::new(dict.get(COLORSPACE)?, cache)?;
+        let color_space = dict
+            .get(COLORSPACE)
+            .and_then(|object| ColorSpace::new(object, cache));
+        if color_space.is_none() {
+            warning_sink(crate::InterpreterWarning::ColorSpaceFailure);
+        }
+        let color_space = color_space?;
 
         let shading_type = match shading_num {
             1 => {

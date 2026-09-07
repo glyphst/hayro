@@ -18,28 +18,7 @@ pub(crate) mod flate {
 
     #[cfg(feature = "unsafe")]
     pub(crate) fn decode(data: &[u8], params: &Dict<'_>) -> Option<Vec<u8>> {
-        use flate2::read::{DeflateDecoder, ZlibDecoder};
-        use std::io::Read;
-
-        fn zlib_stream(data: &[u8]) -> Option<Vec<u8>> {
-            let mut decoder = ZlibDecoder::new(data);
-            let mut result = Vec::new();
-            decoder.read_to_end(&mut result).ok().map(|_| result)
-        }
-
-        fn deflate_stream(data: &[u8]) -> Option<Vec<u8>> {
-            let mut decoder = DeflateDecoder::new(data);
-            let mut result = Vec::new();
-            decoder.read_to_end(&mut result).ok().map(|_| result)
-        }
-
-        let decoded = zlib_stream(data)
-            .or_else(|| deflate_stream(data))
-            .or_else(|| {
-                warn!("flate stream is broken, decoding with fallback");
-
-                fallback::decode(data)
-            })?;
+        let decoded = decode_with_limit(data, usize::MAX).ok()?;
         let params = PredictorParams::from_params(params);
         apply_predictor(decoded, &params)
     }
@@ -114,6 +93,7 @@ pub(crate) mod flate {
 
     /// Ported from <https://github.com/mozilla/pdf.js/blob/master/src/core/flate_stream.js>
     /// TODO: Rewrite this in idiomatic Rust.
+    #[cfg(not(feature = "unsafe"))]
     mod fallback {
         use super::LimitedDecodeFailure;
         use alloc::vec;
@@ -162,6 +142,7 @@ pub(crate) mod flate {
             code_size: u8,
             output: Vec<u8>,
             eof: bool,
+            failed: bool,
             max_output_bytes: Option<usize>,
             limit_exceeded: bool,
         }
@@ -175,18 +156,21 @@ pub(crate) mod flate {
                     code_size: 0,
                     output: Vec::new(),
                     eof: false,
+                    failed: false,
                     max_output_bytes,
                     limit_exceeded: false,
                 }
             }
 
             fn decode(&mut self) -> Result<Vec<u8>, LimitedDecodeFailure> {
-                while !self.eof && self.pos < self.data.len() {
+                while !self.eof {
                     self.read_block();
                 }
 
                 if self.limit_exceeded {
                     Err(LimitedDecodeFailure::LimitExceeded)
+                } else if self.failed {
+                    Err(LimitedDecodeFailure::Decode)
                 } else {
                     Ok(core::mem::take(&mut self.output))
                 }
@@ -217,14 +201,6 @@ pub(crate) mod flate {
                     let byte = self.data[self.pos];
                     self.pos += 1;
                     Some(byte)
-                }
-            }
-
-            fn peek_byte(&self) -> Option<u8> {
-                if self.pos >= self.data.len() {
-                    None
-                } else {
-                    Some(self.data[self.pos])
                 }
             }
 
@@ -283,6 +259,7 @@ pub(crate) mod flate {
                     Some(h) => h,
                     None => {
                         warn!("bad block header in flate stream");
+                        self.failed = true;
                         self.eof = true;
                         return;
                     }
@@ -300,6 +277,7 @@ pub(crate) mod flate {
                     2 => self.read_compressed_block(false),
                     _ => {
                         warn!("unknown block type in flate stream");
+                        self.failed = true;
                         self.eof = true;
                     }
                 }
@@ -314,6 +292,7 @@ pub(crate) mod flate {
                     Some(b) => b as u16,
                     None => {
                         warn!("bad block header in flate stream");
+                        self.failed = true;
                         self.eof = true;
                         return;
                     }
@@ -323,6 +302,7 @@ pub(crate) mod flate {
                     Some(b) => b as u16,
                     None => {
                         warn!("bad block header in flate stream");
+                        self.failed = true;
                         self.eof = true;
                         return;
                     }
@@ -334,6 +314,7 @@ pub(crate) mod flate {
                     Some(b) => b as u16,
                     None => {
                         warn!("bad block header in flate stream");
+                        self.failed = true;
                         self.eof = true;
                         return;
                     }
@@ -343,6 +324,7 @@ pub(crate) mod flate {
                     Some(b) => b as u16,
                     None => {
                         warn!("bad block header in flate stream");
+                        self.failed = true;
                         self.eof = true;
                         return;
                     }
@@ -350,22 +332,21 @@ pub(crate) mod flate {
 
                 let check = nlen_low | (nlen_high << 8);
 
-                if check != !block_len && (block_len != 0 || check != 0) {
-                    // Ignoring error for bad "empty" block
+                if check != !block_len {
                     warn!("bad uncompressed block length in flate stream");
+                    self.failed = true;
+                    self.eof = true;
+                    return;
                 }
 
-                if block_len == 0 {
-                    if self.peek_byte().is_none() {
-                        self.eof = true;
-                    }
-                } else {
+                if block_len != 0 {
                     if !self.can_extend_output(block_len as usize) {
                         return;
                     }
                     let block = self.get_bytes(block_len as usize);
                     self.output.extend_from_slice(&block);
                     if block.len() < block_len as usize {
+                        self.failed = true;
                         self.eof = true;
                     }
                 }
@@ -378,6 +359,7 @@ pub(crate) mod flate {
                     match self.read_dynamic_tables() {
                         Some(tables) => tables,
                         None => {
+                            self.failed = true;
                             self.eof = true;
                             return;
                         }
@@ -388,6 +370,7 @@ pub(crate) mod flate {
                     let code1 = match self.get_code(&lit_code_table) {
                         Some(c) => c,
                         None => {
+                            self.failed = true;
                             self.eof = true;
                             return;
                         }
@@ -402,7 +385,11 @@ pub(crate) mod flate {
                         return;
                     } else {
                         let code1 = code1 - 257;
-                        let length_info = LENGTH_DECODE.get(code1 as usize).copied().unwrap_or(0);
+                        let Some(&length_info) = LENGTH_DECODE.get(code1 as usize) else {
+                            self.failed = true;
+                            self.eof = true;
+                            return;
+                        };
                         let extra_bits = (length_info >> 16) as u8;
                         let mut length = (length_info & 0xffff) as usize;
 
@@ -410,6 +397,7 @@ pub(crate) mod flate {
                             if let Some(extra) = self.get_bits(extra_bits) {
                                 length += extra as usize;
                             } else {
+                                self.failed = true;
                                 self.eof = true;
                                 return;
                             }
@@ -418,6 +406,7 @@ pub(crate) mod flate {
                         let dist_code = match self.get_code(&dist_code_table) {
                             Some(c) => c,
                             None => {
+                                self.failed = true;
                                 self.eof = true;
                                 return;
                             }
@@ -428,6 +417,7 @@ pub(crate) mod flate {
                             None => {
                                 warn!("invalid distance code {} in flate stream", dist_code);
 
+                                self.failed = true;
                                 self.eof = true;
                                 return;
                             }
@@ -440,6 +430,7 @@ pub(crate) mod flate {
                             if let Some(extra) = self.get_bits(extra_bits) {
                                 distance += extra as usize;
                             } else {
+                                self.failed = true;
                                 self.eof = true;
                                 return;
                             }
@@ -449,12 +440,14 @@ pub(crate) mod flate {
                         if !self.can_extend_output(length) {
                             return;
                         }
-                        let start = self.output.len().wrapping_sub(distance);
+                        if distance == 0 || distance > self.output.len() {
+                            self.failed = true;
+                            self.eof = true;
+                            return;
+                        }
                         for _ in 0..length {
-                            if start < self.output.len() {
-                                let byte = self.output[self.output.len() - distance];
-                                self.output.push(byte);
-                            }
+                            let byte = self.output[self.output.len() - distance];
+                            self.output.push(byte);
                         }
                     }
                 }

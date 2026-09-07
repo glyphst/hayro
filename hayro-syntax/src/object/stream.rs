@@ -61,16 +61,22 @@ impl<'a> Stream<'a> {
         Self { dict, data }
     }
 
-    fn filters_and_params(&self) -> FiltersAndParams<'a> {
+    fn filters_and_params(&self) -> Result<FiltersAndParams<'a>, DecodeFailure> {
         let mut collected_filters = SmallVec::new();
         let mut collected_params = SmallVec::new();
 
-        if let Some(filter) = self
-            .dict
-            .get::<Name<'_>>(F)
-            .or_else(|| self.dict.get::<Name<'_>>(FILTER))
-            .and_then(Filter::from_name)
-        {
+        let key = if self.dict.contains_key(F) { F } else { FILTER };
+        let filters = if self.dict.contains_key(key) {
+            Some(
+                self.dict
+                    .get::<Object<'_>>(key)
+                    .ok_or(DecodeFailure::InvalidFilter)?,
+            )
+        } else {
+            None
+        };
+        if let Some(Object::Name(name)) = filters {
+            let filter = Filter::from_name(name).ok_or(DecodeFailure::InvalidFilter)?;
             let params = self
                 .dict
                 .get::<Dict<'_>>(DP)
@@ -79,36 +85,36 @@ impl<'a> Stream<'a> {
 
             collected_filters.push(filter);
             collected_params.push(params);
-        } else if let Some(filters) = self
-            .dict
-            .get::<Array<'_>>(F)
-            .or_else(|| self.dict.get::<Array<'_>>(FILTER))
-        {
-            let filters = filters.iter::<Name<'_>>().map(Filter::from_name);
+        } else if let Some(Object::Array(filters)) = filters {
             let mut params = self
                 .dict
                 .get::<Array<'_>>(DP)
                 .or_else(|| self.dict.get::<Array<'_>>(DECODE_PARMS))
                 .map(|a| a.iter::<Object<'_>>());
 
-            for filter in filters {
+            for filter in filters.raw_iter() {
+                let name = filter
+                    .resolve(self.dict.ctx())
+                    .and_then(Object::into_name)
+                    .ok_or(DecodeFailure::InvalidFilter)?;
+                let filter = Filter::from_name(name).ok_or(DecodeFailure::InvalidFilter)?;
                 let params = params
                     .as_mut()
                     .and_then(|p| p.next())
                     .and_then(|p| p.into_dict())
                     .unwrap_or_default();
 
-                if let Some(filter) = filter {
-                    collected_filters.push(filter);
-                    collected_params.push(params);
-                }
+                collected_filters.push(filter);
+                collected_params.push(params);
             }
+        } else if !matches!(filters, None | Some(Object::Null(_))) {
+            return Err(DecodeFailure::InvalidFilter);
         }
 
-        FiltersAndParams {
+        Ok(FiltersAndParams {
             filters: collected_filters,
             params: collected_params,
-        }
+        })
     }
 
     /// Return the raw, decrypted data of the stream.
@@ -150,8 +156,13 @@ impl<'a> Stream<'a> {
     }
 
     /// Return the filters that are applied to the stream.
+    ///
+    /// An invalid filter declaration yields an empty list. Use [`Self::decoded`]
+    /// or [`Self::decoded_image`] to check whether decoding is supported.
     pub fn filters(&self) -> SmallVec<[Filter; 2]> {
-        self.filters_and_params().filters
+        self.filters_and_params()
+            .map(|result| result.filters)
+            .unwrap_or_default()
     }
 
     /// Return the decoded data of the stream.
@@ -236,8 +247,8 @@ impl<'a> Stream<'a> {
         &self,
         image_params: &ImageDecodeParams,
     ) -> Result<FilterResult<'a>, DecodeFailure> {
+        let filters_and_params = self.filters_and_params()?;
         let data = self.raw_data();
-        let filters_and_params = self.filters_and_params();
 
         let mut current: Option<FilterResult<'a>> = None;
 
@@ -323,6 +334,8 @@ impl<'a> Readable<'a> for Stream<'a> {
 #[derive(Debug, Copy, Clone)]
 /// A failure that can occur during decoding a data stream.
 pub enum DecodeFailure {
+    /// A filter name is unknown, malformed, or cannot be resolved.
+    InvalidFilter,
     /// An image stream failed to decode.
     ImageDecode,
     /// A data stream failed to decode.
@@ -474,6 +487,61 @@ mod tests {
     use crate::object::stream::LimitedStreamDecodeFailure;
     use crate::reader::Reader;
     use crate::reader::{ReaderContext, ReaderExt};
+
+    #[test]
+    fn decoding_never_omits_unknown_or_malformed_filters() {
+        for entry in [
+            "/Unknown",
+            "[/Unknown /ASCIIHexDecode]",
+            "[/ASCIIHexDecode /Unknown]",
+            "[/ASCIIHexDecode 42]",
+            "42",
+        ] {
+            let bytes = format!("<< /Length 3 /Filter {entry} >> stream\n41>\nendstream");
+            let stream = Reader::new(bytes.as_bytes())
+                .read_with_context::<Stream<'_>>(&ReaderContext::dummy())
+                .unwrap();
+            assert!(
+                matches!(stream.decoded(), Err(super::DecodeFailure::InvalidFilter)),
+                "{entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_flate_blocks_do_not_return_partial_decoded_content() {
+        for data in [
+            &b"not-a-zlib-stream"[..],
+            &[7][..],                       // Reserved block type.
+            &[1, 2, 0, 253, 255, b'A'][..], // Truncated stored block.
+            &[1, 1, 0, 0, 0, b'A'][..],     // Invalid length complement.
+            &[0, 1, 0, 254, 255, b'A'][..], // No final block.
+            &[0x73, 0x04][..],              // Literal A without a complete end-of-block code.
+        ] {
+            let mut bytes =
+                format!("<< /Length {} /Filter /FlateDecode >> stream\n", data.len()).into_bytes();
+            bytes.extend_from_slice(data);
+            bytes.extend_from_slice(b"\nendstream");
+            let stream = Reader::new(&bytes)
+                .read_with_context::<Stream<'_>>(&ReaderContext::dummy())
+                .unwrap();
+            assert!(stream.decoded().is_err(), "accepted {data:?}");
+        }
+        for (data, expected) in [
+            (&[1, 1, 0, 254, 255, b'A'][..], &b"A"[..]),
+            (&[0x73, 0x04, 0][..], &b"A"[..]),
+            (&[1, 0, 0, 255, 255][..], &b""[..]),
+        ] {
+            let mut bytes =
+                format!("<< /Length {} /Filter /FlateDecode >> stream\n", data.len()).into_bytes();
+            bytes.extend_from_slice(data);
+            bytes.extend_from_slice(b"\nendstream");
+            let stream = Reader::new(&bytes)
+                .read_with_context::<Stream<'_>>(&ReaderContext::dummy())
+                .unwrap();
+            assert_eq!(stream.decoded().unwrap().as_ref(), expected);
+        }
+    }
 
     #[test]
     fn display() {

@@ -7,7 +7,8 @@ use crate::object::Name;
 use crate::object::Rect;
 use crate::object::Stream;
 use crate::object::dict::keys::*;
-use crate::object::{Object, ObjectLike};
+use crate::object::stream::DecodeFailure;
+use crate::object::{MaybeRef, Object, ObjectLike};
 use crate::reader::ReaderContext;
 use crate::sync::OnceLock;
 use crate::transform::Transform;
@@ -17,6 +18,9 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Deref;
+
+#[cfg(test)]
+mod tests;
 
 /// Attributes that can be inherited.
 #[derive(Debug, Clone)]
@@ -164,9 +168,47 @@ pub struct Page<'a> {
     media_box: Rect,
     crop_box: Rect,
     rotation: Rotation,
-    page_streams: OnceLock<Option<Vec<u8>>>,
+    page_streams: OnceLock<Result<Option<Vec<u8>>, PageStreamError>>,
     resources: Resources<'a>,
     ctx: ReaderContext<'a>,
+}
+
+/// A failure that prevents complete page-content interpretation.
+#[derive(Debug, Copy, Clone)]
+pub enum PageStreamError {
+    /// Contents or an array member is not a resolvable stream.
+    InvalidContents,
+    /// A content stream references an unsupported external file.
+    ExternalStream,
+    /// A content stream failed to decode.
+    Decode(DecodeFailure),
+}
+
+fn content_stream(object: Object<'_>) -> Result<Stream<'_>, PageStreamError> {
+    match object {
+        Object::Stream(stream) => Ok(stream),
+        Object::Dict(dict) if dict.contains_key(F) => Err(PageStreamError::ExternalStream),
+        _ => Err(PageStreamError::InvalidContents),
+    }
+}
+
+fn resolve_content_object<'a>(
+    object: MaybeRef<Object<'a>>,
+    ctx: &ReaderContext<'a>,
+) -> Result<Object<'a>, PageStreamError> {
+    let reference = object.as_obj_ref();
+    object.resolve(ctx).ok_or_else(|| {
+        // The stream parser deliberately refuses external streams. Read only
+        // the dictionary after that failure so callers can diagnose the boundary.
+        if reference
+            .and_then(|reference| ctx.xref().get_with::<Dict<'_>>(reference.into(), ctx))
+            .is_some_and(|dict| dict.contains_key(F))
+        {
+            PageStreamError::ExternalStream
+        } else {
+            PageStreamError::InvalidContents
+        }
+    })
 }
 
 impl<'a> Page<'a> {
@@ -227,36 +269,55 @@ impl<'a> Page<'a> {
     }
 
     /// Return the decoded content stream of the page.
+    ///
+    /// Use [`Self::page_stream_checked`] to distinguish absent contents from a
+    /// decoding failure. A failed array member invalidates the entire stream.
     pub fn page_stream(&self) -> Option<&[u8]> {
-        let convert_single = |s: Stream<'_>| {
-            let data = s.decoded().ok()?;
-            Some(data.to_vec())
-        };
+        self.page_stream_checked().ok().flatten()
+    }
 
+    /// Return cached decoded contents, preserving failures before operation iteration.
+    ///
+    /// Every array member must resolve to a decodable stream. No valid prefix or
+    /// suffix is returned if a member fails. Absent or null Contents means an empty page.
+    pub fn page_stream_checked(&self) -> Result<Option<&[u8]>, PageStreamError> {
         self.page_streams
             .get_or_init(|| {
-                if let Some(stream) = self.inner.get::<Stream<'_>>(CONTENTS) {
-                    convert_single(stream)
-                } else if let Some(array) = self.inner.get::<Array<'_>>(CONTENTS) {
-                    let streams = array.iter::<Stream<'_>>().flat_map(convert_single);
-
+                if !self.inner.contains_key(CONTENTS) {
+                    return Ok(None);
+                }
+                let contents = resolve_content_object(
+                    self.inner
+                        .get_raw::<Object<'_>>(CONTENTS)
+                        .ok_or(PageStreamError::InvalidContents)?,
+                    self.inner.ctx(),
+                )?;
+                if let Object::Array(array) = contents {
                     let mut collected = vec![];
-
-                    for stream in streams {
-                        collected.extend(stream);
+                    for member in array.raw_iter() {
+                        let object = resolve_content_object(member, self.inner.ctx())?;
+                        let stream = content_stream(object)?;
+                        let data = stream.decoded().map_err(PageStreamError::Decode)?;
+                        collected.extend_from_slice(&data);
                         // Streams must have at least one whitespace in-between.
                         collected.push(b' ');
                     }
-
-                    Some(collected)
+                    Ok(Some(collected))
+                } else if matches!(contents, Object::Null(_)) {
+                    Ok(None)
                 } else {
-                    warn!("contents entry of page was neither stream nor array of streams");
-
-                    None
+                    let stream = content_stream(contents)?;
+                    Ok(Some(
+                        stream
+                            .decoded()
+                            .map_err(PageStreamError::Decode)?
+                            .into_owned(),
+                    ))
                 }
             })
             .as_ref()
-            .map(|d| d.as_slice())
+            .map(|data| data.as_deref())
+            .map_err(|error| *error)
     }
 
     /// Get the resources of the page.

@@ -176,11 +176,6 @@ fn mapping_uses_finite_wide_intermediates_reversal_and_final_range_clipping() {
             0.5,
             0.0,
         ),
-        (
-            "/Domain [0 1] /Range [-1 1] /Decode [-300000000000000000000000000000000000000 300000000000000000000000000000000000000]",
-            0.5,
-            0.0,
-        ),
     ] {
         let function = parse(&format!("{entries} /Size [2] /BitsPerSample 8"), &[0, 255]).unwrap();
         assert_eq!(
@@ -253,4 +248,46 @@ fn malformed_shapes_types_and_resource_limits_fail_before_table_decoding() {
         "2 ".repeat(16)
     );
     assert!(parse(&entries, &vec![0; MAX_CONTRIBUTIONS / 8]).is_some());
+}
+
+#[test]
+fn opposing_large_bounds_preserve_small_offsets_and_refuse_unproved_amplification() {
+    let large = "300000000000000000000000000000000000000";
+    for (encode, input, expected) in [
+        (format!("-{large} {large}"), 0.25, 0.25),
+        (format!("-{large} {large}"), 0.75, 0.75),
+        (format!("{large} -{large}"), -0.25, 0.25),
+    ] {
+        let function = parse(&format!("/Domain [-{large} {large}] /Range [0 1] /Encode [{encode}] /Size [2] /BitsPerSample 8"), &[0,255]).unwrap();
+        assert_eq!(function.eval(smallvec![input]).unwrap()[0], expected);
+    }
+    for exponent in [20, 60, 127] {
+        let extent = 2.0_f32.powi(exponent);
+        let function = parse(&format!("/Domain [-{extent} {extent}] /Encode [-{extent} {extent}] /Range [0 1] /Size [2] /BitsPerSample 8"), &[0,255]).unwrap();
+        for input in [
+            f32::from_bits(1),
+            f32::MIN_POSITIVE,
+            2.0_f32.powi(-24),
+            0.25,
+            0.75,
+            1.0_f32.next_down(),
+        ] {
+            assert_eq!(
+                function.eval(smallvec![input]).unwrap()[0],
+                input,
+                "identity {extent}/{input}"
+            );
+        }
+    }
+    let moderate = parse(
+        "/Domain [-1 1] /Range [0 1] /Decode [-10000000 10000000] /Size [2] /BitsPerSample 8",
+        &[0, 255],
+    )
+    .unwrap();
+    assert!((moderate.eval(smallvec![0.00000001]).unwrap()[0] - 0.1).abs() < 1.0e-6);
+    let constant = parse("/Domain [-1 1] /Range [0 1] /Decode [100000000000000000000 100000000000000000000] /Size [2] /BitsPerSample 8", &[0,255]).unwrap();
+    assert_eq!(constant.eval(smallvec![0.0]).unwrap()[0], 1.0);
+    // An ordinary sample coordinate can lose a tiny offset before a huge Decode
+    // magnifies it into visible color. Such amplification needs explicit fallback.
+    assert!(parse("/Domain [-1 1] /Range [0 1] /Decode [-100000000000000000000 100000000000000000000] /Size [2] /BitsPerSample 8", &[0,255]).is_none());
 }

@@ -95,6 +95,27 @@ impl Type0 {
         if encode.len() != domain.len() || decode.len() != range.len() {
             return None;
         }
+        // Bound binary64 interpolation error before the final binary32 output
+        // rounding. Each cubic axis has L1 weight norm below 2. The factor 32
+        // covers input division, basis arithmetic, accumulation and decoding;
+        // checked contribution counts keep the usual n*epsilon bound small.
+        // Large Decode amplification can reveal offsets lost when a sample
+        // coordinate is rounded, even when every intermediate remains finite.
+        let cubic_axes = sizes
+            .iter()
+            .filter(|&&size| order == 3 && size >= 4)
+            .count();
+        let numerical_scale = 32.0
+            * f64::EPSILON
+            * (sizes.iter().sum::<usize>() + contributions) as f64
+            * (1_u64 << cubic_axes) as f64;
+        if decode.iter().any(|&(low, high)| {
+            low != high
+                && numerical_scale * (f64::from(low).abs() + f64::from(high).abs()).max(1.0)
+                    > 1.0e-6
+        }) {
+            return None;
+        }
         let decoded = stream.decoded().ok()?;
         let bytes = entries.checked_mul(bits as usize)?.div_ceil(8);
         if decoded.len() < bytes {
@@ -133,11 +154,14 @@ impl Type0 {
             }
             let (low, high) = self.clamper.domain[index];
             let (start, end) = self.encode[index];
-            // Binary64 avoids overflow/cancellation in finite binary32 dictionary
-            // bounds and preserves all 32 sample bits until the final output cast.
-            let fraction = (f64::from(value.clamp(low, high)) - f64::from(low))
-                / (f64::from(high) - f64::from(low));
-            let key = (f64::from(start) + fraction * (f64::from(end) - f64::from(start)))
+            // All four products are exact in binary64 because their operands
+            // are binary32. Compensated summation preserves small inputs when
+            // large opposing Domain/Encode bounds cancel (including identity).
+            let x = f64::from(value.clamp(low, high));
+            let (low, high) = (f64::from(low), f64::from(high));
+            let (start, end) = (f64::from(start), f64::from(end));
+            let key = (sum_products([start * high, -start * x, end * x, -end * low])
+                / (high - low))
                 .clamp(0.0, (self.sizes[index] - 1) as f64);
             axes.push(Axis::new(key, self.sizes[index], self.cubic));
         }
@@ -247,4 +271,29 @@ fn pairs(dict: &Dict<'_>, key: &[u8]) -> Option<TupleVec> {
             (start.is_finite() && end.is_finite()).then_some((start, end))
         })
         .collect()
+}
+
+// Grow a nonoverlapping expansion with error-free TwoSum operations. Four
+// binary32 products fit in four binary64 components and cannot overflow or
+// underflow binary64, so cancellation does not discard the smaller products.
+fn sum_products(terms: [f64; 4]) -> f64 {
+    let mut parts = [0.0; 4];
+    let mut len = 0;
+    for mut value in terms {
+        let mut next = 0;
+        for index in 0..len {
+            let term = parts[index];
+            let sum = value + term;
+            let virtual_term = sum - value;
+            let error = (value - (sum - virtual_term)) + (term - virtual_term);
+            if error != 0.0 {
+                parts[next] = error;
+                next += 1;
+            }
+            value = sum;
+        }
+        parts[next] = value;
+        len = next + 1;
+    }
+    parts[..len].iter().sum()
 }

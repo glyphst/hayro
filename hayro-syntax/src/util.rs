@@ -1,7 +1,6 @@
 use crate::sync::OnceLock;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::ops::Sub;
 use smallvec::{Array, SmallVec};
 
 pub(crate) trait OptionLog {
@@ -15,27 +14,6 @@ impl<T> OptionLog for Option<T> {
 
             None
         })
-    }
-}
-
-const SCALAR_NEARLY_ZERO: f32 = 1.0 / (1 << 12) as f32;
-
-/// A number of useful methods for f32 numbers.
-pub(crate) trait FloatExt: Sized + Sub<f32, Output = f32> + Copy {
-    /// Whether the number is approximately 0.
-    fn is_nearly_zero(&self) -> bool {
-        self.is_nearly_zero_within_tolerance(SCALAR_NEARLY_ZERO)
-    }
-
-    /// Whether the number is approximately 0, with a given tolerance.
-    fn is_nearly_zero_within_tolerance(&self, tolerance: f32) -> bool;
-}
-
-impl FloatExt for f32 {
-    fn is_nearly_zero_within_tolerance(&self, tolerance: f32) -> bool {
-        debug_assert!(tolerance >= 0.0, "tolerance must be non-negative");
-
-        self.abs() <= tolerance
     }
 }
 

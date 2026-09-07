@@ -12,7 +12,6 @@ use crate::object::{MaybeRef, Null, Number, ObjRef, Object, ObjectLike};
 use crate::reader::{Readable, Reader, ReaderContext, ReaderExt, Skippable};
 use crate::sync::OnceLock;
 use crate::transform::Transform;
-use crate::util::FloatExt;
 use crate::xref::XRef;
 use alloc::boxed::Box;
 use alloc::vec;
@@ -326,9 +325,9 @@ impl<'a> Page<'a> {
             ctx,
         };
         if let Ok(unit) = page.user_unit {
-            let (width, height) = page.base_dimensions();
+            let (width, height) = page.base_dimensions_f64();
             if [width, height].into_iter().any(|dimension| {
-                let scaled = (f64::from(dimension) * unit) as f32;
+                let scaled = (dimension * unit) as f32;
                 !scaled.is_finite() || scaled <= 0.0
             }) {
                 page.user_unit = Err(UserUnitError::GeometryRange);
@@ -435,16 +434,16 @@ impl<'a> Page<'a> {
     /// Return the base dimensions of the page (same as `intersected_crop_box`, but with special
     /// handling applied for zero-area pages).
     pub fn base_dimensions(&self) -> (f32, f32) {
-        let crop_box = self.intersected_crop_box();
+        let (width, height) = self.base_dimensions_f64();
+        (width as f32, height as f32)
+    }
 
-        if (crop_box.width() as f32).is_nearly_zero() || (crop_box.height() as f32).is_nearly_zero()
-        {
-            (A4.width() as f32, A4.height() as f32)
+    fn base_dimensions_f64(&self) -> (f64, f64) {
+        let crop_box = self.intersected_crop_box();
+        if crop_box.width() <= 0.0 || crop_box.height() <= 0.0 {
+            (A4.width(), A4.height())
         } else {
-            (
-                crop_box.width().max(1.0) as f32,
-                crop_box.height().max(1.0) as f32,
-            )
+            (crop_box.width(), crop_box.height())
         }
     }
 
@@ -453,16 +452,20 @@ impl<'a> Page<'a> {
     /// Depending on the document, it is either based on the media box or the crop box
     /// of the page. Rotation and the supported `UserUnit` scale are applied.
     pub fn render_dimensions(&self) -> (f32, f32) {
-        let (width, height) = self.unscaled_render_dimensions();
-        let unit = self.user_unit.unwrap_or(1.0);
-        (
-            (f64::from(width) * unit) as f32,
-            (f64::from(height) * unit) as f32,
-        )
+        let (width, height) = self.render_dimensions_f64();
+        (width as f32, height as f32)
     }
 
-    fn unscaled_render_dimensions(&self) -> (f32, f32) {
-        let (mut base_width, mut base_height) = self.base_dimensions();
+    /// Physical rendering dimensions without an intermediate f32 conversion.
+    /// Small positive source boxes are scaled before any pixel-size rounding.
+    pub fn render_dimensions_f64(&self) -> (f64, f64) {
+        let (width, height) = self.unscaled_render_dimensions();
+        let unit = self.user_unit.unwrap_or(1.0);
+        (width * unit, height * unit)
+    }
+
+    fn unscaled_render_dimensions(&self) -> (f64, f64) {
+        let (mut base_width, mut base_height) = self.base_dimensions_f64();
 
         if matches!(
             self.rotation(),
@@ -502,12 +505,11 @@ impl<'a> Page<'a> {
     /// `UserUnit`. Raw page boxes and base dimensions remain in source user units.
     pub fn initial_transform(&self, invert_y: bool) -> Transform {
         let crop_box = self.intersected_crop_box();
-        let (_, base_height) = self.base_dimensions();
+        let (_, base_height) = self.base_dimensions_f64();
         let (width, height) = self.unscaled_render_dimensions();
 
-        let horizontal_t = Transform::ROTATE_CW_90 * Transform::translate((0.0, -width as f64));
-        let flipped_horizontal_t =
-            Transform::translate((0.0, height as f64)) * Transform::ROTATE_CCW_90;
+        let horizontal_t = Transform::ROTATE_CW_90 * Transform::translate((0.0, -width));
+        let flipped_horizontal_t = Transform::translate((0.0, height)) * Transform::ROTATE_CCW_90;
 
         let rotation_transform = match self.rotation() {
             Rotation::None => Transform::IDENTITY,
@@ -518,9 +520,7 @@ impl<'a> Page<'a> {
                     flipped_horizontal_t
                 }
             }
-            Rotation::Flipped => {
-                Transform::scale(-1.0) * Transform::translate((-width as f64, -height as f64))
-            }
+            Rotation::Flipped => Transform::scale(-1.0) * Transform::translate((-width, -height)),
             Rotation::FlippedHorizontal => {
                 if invert_y {
                     flipped_horizontal_t
@@ -531,7 +531,7 @@ impl<'a> Page<'a> {
         };
 
         let inversion_transform = if invert_y {
-            Transform::new([1.0, 0.0, 0.0, -1.0, 0.0, base_height as f64])
+            Transform::new([1.0, 0.0, 0.0, -1.0, 0.0, base_height])
         } else {
             Transform::IDENTITY
         };

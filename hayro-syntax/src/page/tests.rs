@@ -153,6 +153,21 @@ fn user_unit_defaults_and_supported_boundaries_are_explicit() {
 }
 
 #[test]
+fn small_source_boxes_are_scaled_before_pixel_dimension_rounding() {
+    for (width, height, unit) in [(0.25, 0.5, 400.0), (0.00000001, 0.00000002, 75000.0)] {
+        let pdf = pdf(
+            &format!("/MediaBox [0 0 {width} {height}] /UserUnit {unit}"),
+            b"null",
+        );
+        let page = &pdf.pages()[0];
+        assert_eq!(
+            page.render_dimensions(),
+            ((width * unit) as f32, (height * unit) as f32)
+        );
+    }
+}
+
+#[test]
 fn failed_members_invalidate_the_cached_page_stream() {
     for contents in [
         "/Contents 5 0 R",

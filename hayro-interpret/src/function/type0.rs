@@ -42,9 +42,7 @@ impl Type0 {
         }
         let domain = pairs(dict, b"Domain")?;
         let range = pairs(dict, b"Range")?;
-        // A zero-width domain has no defined encoding denominator. Constant
-        // dimensions instead use Size 1 with an ordinary, nonempty domain.
-        if domain.iter().any(|&(a, b)| a >= b) || range.iter().any(|&(a, b)| a > b) {
+        if domain.iter().any(|&(a, b)| a > b) || range.iter().any(|&(a, b)| a > b) {
             return None;
         }
         let sizes = objects(dict, b"Size", MAX_COMPONENTS)?
@@ -56,6 +54,15 @@ impl Type0 {
             })
             .collect::<Option<SmallVec<[_; 4]>>>()?;
         if sizes.len() != domain.len() {
+            return None;
+        }
+        // Equal Domain endpoints are legal, but their encoding denominator is
+        // undefined unless Size 1 supplies the mandated constant table index.
+        if sizes
+            .iter()
+            .zip(&domain)
+            .any(|(&size, &(low, high))| size != 1 && low == high)
+        {
             return None;
         }
         let mut entries = range.len();
@@ -120,6 +127,10 @@ impl Type0 {
         }
         let mut axes = SmallVec::<[Axis; 4]>::new();
         for (index, value) in input.into_iter().enumerate() {
+            if self.sizes[index] == 1 {
+                axes.push(Axis::new(0.0, 1, self.cubic));
+                continue;
+            }
             let (low, high) = self.clamper.domain[index];
             let (start, end) = self.encode[index];
             // Binary64 avoids overflow/cancellation in finite binary32 dictionary

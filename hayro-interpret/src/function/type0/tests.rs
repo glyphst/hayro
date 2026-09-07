@@ -73,6 +73,12 @@ fn cubic_values_and_boundaries_match_independent_hermite_controls() {
             "{input}"
         );
     }
+    let constant = parse(
+        "/Domain [0 0] /Range [0 1] /Size [1] /BitsPerSample 8 /Order 3",
+        &[255],
+    )
+    .unwrap();
+    assert_eq!(constant.eval(smallvec![99.0]).unwrap()[0], 1.0);
     let unclipped = parse(
         "/Domain [0 3] /Range [-1 2] /Decode [0 1] /Size [4] /BitsPerSample 8 /Order 3",
         &[0, 255, 0, 0],

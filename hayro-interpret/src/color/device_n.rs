@@ -1,5 +1,4 @@
 use super::{ColorSpace, ToRgb, U8Lookup};
-use crate::cache::Cache;
 use crate::function::Function;
 use hayro_syntax::object::{Array, Name, Object};
 
@@ -13,7 +12,10 @@ pub(crate) struct DeviceN {
 }
 
 impl DeviceN {
-    pub(super) fn new(array: &Array<'_>, cache: &Cache) -> Option<Self> {
+    pub(super) fn new<'a>(
+        array: &Array<'a>,
+        resolve: &mut dyn FnMut(Object<'a>) -> Option<ColorSpace>,
+    ) -> Option<Self> {
         let mut iter = array.flex_iter();
         // Skip `/DeviceN`
         let _ = iter.next::<Name<'_>>()?;
@@ -24,7 +26,7 @@ impl DeviceN {
             .collect::<Vec<_>>();
         let num_components = u8::try_from(names.len()).ok()?;
         let all_none = names.iter().all(|n| n.as_str() == "None");
-        let alternate_space = ColorSpace::new(iter.next::<Object<'_>>()?, cache)?;
+        let alternate_space = resolve(iter.next::<Object<'_>>()?)?;
         let tint_transform = Function::new(&iter.next::<Object<'_>>()?)?;
 
         if num_components == 0 {

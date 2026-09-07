@@ -7,6 +7,7 @@ mod device_gray;
 mod device_n;
 mod device_rgb;
 mod icc;
+mod image;
 mod indexed;
 mod lab;
 mod pattern;
@@ -29,6 +30,7 @@ use hayro_syntax::object::Name;
 use hayro_syntax::object::Object;
 use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
+pub use image::ImageColorSpaceError;
 use smallvec::{SmallVec, smallvec};
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
@@ -190,14 +192,23 @@ pub(crate) enum ColorSpaceType {
 
 impl ColorSpaceType {
     fn new(object: Object<'_>, cache: &Cache) -> Option<Self> {
-        Self::new_inner(object, cache, false)
+        Self::new_inner(object, cache, false, &mut |object| {
+            ColorSpace::new(object, cache)
+        })
     }
 
     fn new_preserving_icc(object: Object<'_>, cache: &Cache) -> Option<Self> {
-        Self::new_inner(object, cache, true)
+        Self::new_inner(object, cache, true, &mut |object| {
+            ColorSpace::new_preserving_icc(object, cache)
+        })
     }
 
-    fn new_inner(object: Object<'_>, cache: &Cache, preserve_icc: bool) -> Option<Self> {
+    fn new_inner<'a>(
+        object: Object<'a>,
+        cache: &Cache,
+        preserve_icc: bool,
+        resolve: &mut dyn FnMut(Object<'a>) -> Option<ColorSpace>,
+    ) -> Option<Self> {
         if let Object::Name(name) = object {
             return Self::new_from_name(&name);
         } else if let Object::Array(color_array) = object {
@@ -211,34 +222,34 @@ impl ColorSpaceType {
                     let num_components = dict.get::<usize>(N)?;
 
                     let profile_cache_key = (icc_stream.clone(), preserve_icc).cache_key();
-                    return cache.get_or_insert_with(profile_cache_key, || {
-                        if let Some(decoded) = icc_stream.decoded().ok().as_ref() {
-                            ICCProfile::new(decoded, num_components)
-                                .map(|icc| {
-                                    // TODO: For SVG and PNG we can assume that the output color space is
-                                    // sRGB. If we ever implement PDF-to-PDF, we probably want to
-                                    // let the user pass the native color type and don't make this optimization
-                                    // if it's not sRGB.
-                                    if icc.is_srgb() && !preserve_icc {
-                                        Self::DeviceRgb(DeviceRgb)
-                                    } else {
-                                        Self::ICCBased(icc)
-                                    }
-                                })
-                                .or_else(|| {
-                                    dict.get::<Object<'_>>(ALTERNATE)
-                                        .and_then(|o| Self::new(o, cache))
-                                })
-                                .or_else(|| match dict.get::<u8>(N) {
-                                    Some(1) => Some(Self::DeviceGray(DeviceGray)),
-                                    Some(3) => Some(Self::DeviceRgb(DeviceRgb)),
-                                    Some(4) => Some(Self::DeviceCmyk(DeviceCmyk)),
-                                    _ => None,
-                                })
-                        } else {
-                            None
-                        }
-                    });
+                    let profile = cache.get_or_insert_with(profile_cache_key, || {
+                        let decoded = icc_stream.decoded().ok()?;
+                        Some(ICCProfile::new(&decoded, num_components).map(|icc| {
+                            // TODO: For SVG and PNG we can assume that the output color space is
+                            // sRGB. If we ever implement PDF-to-PDF, we probably want to
+                            // let the user pass the native color type and don't make this optimization
+                            // if it's not sRGB.
+                            if icc.is_srgb() && !preserve_icc {
+                                Self::DeviceRgb(DeviceRgb)
+                            } else {
+                                Self::ICCBased(icc)
+                            }
+                        }))
+                    })?;
+                    // Only the profile itself is independent of resource scope.
+                    // Resolve a selected Alternate outside the shared cache.
+                    return profile
+                        .or_else(|| {
+                            dict.get::<Object<'_>>(ALTERNATE)
+                                .and_then(&mut *resolve)
+                                .map(|space| space.0.as_ref().clone())
+                        })
+                        .or_else(|| match dict.get::<u8>(N) {
+                            Some(1) => Some(Self::DeviceGray(DeviceGray)),
+                            Some(3) => Some(Self::DeviceRgb(DeviceRgb)),
+                            Some(4) => Some(Self::DeviceCmyk(DeviceCmyk)),
+                            _ => None,
+                        });
                 }
                 CALCMYK => return Some(Self::DeviceCmyk(DeviceCmyk)),
                 CALGRAY => {
@@ -257,13 +268,13 @@ impl ColorSpaceType {
                     return Some(Self::Lab(Lab::new(&lab_dict)?));
                 }
                 INDEXED | I => {
-                    return Some(Self::Indexed(Indexed::new(&color_array, cache)?));
+                    return Some(Self::Indexed(Indexed::new(&color_array, resolve)?));
                 }
                 SEPARATION => {
-                    return Some(Self::Separation(Separation::new(&color_array, cache)?));
+                    return Some(Self::Separation(Separation::new(&color_array, resolve)?));
                 }
                 DEVICE_N => {
-                    return Some(Self::DeviceN(DeviceN::new(&color_array, cache)?));
+                    return Some(Self::DeviceN(DeviceN::new(&color_array, resolve)?));
                 }
                 PATTERN => {
                     let _ = iter.next::<Name<'_>>();

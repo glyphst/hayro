@@ -1,5 +1,4 @@
 use super::{ColorSpace, ToRgb, U8Lookup};
-use crate::cache::Cache;
 use crate::function::Function;
 use hayro_syntax::object::{Array, Name, Object};
 use smallvec::smallvec;
@@ -13,12 +12,15 @@ pub(crate) struct Separation {
 }
 
 impl Separation {
-    pub(super) fn new(array: &Array<'_>, cache: &Cache) -> Option<Self> {
+    pub(super) fn new<'a>(
+        array: &Array<'a>,
+        resolve: &mut dyn FnMut(Object<'a>) -> Option<ColorSpace>,
+    ) -> Option<Self> {
         let mut iter = array.flex_iter();
         // Skip `/Separation`
         let _ = iter.next::<Name<'_>>()?;
         let name = iter.next::<Name<'_>>()?;
-        let alternate_space = ColorSpace::new(iter.next::<Object<'_>>()?, cache)?;
+        let alternate_space = resolve(iter.next::<Object<'_>>()?)?;
         let tint_transform = Function::new(&iter.next::<Object<'_>>()?)?;
         // Either I did something wrong, or no other viewers properly handles
         // `All`, so let's just ignore it as well.

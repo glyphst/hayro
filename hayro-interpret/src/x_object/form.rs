@@ -542,7 +542,7 @@ mod tests {
             .expect("decode pdf.js JPX alpha fixture")
     }
 
-    fn explicit_srgb_icc_image_pdf() -> Vec<u8> {
+    fn explicit_srgb_icc_image_pdf(indexed: bool) -> Vec<u8> {
         let source =
             include_bytes!("../../../hayro-tests/pdfs/custom/xobject_with_fill_opacity.pdf");
         let source = Pdf::new(source.to_vec()).expect("parse ICC source fixture");
@@ -562,17 +562,22 @@ mod tests {
             .decoded()
             .expect("decode ICC profile");
         let page_stream = b"q 10 0 0 10 0 0 cm /Im0 Do Q";
-        let image_data = "4080C0>";
+        let image_data = if indexed { "00>" } else { "4080C0>" };
+        let selection = if indexed {
+            "[/Indexed [/ICCBased 6 0 R] 0 <4080C0>]"
+        } else {
+            "/Icc"
+        };
         let mut pdf = format!(
             "%PDF-1.7\n\
              1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
              2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
              3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<<\
-               /ColorSpace<</DefaultRGB/DeviceRGB/Icc[/ICCBased 6 0 R]>>\
+               /ColorSpace<</DefaultRGB/DeviceGray/Icc[/ICCBased 6 0 R]>>\
                /XObject<</Im0 5 0 R>>>>/Contents 4 0 R>> endobj\n\
              4 0 obj <</Length {}>> stream\n{}\nendstream endobj\n\
              5 0 obj <</Type/XObject/Subtype/Image/Width 1/Height 1/BitsPerComponent 8\
-               /ColorSpace/Icc/Filter/ASCIIHexDecode/Length {}>> stream\n{}\nendstream endobj\n\
+               /ColorSpace {selection}/Filter/ASCIIHexDecode/Length {}>> stream\n{}\nendstream endobj\n\
              6 0 obj <</N 3/Length {}>> stream\n",
             page_stream.len(),
             String::from_utf8_lossy(page_stream),
@@ -901,19 +906,26 @@ mod tests {
 
     #[test]
     fn explicit_srgb_icc_image_is_not_mistaken_for_device_rgb() {
-        let device = interpret_bytes(explicit_srgb_icc_image_pdf(), false);
-        assert_eq!(device.raster_images.len(), 1);
-        let properties = device.raster_images[0].0;
-        assert_eq!(
-            properties.declared_color_space_kind(),
-            Some(ColorSpaceKind::IccBased)
-        );
-        assert_eq!(
-            properties.color_space_kind(),
-            Some(ColorSpaceKind::IccBased)
-        );
-        assert_eq!(properties.color_space_components(), Some(3));
-        assert!(!properties.color_space_is_default_overridden());
+        let mut pixels = Vec::new();
+        for indexed in [false, true] {
+            let device = interpret_bytes(explicit_srgb_icc_image_pdf(indexed), false);
+            assert_eq!(device.raster_images.len(), 1);
+            let properties = device.raster_images[0].0;
+            let kind = if indexed {
+                ColorSpaceKind::Indexed
+            } else {
+                ColorSpaceKind::IccBased
+            };
+            assert_eq!(properties.declared_color_space_kind(), Some(kind));
+            assert_eq!(properties.color_space_kind(), Some(kind));
+            assert_eq!(
+                properties.color_space_components(),
+                Some(if indexed { 1 } else { 3 })
+            );
+            assert!(!properties.color_space_is_default_overridden());
+            pixels.push(device.raster_images[0].1.clone());
+        }
+        assert_eq!(pixels[0], pixels[1]);
     }
 
     #[test]

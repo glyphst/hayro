@@ -183,7 +183,8 @@ impl ImageColorSpaceProperties {
         self.color_space_components
     }
 
-    /// Whether a default device-space resource replaces the declared space.
+    /// Whether a default device-space resource replaces the declared space or
+    /// an underlying Indexed base or selected Separation/DeviceN alternative.
     pub fn color_space_is_default_overridden(self) -> bool {
         self.color_space_default_overridden
     }

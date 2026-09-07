@@ -15,6 +15,7 @@ use crate::{
 };
 use hayro_syntax::object::dict::keys::*;
 use hayro_syntax::object::{Array, Dict, Name, Object, Stream};
+use hayro_syntax::page::Resources;
 use kurbo::Affine;
 
 #[derive(Clone)]
@@ -47,14 +48,14 @@ impl ImageKind {
 impl<'a> ImageXObject<'a> {
     pub(crate) fn new(
         stream: &Stream<'a>,
-        resolve_cs: impl FnMut(&Name<'_>) -> Option<Object<'a>>,
+        resources: &Resources<'a>,
         warning_sink: &WarningSinkFn,
         cache: &Cache,
         transfer_function: Option<ActiveTransferFunction>,
     ) -> Option<Self> {
         Self::new_inner(
             stream,
-            resolve_cs,
+            Some(resources),
             warning_sink,
             cache,
             ImageKind::Image,
@@ -67,12 +68,12 @@ impl<'a> ImageXObject<'a> {
         warning_sink: &WarningSinkFn,
         cache: &Cache,
     ) -> Option<Self> {
-        Self::new_inner(stream, |_| None, warning_sink, cache, ImageKind::Mask, None)
+        Self::new_inner(stream, None, warning_sink, cache, ImageKind::Mask, None)
     }
 
     fn new_inner(
         stream: &Stream<'a>,
-        mut resolve_cs: impl FnMut(&Name<'_>) -> Option<Object<'a>>,
+        resources: Option<&Resources<'a>>,
         warning_sink: &WarningSinkFn,
         cache: &Cache,
         mut kind: ImageKind,
@@ -99,38 +100,31 @@ impl<'a> ImageXObject<'a> {
             let cs_obj = dict
                 .get::<Object<'_>>(CS)
                 .or_else(|| dict.get::<Object<'_>>(COLORSPACE));
-            let declared_name = cs_obj.clone().and_then(Object::into_name);
-            let declared = cs_obj
-                .clone()
-                .and_then(|object| ColorSpace::new_preserving_icc(object, cache))
-                .or_else(|| {
-                    declared_name
-                        .as_ref()
-                        .and_then(&mut resolve_cs)
-                        .and_then(|object| ColorSpace::new_preserving_icc(object, cache))
-                });
-            let declared_kind = declared.as_ref().map(ColorSpace::kind);
-            let default_name = declared_kind.and_then(default_device_resource_name);
-            let (effective, default_overridden) = if let Some(default_name) = default_name {
-                let default_name = Name::new_unescaped(default_name);
-                if let Some(default) = resolve_cs(&default_name)
-                    .and_then(|object| ColorSpace::new_preserving_icc(object, cache))
-                {
-                    (Some(default), true)
-                } else {
-                    (declared, false)
-                }
+            if cs_obj.is_none() && (dict.contains_key(CS) || dict.contains_key(COLORSPACE)) {
+                (warning_sink)(crate::InterpreterWarning::ImageColorSpace(
+                    crate::color::ImageColorSpaceError::Invalid,
+                ));
+                return None;
+            }
+            if let Some(object) = cs_obj {
+                let (space, properties) = ColorSpace::new_image(object, cache, resources?)
+                    .map_err(|error| {
+                        (warning_sink)(crate::InterpreterWarning::ImageColorSpace(error));
+                    })
+                    .ok()?;
+                (Some(space), properties)
             } else {
-                (declared, false)
-            };
-            let properties = ImageColorSpaceProperties {
-                has_color_space: cs_obj.is_some(),
-                declared_color_space_kind: declared_kind,
-                color_space_kind: effective.as_ref().map(ColorSpace::kind),
-                color_space_components: effective.as_ref().map(ColorSpace::component_count),
-                color_space_default_overridden: default_overridden,
-            };
-            (effective, properties)
+                (
+                    None,
+                    ImageColorSpaceProperties {
+                        has_color_space: false,
+                        declared_color_space_kind: None,
+                        color_space_kind: None,
+                        color_space_components: None,
+                        color_space_default_overridden: false,
+                    },
+                )
+            }
         };
 
         let interpolate = dict
@@ -281,15 +275,6 @@ impl<'a> ImageXObject<'a> {
         let dict = self.stream.dict();
 
         embedded_alpha_mode(dict).is_some() || dict.contains_key(SMASK) || dict.contains_key(MASK)
-    }
-}
-
-fn default_device_resource_name(kind: crate::color::ColorSpaceKind) -> Option<&'static [u8]> {
-    match kind {
-        crate::color::ColorSpaceKind::DeviceGray => Some(DEFAULT_GRAY),
-        crate::color::ColorSpaceKind::DeviceRgb => Some(DEFAULT_RGB),
-        crate::color::ColorSpaceKind::DeviceCmyk => Some(DEFAULT_CMYK),
-        _ => None,
     }
 }
 

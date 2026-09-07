@@ -396,6 +396,8 @@ pub enum InterpreterWarning {
     UnsupportedFont,
     /// An image failed to decode.
     ImageDecodeFailure,
+    /// An image color-space declaration or selected default could not be resolved.
+    ImageColorSpace(crate::color::ImageColorSpaceError),
     /// An optional-content membership dictionary could not be converted into
     /// an owned visibility expression.
     OptionalContentExpressionFailure,
@@ -1061,7 +1063,7 @@ pub fn interpret<'a>(
                 if let Some(x_object) = resources.get_x_object(x.0).and_then(|s| {
                     XObject::new(
                         &s,
-                        |name| resources.get_color_space(name),
+                        resources,
                         &warning_sink,
                         &cache,
                         transfer_function.clone(),
@@ -1074,13 +1076,9 @@ pub fn interpret<'a>(
                 let warning_sink = context.settings.warning_sink.clone();
                 let transfer_function = context.get().graphics_state.transfer_function.clone();
                 let cache = context.interpreter_cache.object_cache.clone();
-                if let Some(x_object) = ImageXObject::new(
-                    i.0,
-                    |name| resources.get_color_space(name),
-                    &warning_sink,
-                    &cache,
-                    transfer_function,
-                ) {
+                if let Some(x_object) =
+                    ImageXObject::new(i.0, resources, &warning_sink, &cache, transfer_function)
+                {
                     x_object.draw(context, device);
                 }
             }

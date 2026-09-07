@@ -12,6 +12,17 @@ pub(crate) struct Indexed {
 }
 
 impl Indexed {
+    pub(super) fn with_intent(
+        &self,
+        intent: super::RenderingIntent,
+    ) -> Result<Self, super::ColorConversionError> {
+        let mut result = self.clone();
+        result.base = Box::new(self.base.with_rendering_intent(intent)?);
+        result.lookup = U8Lookup::default();
+        result.luma_lookup = U8Lookup::default();
+        Ok(result)
+    }
+
     pub(super) fn new<'a>(
         array: &Array<'a>,
         resolve: &mut dyn FnMut(Object<'a>) -> Option<ColorSpace>,

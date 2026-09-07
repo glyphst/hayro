@@ -400,6 +400,10 @@ pub enum InterpreterWarning {
     ImageColorSpace(crate::color::ImageColorSpaceError),
     /// A selected paint or shading color space could not be resolved exactly.
     ColorSpaceFailure,
+    /// An unknown intent name was replaced with the PDF relative default.
+    RenderingIntentUnknown,
+    /// An explicit color conversion could not be represented exactly.
+    ColorConversion(crate::color::ColorConversionError),
     /// An optional-content membership dictionary could not be converted into
     /// an owned visibility expression.
     OptionalContentExpressionFailure,
@@ -811,8 +815,12 @@ pub fn interpret<'a>(
                         .map(|n| if n == 0.0 { 0.01 } else { n })
                         .collect();
             }
-            TypedInstruction::RenderingIntent(_) => {
-                // Ignore for now.
+            TypedInstruction::RenderingIntent(value) => {
+                let (intent, unknown) = crate::color::RenderingIntent::from_name(value.0);
+                context.get_mut().graphics_state.rendering_intent = intent;
+                if unknown {
+                    (context.settings.warning_sink)(InterpreterWarning::RenderingIntentUnknown);
+                }
             }
             TypedInstruction::NonStrokeColorNamed(n) => {
                 context.get_mut().graphics_state.non_stroke_color =
@@ -1139,6 +1147,11 @@ pub fn interpret<'a>(
                 context.get_mut().text_state.char_space = t.1.as_f32();
                 text::next_line(context, 0.0, -context.get().text_state.leading as f64);
                 text::show_text_string(context, device, resources, t.2);
+            }
+            TypedInstruction::Fallback(operator) if &**operator == b"ri" => {
+                (context.settings.warning_sink)(InterpreterWarning::ColorConversion(
+                    crate::color::ColorConversionError::InvalidIntent,
+                ));
             }
             _ => {
                 warn!("failed to read an operator");

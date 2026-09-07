@@ -4,7 +4,6 @@ use crate::cache::Cache;
 use hayro_syntax::object::dict::keys::{DEFAULT_CMYK, DEFAULT_GRAY, DEFAULT_RGB};
 use hayro_syntax::object::{Name, Null, Object};
 use hayro_syntax::page::Resources;
-use std::sync::Arc;
 
 /// A raster image color space could not be resolved exactly.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -94,31 +93,26 @@ fn parse_image_color_space<'a>(
     let mut overridden = false;
     let mut nested_error = None;
     let parsed =
-        ColorSpaceType::new_inner(
+        ColorSpaceType::new_inner(object, cache, &mut |object| match parse_image_color_space(
             object,
             cache,
-            true,
-            &mut |object| match parse_image_color_space(
-                object,
-                cache,
-                resolve,
-                depth + 1,
-                apply_defaults,
-            ) {
-                Ok((space, properties)) => {
-                    overridden |= properties.color_space_is_default_overridden();
-                    Some(space)
-                }
-                Err(error) => {
-                    nested_error = Some(error);
-                    None
-                }
-            },
-        );
+            resolve,
+            depth + 1,
+            apply_defaults,
+        ) {
+            Ok((space, properties)) => {
+                overridden |= properties.color_space_is_default_overridden();
+                Some(space)
+            }
+            Err(error) => {
+                nested_error = Some(error);
+                None
+            }
+        });
     if let Some(error) = nested_error {
         return Err(error);
     }
-    let mut space = ColorSpace(Arc::new(parsed.ok_or(ImageColorSpaceError::Invalid)?));
+    let mut space = ColorSpace::from_kind(parsed.ok_or(ImageColorSpaceError::Invalid)?);
     let declared = space.kind();
     if declared == ColorSpaceKind::Pattern {
         return Err(ImageColorSpaceError::Invalid);

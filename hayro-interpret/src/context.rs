@@ -521,8 +521,16 @@ impl<'a> Context<'a> {
             self.get().non_stroke_data()
         };
 
+        let intent = self.get().graphics_state.rendering_intent;
+        let failed = |error| {
+            (self.settings.warning_sink)(crate::InterpreterWarning::ColorConversion(error));
+            Paint::Color(Color::from_rgba(crate::color::AlphaColor::TRANSPARENT))
+        };
         if data.color_space.is_pattern() || data.pattern.is_some() {
             if let Some(mut pattern) = data.pattern {
+                if let Err(error) = pattern.set_rendering_intent(intent) {
+                    return failed(error);
+                }
                 if let Some(tf) = &data.transfer_function {
                     pattern.set_transfer_function(tf.clone());
                 }
@@ -535,7 +543,11 @@ impl<'a> Context<'a> {
                 Paint::Color(Color::new(ColorSpace::device_gray(), smallvec![0.0], 0.0))
             }
         } else {
-            let color = Color::new(data.color_space, data.color, data.alpha);
+            let color_space = match data.color_space.with_rendering_intent(intent) {
+                Ok(space) => space,
+                Err(error) => return failed(error),
+            };
+            let color = Color::new(color_space, data.color, data.alpha);
 
             if let Some(tf) = &data.transfer_function {
                 Paint::Color(Color::from_rgba(tf.apply(&color.to_rgba())))

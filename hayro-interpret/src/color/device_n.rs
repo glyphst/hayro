@@ -12,6 +12,16 @@ pub(crate) struct DeviceN {
 }
 
 impl DeviceN {
+    pub(super) fn with_intent(
+        &self,
+        intent: super::RenderingIntent,
+    ) -> Result<Self, super::ColorConversionError> {
+        let mut result = self.clone();
+        result.alternate_space = self.alternate_space.with_rendering_intent(intent)?;
+        result.lookup = U8Lookup::default();
+        Ok(result)
+    }
+
     pub(super) fn new<'a>(
         array: &Array<'a>,
         resolve: &mut dyn FnMut(Object<'a>) -> Option<ColorSpace>,

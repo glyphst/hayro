@@ -53,6 +53,27 @@ impl<'a> Pattern<'a> {
         }
     }
 
+    pub(crate) fn set_rendering_intent(
+        &mut self,
+        intent: crate::color::RenderingIntent,
+    ) -> Result<(), crate::color::ColorConversionError> {
+        match self {
+            Self::Shading(pattern) => {
+                let space = pattern.shading.color_space.with_rendering_intent(intent)?;
+                Arc::make_mut(&mut pattern.shading).color_space = space;
+            }
+            Self::Tiling(pattern) => {
+                pattern.rendering_intent = intent;
+                if !pattern.is_color {
+                    pattern.stroke_paint = pattern.stroke_paint.with_rendering_intent(intent)?;
+                    pattern.non_stroking_paint =
+                        pattern.non_stroking_paint.with_rendering_intent(intent)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn pre_concat_transform(&mut self, transform: Affine) {
         match self {
             Self::Shading(p) => {
@@ -164,6 +185,7 @@ pub struct TilingPattern<'a> {
     pub(crate) settings: InterpreterSettings,
     pub(crate) xref: &'a XRef,
     nesting_depth: u32,
+    rendering_intent: crate::color::RenderingIntent,
 }
 
 impl Debug for TilingPattern<'_> {
@@ -246,6 +268,7 @@ impl<'a> TilingPattern<'a> {
             cache: ctx.interpreter_cache.clone(),
             xref: ctx.xref,
             nesting_depth,
+            rendering_intent: state.graphics_state.rendering_intent,
         })
     }
 
@@ -306,7 +329,8 @@ impl<'a> TilingPattern<'a> {
         is_stroke: bool,
         clip_bbox: bool,
     ) -> Option<()> {
-        let state = State::new(initial_transform);
+        let mut state = State::new(initial_transform);
+        state.graphics_state.rendering_intent = self.rendering_intent;
 
         let mut context = Context::new_with(
             state.ctm,
@@ -357,7 +381,7 @@ impl<'a> TilingPattern<'a> {
 
 impl CacheKey for TilingPattern<'_> {
     fn cache_key(&self) -> u128 {
-        self.cache_key
+        hash128(&(self.cache_key, self.rendering_intent))
     }
 }
 

@@ -9,6 +9,7 @@ mod device_rgb;
 mod icc;
 mod image;
 mod indexed;
+mod intent;
 mod lab;
 mod pattern;
 mod separation;
@@ -31,6 +32,7 @@ use hayro_syntax::object::Object;
 use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
 pub use image::ImageColorSpaceError;
+pub use intent::{ColorConversionError, RenderingIntent};
 use smallvec::{SmallVec, smallvec};
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
@@ -192,21 +194,12 @@ pub(crate) enum ColorSpaceType {
 
 impl ColorSpaceType {
     fn new(object: Object<'_>, cache: &Cache) -> Option<Self> {
-        Self::new_inner(object, cache, false, &mut |object| {
-            ColorSpace::new(object, cache)
-        })
-    }
-
-    fn new_preserving_icc(object: Object<'_>, cache: &Cache) -> Option<Self> {
-        Self::new_inner(object, cache, true, &mut |object| {
-            ColorSpace::new_preserving_icc(object, cache)
-        })
+        Self::new_inner(object, cache, &mut |object| ColorSpace::new(object, cache))
     }
 
     fn new_inner<'a>(
         object: Object<'a>,
         cache: &Cache,
-        preserve_icc: bool,
         resolve: &mut dyn FnMut(Object<'a>) -> Option<ColorSpace>,
     ) -> Option<Self> {
         if let Object::Name(name) = object {
@@ -221,37 +214,16 @@ impl ColorSpaceType {
                     let dict = icc_stream.dict();
                     let num_components = dict.get::<usize>(N)?;
 
-                    let profile_cache_key = (icc_stream.clone(), preserve_icc).cache_key();
+                    let profile_cache_key = crate::util::hash128(&(
+                        "icc-profile",
+                        icc_stream.cache_key(),
+                        icc_stream.raw_data().as_ref(),
+                    ));
                     let profile = cache.get_or_insert_with(profile_cache_key, || {
                         let decoded = icc_stream.decoded().ok()?;
-                        Some(ICCProfile::new(&decoded, num_components).map(|icc| {
-                            // TODO: For SVG and PNG we can assume that the output color space is
-                            // sRGB. If we ever implement PDF-to-PDF, we probably want to
-                            // let the user pass the native color type and don't make this optimization
-                            // if it's not sRGB.
-                            if icc.is_srgb() && !preserve_icc {
-                                Self::DeviceRgb(DeviceRgb)
-                            } else {
-                                Self::ICCBased(icc)
-                            }
-                        }))
-                    })?;
-                    // Only the profile itself is independent of resource scope.
-                    // Resolve a selected Alternate outside the shared cache.
-                    return profile.or_else(|| {
-                        if dict.contains_key(ALTERNATE) {
-                            return dict
-                                .get::<Object<'_>>(ALTERNATE)
-                                .and_then(&mut *resolve)
-                                .map(|space| space.0.as_ref().clone());
-                        }
-                        match dict.get::<u8>(N) {
-                            Some(1) => Some(Self::DeviceGray(DeviceGray)),
-                            Some(3) => Some(Self::DeviceRgb(DeviceRgb)),
-                            Some(4) => Some(Self::DeviceCmyk(DeviceCmyk)),
-                            _ => None,
-                        }
+                        ICCProfile::new(&decoded, num_components).map(Self::ICCBased)
                     });
+                    return profile;
                 }
                 CALCMYK => return Some(Self::DeviceCmyk(DeviceCmyk)),
                 CALGRAY => {
@@ -314,73 +286,101 @@ impl ColorSpaceType {
     }
 }
 
-/// A PDF color space.
-#[derive(Debug, Clone)]
-pub struct ColorSpace(Arc<ColorSpaceType>);
+type IntentVariants = [OnceLock<Result<Arc<ColorSpaceType>, ColorConversionError>>; 4];
+
+/// A PDF color space with lazily shared conversions for each rendering intent.
+#[derive(Clone)]
+pub struct ColorSpace(Arc<ColorSpaceType>, RenderingIntent, Arc<IntentVariants>);
+
+impl std::fmt::Debug for ColorSpace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Derived cache population must not change retained invocation identity.
+        f.debug_tuple("ColorSpace")
+            .field(&self.0)
+            .field(&self.1)
+            .finish()
+    }
+}
 
 impl ColorSpace {
-    /// Parse a self-contained PDF color-space object for semantic inspection.
-    ///
-    /// Resource aliases must be resolved by the caller before using this
-    /// constructor. The returned handle owns all decoded color data and does
-    /// not borrow the source object. Unlike the ordinary interpretation path,
-    /// this preserves `ICCBased` identity even when the profile advertises the
-    /// conventional `sRGB` device-model marker, so retained renderers can
-    /// validate rather than silently assume device equivalence.
+    fn from_kind(kind: ColorSpaceType) -> Self {
+        Self(
+            Arc::new(kind),
+            RenderingIntent::default(),
+            Arc::new(std::array::from_fn(|_| OnceLock::new())),
+        )
+    }
+
+    /// Bind this source color space and its derived palettes to a rendering intent.
+    /// Invalid or unsupported source-to-output conversions return an error.
+    pub fn with_rendering_intent(
+        &self,
+        intent: RenderingIntent,
+    ) -> Result<Self, ColorConversionError> {
+        let variant = self.2[intent as usize].get_or_init(|| {
+            let kind = match self.0.as_ref() {
+                ColorSpaceType::ICCBased(profile) => {
+                    ColorSpaceType::ICCBased(profile.with_intent(intent)?)
+                }
+                ColorSpaceType::CalGray(_) | ColorSpaceType::CalRgb(_) | ColorSpaceType::Lab(_)
+                    if intent != RenderingIntent::default() =>
+                {
+                    return Err(ColorConversionError::CalibratedIntent);
+                }
+                ColorSpaceType::Indexed(space) => {
+                    ColorSpaceType::Indexed(space.with_intent(intent)?)
+                }
+                ColorSpaceType::Separation(space) => {
+                    ColorSpaceType::Separation(space.with_intent(intent)?)
+                }
+                ColorSpaceType::DeviceN(space) => {
+                    ColorSpaceType::DeviceN(space.with_intent(intent)?)
+                }
+                ColorSpaceType::Pattern(space) => ColorSpaceType::Pattern(Pattern::new(
+                    space.color_space().with_rendering_intent(intent)?,
+                )),
+                kind => kind.clone(),
+            };
+            Ok(Arc::new(kind))
+        });
+        Ok(Self(variant.clone()?, intent, self.2.clone()))
+    }
+
+    /// The intent used for conversions and derived resource identity.
+    pub fn rendering_intent(&self) -> RenderingIntent {
+        self.1
+    }
+
+    /// Parse a self-contained PDF color-space object, preserving ICC identity.
+    /// Resource aliases must be resolved by the caller.
     pub fn from_pdf_object(object: Object<'_>) -> Option<Self> {
-        Some(Self(Arc::new(ColorSpaceType::new_preserving_icc(
-            object,
-            &Cache::new(),
-        )?)))
+        Some(Self::from_kind(ColorSpaceType::new(object, &Cache::new())?))
     }
 
-    /// Return whether two handles share the same parsed color-space instance.
-    ///
-    /// This identity is process-local and is intended only for deduplicating
-    /// derived resources while interpreting one document. It is not a stable
-    /// document or serialization identifier.
+    /// Whether handles share the same parsed and intent-bound color space.
     pub fn same_instance(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.0, &other.0) && self.1 == other.1
     }
 
-    /// Create a new color space from the given object.
     pub(crate) fn new(object: Object<'_>, cache: &Cache) -> Option<Self> {
-        Some(Self(Arc::new(ColorSpaceType::new(object, cache)?)))
+        Some(Self::from_kind(ColorSpaceType::new(object, cache)?))
     }
 
-    /// Create a color space without collapsing an sRGB-marked ICC profile to
-    /// the equivalent device implementation.
-    pub(crate) fn new_preserving_icc(object: Object<'_>, cache: &Cache) -> Option<Self> {
-        Some(Self(Arc::new(ColorSpaceType::new_preserving_icc(
-            object, cache,
-        )?)))
-    }
-
-    /// Create a new color space from the name.
     pub(crate) fn new_from_name(name: &Name<'_>) -> Option<Self> {
-        ColorSpaceType::new_from_name(name).map(|c| Self(Arc::new(c)))
+        ColorSpaceType::new_from_name(name).map(Self::from_kind)
     }
 
-    /// Return the device gray color space.
     pub(crate) fn device_gray() -> Self {
-        Self(Arc::new(ColorSpaceType::DeviceGray(DeviceGray)))
+        Self::from_kind(ColorSpaceType::DeviceGray(DeviceGray))
     }
-
-    /// Return the device RGB color space.
     pub(crate) fn device_rgb() -> Self {
-        Self(Arc::new(ColorSpaceType::DeviceRgb(DeviceRgb)))
+        Self::from_kind(ColorSpaceType::DeviceRgb(DeviceRgb))
     }
-
-    /// Return the device CMYK color space.
     pub(crate) fn device_cmyk() -> Self {
-        Self(Arc::new(ColorSpaceType::DeviceCmyk(DeviceCmyk)))
+        Self::from_kind(ColorSpaceType::DeviceCmyk(DeviceCmyk))
     }
-
-    /// Return the pattern color space.
     pub(crate) fn pattern() -> Self {
-        Self(Arc::new(ColorSpaceType::Pattern(Pattern::new(
-            Self::device_gray(),
-        ))))
+        Self::from_kind(ColorSpaceType::Pattern(Pattern::new(Self::device_gray())))
     }
 
     pub(crate) fn pattern_cs(&self) -> Option<Self> {
@@ -688,6 +688,15 @@ pub struct Color {
 }
 
 impl Color {
+    pub(crate) fn with_rendering_intent(
+        &self,
+        intent: RenderingIntent,
+    ) -> Result<Self, ColorConversionError> {
+        let mut color = self.clone();
+        color.color_space = color.color_space.with_rendering_intent(intent)?;
+        Ok(color)
+    }
+
     pub(crate) fn new(color_space: ColorSpace, components: ColorComponents, opacity: f32) -> Self {
         Self {
             color_space,
@@ -770,7 +779,7 @@ mod retained_inspection_tests {
     }
 
     #[test]
-    fn preserving_and_optimized_icc_handles_do_not_alias_in_the_shared_cache() {
+    fn all_icc_handles_preserve_profile_identity() {
         let bytes =
             include_bytes!("../../../hayro-tests/pdfs/custom/xobject_with_fill_opacity.pdf");
         let pdf = Pdf::new(bytes.to_vec()).expect("parse ICC page-group fixture");
@@ -781,9 +790,8 @@ mod retained_inspection_tests {
         let object = group.get::<Object<'_>>(CS).expect("page group color space");
         let cache = Cache::new();
         let optimized = ColorSpace::new(object.clone(), &cache).expect("optimized ICC");
-        let preserving =
-            ColorSpace::new_preserving_icc(object, &cache).expect("identity-preserving ICC");
-        assert_eq!(optimized.kind(), ColorSpaceKind::DeviceRgb);
+        let preserving = ColorSpace::new(object, &cache).expect("identity-preserving ICC");
+        assert_eq!(optimized.kind(), ColorSpaceKind::IccBased);
         assert_eq!(preserving.kind(), ColorSpaceKind::IccBased);
     }
 }

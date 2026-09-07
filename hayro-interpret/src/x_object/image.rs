@@ -30,6 +30,7 @@ pub(crate) struct ImageXObject<'a> {
     pub(crate) stream: Stream<'a>,
     pub(crate) transfer_function: Option<ActiveTransferFunction>,
     pub(crate) warning_sink: WarningSinkFn,
+    pub(crate) rendering_intent: crate::color::RenderingIntent,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -146,6 +147,7 @@ impl<'a> ImageXObject<'a> {
             color_space: image_cs,
             color_space_properties,
             warning_sink: warning_sink.clone(),
+            rendering_intent: crate::color::RenderingIntent::default(),
             transfer_function,
             interpolate,
             stream: stream.clone(),
@@ -158,6 +160,38 @@ impl<'a> ImageXObject<'a> {
             return;
         }
 
+        let mut bound = self.clone();
+        let intent = if self.kind == ImageKind::Image && self.stream.dict().contains_key(b"Intent")
+        {
+            match crate::color::RenderingIntent::from_object(
+                self.stream.dict().get::<Object<'_>>(b"Intent"),
+            ) {
+                Ok((intent, unknown)) => {
+                    if unknown {
+                        (self.warning_sink)(crate::InterpreterWarning::RenderingIntentUnknown);
+                    }
+                    intent
+                }
+                Err(error) => {
+                    (self.warning_sink)(crate::InterpreterWarning::ColorConversion(error));
+                    return;
+                }
+            }
+        } else {
+            context.get().graphics_state.rendering_intent
+        };
+        bound.rendering_intent = intent;
+        if self.kind == ImageKind::Image
+            && let Some(space) = &self.color_space
+        {
+            match space.with_rendering_intent(intent) {
+                Ok(space) => bound.color_space = Some(space),
+                Err(error) => {
+                    (self.warning_sink)(crate::InterpreterWarning::ColorConversion(error));
+                    return;
+                }
+            }
+        }
         let has_oc = xobject_oc(self.stream.dict(), context, device);
         if !context.ocg_state.is_visible() {
             if has_oc && context.ocg_state.end_marked_content() {
@@ -204,7 +238,7 @@ impl<'a> ImageXObject<'a> {
                 image_xobject: self.clone(),
             })
         } else {
-            Image::Raster(RasterImage(self.clone()))
+            Image::Raster(RasterImage(bound))
         };
 
         device.draw_image(
@@ -315,7 +349,7 @@ fn uses_jpx_decode(dict: &Dict<'_>) -> bool {
 
 impl CacheKey for ImageXObject<'_> {
     fn cache_key(&self) -> u128 {
-        self.stream.cache_key()
+        crate::util::hash128(&(self.stream.cache_key(), self.rendering_intent))
     }
 }
 

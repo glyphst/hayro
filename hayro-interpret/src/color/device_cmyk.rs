@@ -17,4 +17,6 @@ static CMYK_TRANSFORM: LazyLock<ICCProfile> = LazyLock::new(|| {
         4,
     )
     .unwrap()
+    .with_intent(super::RenderingIntent::Perceptual)
+    .unwrap()
 });

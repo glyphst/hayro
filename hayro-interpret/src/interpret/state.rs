@@ -279,6 +279,7 @@ pub(crate) struct GraphicsState<'a> {
     pub(crate) blend_mode: BlendMode,
     pub(crate) alpha_is_shape: bool,
     pub(crate) text_knockout: bool,
+    pub(crate) rendering_intent: crate::color::RenderingIntent,
 }
 
 impl Default for GraphicsState<'_> {
@@ -298,6 +299,7 @@ impl Default for GraphicsState<'_> {
             blend_mode: BlendMode::default(),
             alpha_is_shape: false,
             text_knockout: true,
+            rendering_intent: crate::color::RenderingIntent::default(),
         }
     }
 }
@@ -331,6 +333,19 @@ pub(crate) fn handle_gs_single<'a>(
 ) -> Option<()> {
     // TODO Can we use constants here somehow?
     match key.as_str() {
+        "RI" => match crate::color::RenderingIntent::from_object(dict.get::<Object<'_>>(key)) {
+            Ok((intent, unknown)) => {
+                context.get_mut().graphics_state.rendering_intent = intent;
+                if unknown {
+                    (context.settings.warning_sink)(
+                        crate::InterpreterWarning::RenderingIntentUnknown,
+                    );
+                }
+            }
+            Err(error) => {
+                (context.settings.warning_sink)(crate::InterpreterWarning::ColorConversion(error));
+            }
+        },
         "LW" => context.get_mut().graphics_state.stroke_props.line_width = dict.get::<f32>(key)?,
         "LC" => {
             context.get_mut().graphics_state.stroke_props.line_cap =

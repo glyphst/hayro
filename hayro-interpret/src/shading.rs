@@ -343,7 +343,7 @@ impl Shading {
 
 impl CacheKey for Shading {
     fn cache_key(&self) -> u128 {
-        self.cache_key
+        crate::util::hash128(&(self.cache_key, self.color_space.rendering_intent()))
     }
 }
 

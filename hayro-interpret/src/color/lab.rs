@@ -27,7 +27,7 @@ impl Lab {
             white_point[2] as f64,
         );
 
-        let profile = ICCProfile::new_from_src_profile(profile, false, 3)?;
+        let profile = ICCProfile::new_from_src_profile(profile, 3)?;
 
         Some(Self { range, profile })
     }

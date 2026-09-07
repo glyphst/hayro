@@ -13,11 +13,11 @@ fn typed_keywords_reject_prefixes_without_losing_following_dictionary_fields() {
     assert!(dict.get::<Null>(b"C").is_none());
     assert_eq!(dict.get::<bool>(b"B"), Some(true));
     assert_eq!(dict.get::<Name<'_>>(b"D").unwrap().as_ref(), b"Keep");
-    // The generic object API remains a recovering reader. Its null result is
-    // deliberately not proof that an optional typed entry is absent.
+    // Generic reads preserve their original prefix recovery, including the
+    // boolean's type. Generic null recovery is not proof of typed absence.
     assert!(matches!(
         dict.get::<Object<'_>>(b"A"),
-        Some(Object::Null(_))
+        Some(Object::Boolean(false))
     ));
     assert!(matches!(
         dict.get::<Object<'_>>(b"C"),

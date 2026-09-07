@@ -198,23 +198,17 @@ impl Skippable for Object<'_> {
 impl<'a> Readable<'a> for Object<'a> {
     fn read(r: &mut Reader<'a>, ctx: &ReaderContext<'a>) -> Option<Self> {
         let object = match r.peek_byte()? {
-            b'n' | b't' | b'f' => {
-                let start = r.offset();
-                let value = if r.peek_byte()? == b'n' {
-                    Null::read(r, ctx).map(Self::Null)
-                } else {
-                    bool::read(r, ctx).map(Self::Boolean)
-                };
-                if let Some(value) = value {
-                    value
-                } else {
-                    // Keep the generic unknown-keyword recovery below. Typed
-                    // boolean/null reads must still reject keyword prefixes.
-                    r.jump(start);
-                    skip_name_like(r, false)?;
-                    Self::Null(Null)
-                }
+            // Preserve the generic reader's prefix recovery. Callers that
+            // require a complete keyword must use the typed boolean/null read.
+            b'n' => {
+                Null::skip(r, ctx.in_content_stream())?;
+                Self::Null(Null)
             }
+            b't' | b'f' => Self::Boolean(match r.skip::<bool>(ctx.in_content_stream())? {
+                b"true" => true,
+                b"false" => false,
+                _ => return None,
+            }),
             b'/' => Self::Name(Name::read(r, ctx)?),
             b'<' => match r.peek_bytes(2)? {
                 b"<<" => {

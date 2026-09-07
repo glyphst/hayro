@@ -1,5 +1,26 @@
 use super::PageStreamError;
 use crate::Pdf;
+use crate::object::{Null, ObjectIdentifier};
+
+#[test]
+fn xref_definition_distinguishes_undefined_null_and_unreadable_objects() {
+    for body in [&b"null"[..], &b"invalid-object-body"[..]] {
+        let pdf = pdf("", body);
+        let xref = pdf.xref();
+        assert!(xref.contains_object(ObjectIdentifier::new(5, 0)));
+        assert!(!xref.contains_object(ObjectIdentifier::new(5, 1)));
+        assert!(!xref.contains_object(ObjectIdentifier::new(99, 0)));
+        assert!(!xref.contains_object(ObjectIdentifier::new(0, 65535)));
+        // Use the strict typed read: the generic Object reader can repair an
+        // unknown bare keyword to null, which must not prove optional absence.
+        let value = xref.get::<Null>(ObjectIdentifier::new(5, 0));
+        if body == b"null" {
+            assert!(value.is_some());
+        } else {
+            assert!(value.is_none());
+        }
+    }
+}
 
 fn pdf(contents: &str, bad: &[u8]) -> Pdf {
     let objects = [

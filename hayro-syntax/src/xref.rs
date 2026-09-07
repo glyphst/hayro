@@ -529,6 +529,17 @@ impl XRef {
         }
     }
 
+    /// Whether the current cross-reference map defines this object and generation.
+    ///
+    /// This does not parse the object's body. A defined but unreadable object is
+    /// distinct from an undefined reference, which PDF treats as the null object.
+    pub fn contains_object(&self, id: ObjectIdentifier) -> bool {
+        match &self.0 {
+            Inner::Dummy => false,
+            Inner::Some(repr) => repr.map.get().xref_map.contains_key(&id),
+        }
+    }
+
     /// Return the object with the given identifier.
     #[allow(private_bounds)]
     pub fn get<'a, T>(&'a self, id: ObjectIdentifier) -> Option<T>

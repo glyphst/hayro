@@ -11,6 +11,9 @@ use crate::xref::{XRef, XRefError, fallback, root_xref};
 pub use crate::crypto::{DecryptionError, EncryptionInfo, PasswordAuthentication};
 use crate::metadata::Metadata;
 
+#[cfg(test)]
+mod password_tests;
+
 /// A PDF file.
 pub struct Pdf {
     xref: Arc<XRef>,
@@ -37,15 +40,34 @@ impl Pdf {
         Self::new_with_password(data, "")
     }
 
-    /// Try to read the given PDF file with a password.
+    /// Try to read the given PDF file using the UTF-8 bytes of a password.
+    ///
+    /// This is a convenience wrapper for [`Self::new_with_password_bytes`]. It
+    /// does not transcode legacy passwords to `PDFDocEncoding` or try other encodings.
     ///
     /// Returns `Err` if it was unable to read it or if the password is incorrect.
     pub fn new_with_password(
         data: impl Into<PdfData>,
         password: &str,
     ) -> Result<Self, LoadPdfError> {
+        Self::new_with_password_bytes(data, password.as_bytes())
+    }
+
+    /// Try to read the given PDF file with explicitly encoded password bytes.
+    ///
+    /// Standard security revisions 2–4 use the supplied bytes unchanged before
+    /// their 32-byte padding/truncation. The caller chooses the legacy encoding;
+    /// no UTF-8 validation, transcoding or encoding recovery occurs for them.
+    /// Revisions 5–6 require a valid UTF-8 representation before 127-byte
+    /// truncation. Revision-6 `SASLprep` normalization is not performed, so callers
+    /// must supply the prepared representation. Unencrypted files ignore passwords.
+    ///
+    /// Returns `Err` if parsing, password validation or authentication fails.
+    pub fn new_with_password_bytes(
+        data: impl Into<PdfData>,
+        password: &[u8],
+    ) -> Result<Self, LoadPdfError> {
         let data = data.into();
-        let password = password.as_bytes();
         let version = find_version(data.as_ref()).unwrap_or(PdfVersion::Pdf10);
         let xref = match root_xref(data.clone(), password) {
             Ok(x) => x,

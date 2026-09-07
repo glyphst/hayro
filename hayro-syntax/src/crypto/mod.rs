@@ -41,6 +41,8 @@ pub enum DecryptionError {
     /// The PDF is password-protected and no password (or a wrong one) was
     /// provided.
     PasswordProtected,
+    /// Revisions 5–6 require a valid UTF-8 password before byte truncation.
+    PasswordEncoding,
     /// The PDF has invalid encryption.
     InvalidEncryption,
     /// The PDF uses an unsupported encryption algorithm.
@@ -653,7 +655,8 @@ fn decryption_key_rev1234(
 ) -> Result<Zeroizing<Vec<u8>>, DecryptionError> {
     let mut md5_input = Zeroizing::new(Vec::new());
 
-    // TODO: Convert to PDFDocEncoding.
+    // Password bytes have already been encoded by the caller. Re-encoding here
+    // would change the key for legacy documents using a different byte encoding.
     // a) Pad or truncate password to 32 bytes using PASSWORD_PADDING.
     let padded_password = padded_password(password);
 
@@ -793,6 +796,7 @@ fn decryption_key_rev56(
     // the SASLprep (Internet RFC 4013) profile of stringprep (Internet RFC 3454) using the Normalize and BiDi
     // options, and then converting to a UTF-8 representation.
     // TODO: Do the above.
+    core::str::from_utf8(password).map_err(|_| DecryptionError::PasswordEncoding)?;
     // b) Truncate the UTF-8 representation to 127 bytes if it is longer than 127 bytes.
     let password = &password[..password.len().min(127)];
 

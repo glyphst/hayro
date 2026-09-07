@@ -1,4 +1,4 @@
-use super::PageStreamError;
+use super::{PageStreamError, UserUnitError};
 use crate::Pdf;
 use crate::object::{Dict, Name, Null, Object, ObjectIdentifier};
 
@@ -47,9 +47,13 @@ fn xref_definition_distinguishes_undefined_null_and_unreadable_objects() {
 }
 
 fn pdf(contents: &str, bad: &[u8]) -> Pdf {
+    pdf_with_page_tree("", contents, bad)
+}
+
+fn pdf_with_page_tree(parent: &str, contents: &str, bad: &[u8]) -> Pdf {
     let objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!("<< /Type /Pages /Count 1 /Kids [3 0 R] {parent} >>").into_bytes(),
         format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] {contents} >>").into_bytes(),
         b"<< /Length 1 >> stream\nq\nendstream".to_vec(),
         bad.to_vec(),
@@ -72,6 +76,80 @@ fn pdf(contents: &str, bad: &[u8]) -> Pdf {
         format!("trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF").as_bytes(),
     );
     Pdf::new(bytes).unwrap()
+}
+
+#[test]
+fn user_unit_scales_rotated_cropped_page_coordinates_in_both_axis_conventions() {
+    for (rotation, inverted, upright, dimensions) in [
+        (0, [40.0, 90.0], [40.0, 30.0], (160.0, 120.0)),
+        (90, [30.0, 40.0], [30.0, 120.0], (120.0, 160.0)),
+        (180, [120.0, 30.0], [120.0, 90.0], (160.0, 120.0)),
+        (270, [90.0, 120.0], [90.0, 40.0], (120.0, 160.0)),
+    ] {
+        let pdf = pdf_with_page_tree(
+            &format!("/CropBox [10 20 90 80] /Rotate {rotation} /UserUnit 4"),
+            "/UserUnit 2",
+            b"null",
+        );
+        let page = &pdf.pages()[0];
+        assert_eq!(page.user_unit(), Ok(2.0));
+        assert_eq!(page.base_dimensions(), (80.0, 60.0));
+        assert_eq!(page.render_dimensions(), dimensions);
+        for (invert_y, expected) in [(true, inverted), (false, upright)] {
+            let [a, b, c, d, e, f] = page.initial_transform(invert_y).as_coeffs();
+            assert_eq!([a * 30.0 + c * 35.0 + e, b * 30.0 + d * 35.0 + f], expected);
+        }
+    }
+    // Unlike CropBox/Rotate, UserUnit is not inherited from the Pages node.
+    let pdf = pdf_with_page_tree("/UserUnit 4", "", b"null");
+    assert_eq!(pdf.pages()[0].user_unit(), Ok(1.0));
+    assert_eq!(pdf.pages()[0].render_dimensions(), (100.0, 100.0));
+}
+
+#[test]
+fn user_unit_defaults_and_supported_boundaries_are_explicit() {
+    for (entry, body, expected) in [
+        ("", "null", Ok(1.0)),
+        ("null", "null", Ok(1.0)),
+        ("99 0 R", "null", Ok(1.0)),
+        ("5 1 R", "null", Ok(1.0)),
+        ("5 0 R", "null", Ok(1.0)),
+        ("5 0 R", "2.5", Ok(2.5)),
+        ("0.5", "null", Ok(0.5)),
+        ("75000", "null", Ok(75000.0)),
+        ("75001", "null", Err(UserUnitError::OutOfRange)),
+        ("0", "null", Err(UserUnitError::Invalid)),
+        ("-1", "null", Err(UserUnitError::Invalid)),
+        ("true", "null", Err(UserUnitError::Invalid)),
+        ("(2)", "null", Err(UserUnitError::Invalid)),
+        ("/Two", "null", Err(UserUnitError::Invalid)),
+        ("[]", "null", Err(UserUnitError::Invalid)),
+        ("<< >>", "null", Err(UserUnitError::Invalid)),
+        ("unknown-keyword", "null", Err(UserUnitError::Invalid)),
+        ("nulljunk", "null", Err(UserUnitError::Invalid)),
+        ("5 0 R", "unknown-keyword", Err(UserUnitError::Invalid)),
+        ("5 0 R", "5 0 R", Err(UserUnitError::Invalid)),
+    ] {
+        let entries = if entry.is_empty() {
+            String::new()
+        } else {
+            format!("/UserUnit {entry}")
+        };
+        let pdf = pdf(&entries, body.as_bytes());
+        let page = &pdf.pages()[0];
+        assert_eq!(page.user_unit(), expected, "{entry}: {body}");
+        let dimension = (100.0 * expected.unwrap_or(1.0)) as f32;
+        assert_eq!(page.render_dimensions(), (dimension, dimension));
+    }
+    for entries in [
+        "/UserUnit 0.000000000000000000000000000000000000000000000000001",
+        "/MediaBox [0 0 10000000000000000000000000000000000000 100] /UserUnit 75000",
+    ] {
+        assert_eq!(
+            pdf(entries, b"null").pages()[0].user_unit(),
+            Err(UserUnitError::GeometryRange)
+        );
+    }
 }
 
 #[test]

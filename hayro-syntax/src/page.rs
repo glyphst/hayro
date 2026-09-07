@@ -8,8 +8,8 @@ use crate::object::Rect;
 use crate::object::Stream;
 use crate::object::dict::keys::*;
 use crate::object::stream::DecodeFailure;
-use crate::object::{MaybeRef, Object, ObjectLike};
-use crate::reader::ReaderContext;
+use crate::object::{MaybeRef, Null, Number, ObjRef, Object, ObjectLike};
+use crate::reader::{Readable, Reader, ReaderContext, ReaderExt, Skippable};
 use crate::sync::OnceLock;
 use crate::transform::Transform;
 use crate::util::FloatExt;
@@ -168,6 +168,7 @@ pub struct Page<'a> {
     media_box: Rect,
     crop_box: Rect,
     rotation: Rotation,
+    user_unit: Result<f64, UserUnitError>,
     page_streams: OnceLock<Result<Option<Vec<u8>>, PageStreamError>>,
     resources: Resources<'a>,
     ctx: ReaderContext<'a>,
@@ -183,6 +184,70 @@ pub enum PageStreamError {
     /// A content stream failed to decode.
     Decode(DecodeFailure),
 }
+
+/// A page `UserUnit` declaration that cannot define supported physical geometry.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum UserUnitError {
+    /// The entry is not a resolvable finite positive number or null.
+    Invalid,
+    /// The value exceeds the supported maximum of 75,000 points per user unit.
+    OutOfRange,
+    /// The scaled page dimensions overflow or underflow the rendering API.
+    GeometryRange,
+}
+
+fn read_user_unit(dict: &Dict<'_>, xref: &XRef) -> Result<f64, UserUnitError> {
+    // UserUnit is page-local, not an inheritable page-tree attribute (table 30).
+    // Null dictionary values and undefined references mean absence (§7.3.9).
+    if !dict.contains_key(USER_UNIT)
+        || dict
+            .get_ref(USER_UNIT)
+            .is_some_and(|id| !xref.contains_object(id.into()))
+        || dict.get::<Null>(USER_UNIT).is_some()
+    {
+        return Ok(1.0);
+    }
+    let unit = dict
+        .get::<UserUnitNumber>(USER_UNIT)
+        .ok_or(UserUnitError::Invalid)?
+        .0;
+    if !unit.is_finite() || unit <= 0.0 {
+        return Err(UserUnitError::Invalid);
+    }
+    if unit > 75_000.0 {
+        return Err(UserUnitError::OutOfRange);
+    }
+    Ok(unit)
+}
+
+// An indirect object containing `5 0 R` is not the numeric value 5. Keep the
+// generic number reader's recovery unchanged while rejecting such aliases and
+// malformed numeric token suffixes at this physical-geometry boundary.
+#[derive(Debug, Clone)]
+struct UserUnitNumber(f64);
+
+impl<'a> Readable<'a> for UserUnitNumber {
+    fn read(r: &mut Reader<'a>, ctx: &ReaderContext<'a>) -> Option<Self> {
+        if r.clone().read_with_context::<ObjRef>(ctx).is_some() {
+            return None;
+        }
+        Number::skip(&mut r.clone(), ctx.in_content_stream())?;
+        Number::read(r, ctx).map(|number| Self(number.as_f64()))
+    }
+}
+
+impl<'a> TryFrom<Object<'a>> for UserUnitNumber {
+    type Error = ();
+
+    fn try_from(value: Object<'a>) -> Result<Self, Self::Error> {
+        match value {
+            Object::Number(number) => Ok(Self(number.as_f64())),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'a> ObjectLike<'a> for UserUnitNumber {}
 
 fn content_stream(object: Object<'_>) -> Result<Stream<'_>, PageStreamError> {
     match object {
@@ -250,15 +315,26 @@ impl<'a> Page<'a> {
             resources,
         );
 
-        Some(Self {
+        let mut page = Self {
             inner: dict.clone(),
             media_box,
             crop_box,
             rotation,
+            user_unit: read_user_unit(dict, ctx.xref()),
             page_streams: OnceLock::new(),
             resources,
             ctx,
-        })
+        };
+        if let Ok(unit) = page.user_unit {
+            let (width, height) = page.base_dimensions();
+            if [width, height].into_iter().any(|dimension| {
+                let scaled = (f64::from(dimension) * unit) as f32;
+                !scaled.is_finite() || scaled <= 0.0
+            }) {
+                page.user_unit = Err(UserUnitError::GeometryRange);
+            }
+        }
+        Some(page)
     }
 
     fn operations_impl(&self) -> Option<UntypedIter<'_>> {
@@ -335,6 +411,17 @@ impl<'a> Page<'a> {
         self.rotation
     }
 
+    /// The size of one default user-space unit in physical 1/72-inch points.
+    ///
+    /// Absent/null entries default to 1. The supported range is positive finite
+    /// values through 75,000 whose scaled dimensions fit the rendering API.
+    /// Rendering methods use 1 for an invalid/unsupported declaration, as
+    /// permitted by PDF 1.7 §8.3.2.3. Strict consumers must handle this error
+    /// before admitting native rendering.
+    pub fn user_unit(&self) -> Result<f64, UserUnitError> {
+        self.user_unit
+    }
+
     /// Get the crop box of the page.
     pub fn crop_box(&self) -> Rect {
         self.crop_box
@@ -361,11 +448,20 @@ impl<'a> Page<'a> {
         }
     }
 
-    /// Return the with and height of the page that should be assumed when rendering the page.
+    /// Return the width and height in physical 1/72-inch points for rendering.
     ///
     /// Depending on the document, it is either based on the media box or the crop box
-    /// of the page. In addition to that, it also takes the rotation of the page into account.
+    /// of the page. Rotation and the supported `UserUnit` scale are applied.
     pub fn render_dimensions(&self) -> (f32, f32) {
+        let (width, height) = self.unscaled_render_dimensions();
+        let unit = self.user_unit.unwrap_or(1.0);
+        (
+            (f64::from(width) * unit) as f32,
+            (f64::from(height) * unit) as f32,
+        )
+    }
+
+    fn unscaled_render_dimensions(&self) -> (f32, f32) {
         let (mut base_width, mut base_height) = self.base_dimensions();
 
         if matches!(
@@ -402,11 +498,12 @@ impl<'a> Page<'a> {
     ///
     /// This accounts for the mismatch between PDF's y-up and most renderers'
     /// y-down coordinate system, the rotation of the page and the offset of
-    /// the crop box.
+    /// the crop box, and scales default user space into physical points using
+    /// `UserUnit`. Raw page boxes and base dimensions remain in source user units.
     pub fn initial_transform(&self, invert_y: bool) -> Transform {
         let crop_box = self.intersected_crop_box();
         let (_, base_height) = self.base_dimensions();
-        let (width, height) = self.render_dimensions();
+        let (width, height) = self.unscaled_render_dimensions();
 
         let horizontal_t = Transform::ROTATE_CW_90 * Transform::translate((0.0, -width as f64));
         let flipped_horizontal_t =
@@ -439,7 +536,8 @@ impl<'a> Page<'a> {
             Transform::IDENTITY
         };
 
-        rotation_transform
+        Transform::scale(self.user_unit.unwrap_or(1.0))
+            * rotation_transform
             * inversion_transform
             * Transform::translate((-crop_box.x0, -crop_box.y0))
     }

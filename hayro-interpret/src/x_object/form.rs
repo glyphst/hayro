@@ -929,6 +929,74 @@ mod tests {
     }
 
     #[test]
+    fn embedded_jpx_icc_uses_image_intent_and_explicit_pdf_space_precedence() {
+        let source = Pdf::new(embedded_jpx_alpha_pdf()).unwrap();
+        let image = source
+            .xref()
+            .get::<Stream<'_>>(hayro_syntax::object::ObjectIdentifier::new(8, 0))
+            .unwrap();
+        let mut profile = moxcms::ColorProfile::new_srgb();
+        profile.cicp = None;
+        profile.profile_class = moxcms::ProfileClass::OutputDevice;
+        profile.media_white_point = Some(moxcms::Xyzd::new(0.75, 0.5, 0.25));
+        let profile = profile.encode().unwrap();
+        fn boxed(name: &[u8], data: &[u8]) -> Vec<u8> {
+            let mut bytes = ((data.len() + 8) as u32).to_be_bytes().to_vec();
+            bytes.extend(name);
+            bytes.extend(data);
+            bytes
+        }
+        // Replace only the JP2 color declaration; retain the existing lossless
+        // codestream and its independently tested unassociated alpha channel.
+        fn replace_color(data: &[u8], profile: &[u8]) -> Vec<u8> {
+            let mut result = vec![];
+            let mut offset = 0;
+            while offset < data.len() {
+                let length =
+                    u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let name = &data[offset + 4..offset + 8];
+                let content = &data[offset + 8..offset + length];
+                if name == b"jp2h" {
+                    result.extend(boxed(name, &replace_color(content, profile)));
+                } else if name == b"colr" {
+                    let mut content = vec![2, 0, 0];
+                    content.extend(profile);
+                    result.extend(boxed(name, &content));
+                } else {
+                    result.extend(&data[offset..offset + length]);
+                }
+                offset += length;
+            }
+            result
+        }
+        let encoded = replace_color(&image.raw_data(), &profile);
+        let content = b"/Perceptual ri q 10 0 0 10 0 0 cm /I Do Q /AbsoluteColorimetric ri q 10 0 0 10 20 0 cm /I Do Q q 10 0 0 10 40 0 cm /Explicit Do Q q 10 0 0 10 60 0 cm /Relative Do Q q 10 0 0 10 80 0 cm /I Do Q";
+        let mut pdf = format!("%PDF-1.7\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</XObject<</I 5 0 R/Explicit 6 0 R/Relative 7 0 R>>>>/Contents 4 0 R>>endobj\n4 0 obj<</Length {}>>stream\n{}\nendstream endobj\n", content.len(), String::from_utf8_lossy(content)).into_bytes();
+        for (index, entry) in ["", "/ColorSpace/DeviceRGB", "/Intent/RelativeColorimetric"]
+            .iter()
+            .enumerate()
+        {
+            pdf.extend(format!("{} 0 obj<</Type/XObject/Subtype/Image/Width 2/Height 1/BitsPerComponent 8/Filter/JPXDecode/SMaskInData 1{entry}/Length {}>>stream\n", index + 5, encoded.len()).as_bytes());
+            pdf.extend(&encoded);
+            pdf.extend(b"\nendstream endobj\n");
+        }
+        pdf.extend(b"trailer<</Root 1 0 R>>\n%%EOF");
+        let device = interpret_bytes(pdf, false);
+        assert_eq!(device.raster_images.len(), 5);
+        let pixels = |index: usize| &device.raster_images[index].1;
+        assert_ne!(pixels(0), pixels(1));
+        assert_eq!(pixels(0), pixels(2));
+        assert_eq!(pixels(0), pixels(3));
+        assert_eq!(pixels(1), pixels(4));
+        assert!(
+            device
+                .raster_alpha_planes
+                .iter()
+                .all(|alpha| alpha.as_deref() == Some(&[128, 255]))
+        );
+    }
+
+    #[test]
     fn embedded_jpx_alpha_modes_decode_and_reverse_source_preblending() {
         let device = interpret_bytes(embedded_jpx_alpha_pdf(), false);
         assert_eq!(device.raster_images.len(), 4);

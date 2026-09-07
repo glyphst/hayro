@@ -47,6 +47,10 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
             _ => return None,
         },
     };
+    let icc_profile = match image.color_space() {
+        ColorSpace::Icc { profile, .. } => Some(profile.clone()),
+        _ => None,
+    };
     let has_alpha = image.has_alpha();
     let mut decoder_context = hayro_jpeg2000::DecoderContext::default();
     let bitmap = image.decode(&mut decoder_context).ok()?.data_u8();
@@ -79,6 +83,7 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
     Some(FilterResult {
         data: Cow::Owned(data),
         image_data: Some(ImageData {
+            icc_profile,
             alpha,
             color_space: Some(cs),
             bits_per_component: bpc,

@@ -311,6 +311,18 @@ impl ColorSpace {
         )
     }
 
+    pub(crate) fn from_embedded_icc(
+        profile: &[u8],
+        components: usize,
+        cache: &Cache,
+    ) -> Result<Self, ColorConversionError> {
+        let key = crate::util::hash128(&("embedded-icc", profile, components));
+        cache
+            .get_or_insert_with(key, || ICCProfile::new(profile, components))
+            .map(|profile| Self::from_kind(ColorSpaceType::ICCBased(profile)))
+            .ok_or(ColorConversionError::IccTransform)
+    }
+
     /// Bind this source color space and its derived palettes to a rendering intent.
     /// Invalid or unsupported source-to-output conversions return an error.
     pub fn with_rendering_intent(

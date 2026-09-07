@@ -64,6 +64,26 @@ fn decode_context<'a>(
         })
         .unwrap_or((obj.width, obj.height));
 
+    let color_space = if color_space.is_none()
+        && let Some(metadata) = &decoded.image_data
+        && let Some(profile) = &metadata.icc_profile
+    {
+        let components = match metadata.color_space? {
+            ImageColorSpace::Gray => 1,
+            ImageColorSpace::Rgb => 3,
+            ImageColorSpace::Cmyk => 4,
+            ImageColorSpace::Unknown(_) => return None,
+        };
+        Some(
+            ColorSpace::from_embedded_icc(profile, components, &obj.cache)
+                .and_then(|space| space.with_rendering_intent(obj.rendering_intent))
+                .map_err(|error| (obj.warning_sink)(InterpreterWarning::ColorConversion(error)))
+                .ok()?,
+        )
+    } else {
+        color_space
+    };
+
     let color_space = color_space
         .or_else(|| {
             decoded

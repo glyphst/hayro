@@ -368,6 +368,9 @@ pub struct ImageData {
     pub alpha: Option<Vec<u8>>,
     /// The color space of the image.
     pub color_space: Option<ImageColorSpace>,
+    /// The embedded JPEG 2000 source profile, before any color conversion.
+    /// An explicit PDF color space takes precedence over this profile.
+    pub icc_profile: Option<Vec<u8>>,
     /// The bits per component of the image.
     pub bits_per_component: u8,
     /// The width of the image.

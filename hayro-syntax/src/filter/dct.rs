@@ -79,6 +79,7 @@ pub(crate) fn decode(
     let height = decoder.dimensions().unwrap().1 as u32;
 
     let image_data = ImageData {
+        icc_profile: None,
         alpha: None,
         color_space: match out_colorspace {
             ColorSpace::RGB | ColorSpace::YCbCr => Some(ImageColorSpace::Rgb),

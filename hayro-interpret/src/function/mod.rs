@@ -31,6 +31,8 @@ type TupleVec = SmallVec<[(f32, f32); 4]>;
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum CalculatorInstruction {
+    /// Push a signed 32-bit integer without converting it to a real number.
+    Integer(i32),
     /// Push a real number.
     Number(f32),
     /// Apply the PostScript `abs` operator.

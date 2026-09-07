@@ -6,7 +6,11 @@ use hayro_syntax::reader::Reader;
 use hayro_syntax::reader::{ReaderContext, ReaderExt};
 use smallvec::SmallVec;
 use std::array;
-use std::ops::Rem;
+mod value;
+use value::Argument;
+
+#[cfg(test)]
+mod numeric_tests;
 
 const MAX_CALCULATOR_OPERATIONS: usize = 16_384;
 const MAX_CALCULATOR_NESTING: usize = 128;
@@ -32,18 +36,34 @@ impl Type4 {
 
     /// Evaluate the function with the given input.
     pub(crate) fn eval(&self, mut input: Values) -> Option<Values> {
+        if input.len() != self.clamper.domain.len() || input.iter().any(|value| !value.is_finite())
+        {
+            return None;
+        }
         self.clamper.clamp_input(&mut input);
 
         let mut arg_stack = InterpreterStack::new();
 
         for input in input {
-            arg_stack.push(Argument::Float(input));
+            arg_stack.push(Argument::real(input)?)?;
         }
 
         eval_inner(&self.program, &mut arg_stack)?;
 
-        let mut out: SmallVec<_> = arg_stack.items().iter().map(|i| i.as_f32()).collect();
+        let mut out: SmallVec<_> = arg_stack
+            .items()
+            .iter()
+            .map(|i| i.as_f32())
+            .collect::<Option<_>>()?;
 
+        if self
+            .clamper
+            .range
+            .as_ref()
+            .is_some_and(|range| range.len() != out.len())
+        {
+            return None;
+        }
         self.clamper.clamp_output(&mut out);
 
         Some(out)
@@ -69,40 +89,6 @@ impl Type4 {
                 .map(|range| range.iter().map(|(min, max)| [*min, *max]).collect()),
             instructions,
         })
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Argument {
-    Float(f32),
-    Bool(bool),
-}
-
-impl Default for Argument {
-    fn default() -> Self {
-        Self::Float(0.0)
-    }
-}
-
-impl Argument {
-    fn as_bool(&self) -> bool {
-        match self {
-            Self::Float(f) => *f != 0.0,
-            Self::Bool(b) => *b,
-        }
-    }
-
-    fn as_f32(&self) -> f32 {
-        match self {
-            Self::Float(f) => *f,
-            Self::Bool(b) => {
-                if *b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-        }
     }
 }
 
@@ -187,260 +173,81 @@ impl<T: Default, const C: usize> ArgumentsStack<T, C> {
 type InterpreterStack = ArgumentsStack<Argument, 64>;
 type ParseStack = ArgumentsStack<Vec<PostScriptOp>, 2>;
 
-fn eval_inner(procedure: &[PostScriptOp], arg_stack: &mut InterpreterStack) -> Option<()> {
-    macro_rules! zero {
-        ($eval:expr) => {
-            arg_stack.push($eval);
-        };
-    }
-
-    macro_rules! one_f {
-        ($eval:expr) => {
-            let n1 = arg_stack.pop()?;
-            arg_stack.push(Argument::Float($eval(n1.as_f32())));
-        };
-    }
-
-    macro_rules! two_f {
-        ($eval:expr) => {
-            let n2 = arg_stack.pop()?;
-            let n1 = arg_stack.pop()?;
-            arg_stack.push(Argument::Float($eval(n1.as_f32(), n2.as_f32())));
-        };
-    }
-
-    macro_rules! four {
-        ($eval_f:expr, $eval_b:expr) => {
-            let n2 = arg_stack.pop()?;
-            let n1 = arg_stack.pop()?;
-
-            let res = match (n1, n2) {
-                (Argument::Float(f1), Argument::Float(f2)) => Argument::Float($eval_f(f1, f2)),
-                (Argument::Float(_), Argument::Bool(f2)) => {
-                    Argument::Bool($eval_b(n1.as_bool(), f2))
-                }
-                (Argument::Bool(f1), Argument::Float(_)) => {
-                    Argument::Bool($eval_b(f1, n2.as_bool()))
-                }
-                (Argument::Bool(f1), Argument::Bool(f2)) => Argument::Bool($eval_b(f1, f2)),
-            };
-
-            arg_stack.push(res);
-        };
-    }
-
-    fn bf(cond: bool) -> f32 {
-        (cond as i32) as f32
-    }
-
+fn eval_inner(procedure: &[PostScriptOp], stack: &mut InterpreterStack) -> Option<()> {
+    use PostScriptOp as Op;
     for op in procedure {
         match op {
-            PostScriptOp::Number(n) => arg_stack.push(Argument::Float(n.as_f64() as f32))?,
-            PostScriptOp::Abs => {
-                one_f!(|n: f32| n.abs());
+            Op::Number(number) => stack.push(Argument::from_number(*number)?)?,
+            Op::True => stack.push(Argument::Bool(true))?,
+            Op::False => stack.push(Argument::Bool(false))?,
+            Op::If(body) => {
+                if stack.pop()?.boolean()? {
+                    eval_inner(body, stack)?;
+                }
             }
-            PostScriptOp::Add => {
-                two_f!(|n1: f32, n2: f32| n1 + n2);
+            Op::IfElse(yes, no) => {
+                let condition = stack.pop()?.boolean()?;
+                eval_inner(if condition { yes } else { no }, stack)?;
             }
-            PostScriptOp::Atan => {
-                two_f!(|n1: f32, n2: f32| {
-                    let mut res = n1.atan2(n2).to_degrees() % 360.0;
-                    if res < 0.0 {
-                        res += 360.0;
-                    }
-
-                    res
-                });
+            Op::Copy => {
+                let count = stack.pop()?.count()?;
+                let start = stack.len().checked_sub(count)?;
+                for index in start..stack.len() {
+                    stack.push(*stack.at(index)?)?;
+                }
             }
-            PostScriptOp::Ceiling => {
-                one_f!(|n: f32| n.ceil());
+            Op::Dup => stack.push(*stack.last()?)?,
+            Op::Exch => {
+                let second = stack.pop()?;
+                let first = stack.pop()?;
+                stack.push(second)?;
+                stack.push(first)?;
             }
-            PostScriptOp::Cos => {
-                one_f!(|n: f32| n.to_radians().cos());
+            Op::Index => {
+                let depth = stack.pop()?.count()?;
+                let index = stack.len().checked_sub(depth.checked_add(1)?)?;
+                stack.push(*stack.at(index)?)?;
             }
-            PostScriptOp::Cvi => {
-                one_f!(|n: f32| n.trunc());
+            Op::Pop => {
+                stack.pop()?;
             }
-            PostScriptOp::Cvr => {
-                one_f!(|n: f32| n);
-            }
-            PostScriptOp::Div => {
-                two_f!(|n1: f32, n2: f32| n1 / n2);
-            }
-            PostScriptOp::Exp => {
-                two_f!(|n1: f32, n2: f32| n1.powf(n2));
-            }
-            PostScriptOp::Floor => {
-                one_f!(|n: f32| n.floor());
-            }
-            PostScriptOp::Idiv => {
-                two_f!(|n1: f32, n2: f32| {
-                    let n1 = n1 as i32;
-                    let n2 = n2 as i32;
-
-                    (n1 / n2) as f32
-                });
-            }
-            PostScriptOp::Ln => {
-                one_f!(|n: f32| n.ln());
-            }
-            PostScriptOp::Log => {
-                one_f!(|n: f32| n.log10());
-            }
-            PostScriptOp::Mod => {
-                two_f!(|n1: f32, n2: f32| n1.rem(n2));
-            }
-            PostScriptOp::Mul => {
-                two_f!(|n1: f32, n2: f32| n1 * n2);
-            }
-            PostScriptOp::Neg => {
-                one_f!(|n: f32| -n);
-            }
-            PostScriptOp::Round => {
-                one_f!(|n: f32| {
-                    // PostScript ties go toward +infinity. Adding 0.5 first
-                    // would lose the representable neighbor just below a half.
-                    let lower = n.floor();
-                    if n - lower >= 0.5 { lower + 1.0 } else { lower }
-                });
-            }
-            PostScriptOp::Sin => {
-                one_f!(|n: f32| n.to_radians().sin());
-            }
-            PostScriptOp::Sqrt => {
-                one_f!(|n: f32| n.sqrt());
-            }
-            PostScriptOp::Sub => {
-                two_f!(|n1: f32, n2: f32| n1 - n2);
-            }
-            PostScriptOp::Truncate => {
-                one_f!(|n: f32| n.trunc());
-            }
-            PostScriptOp::And => {
-                two_f!(|n1: f32, n2: f32| (n1 as i32 & n2 as i32) as f32);
-            }
-            PostScriptOp::Bitshift => {
-                two_f!(|n1: f32, n2: f32| {
-                    let num = n1 as u32;
-                    let shift = n2 as i32;
-
+            Op::Roll => {
+                let shift = stack.pop()?.integer()?;
+                let count = stack.pop()?.count()?;
+                let start = stack.len().checked_sub(count)?;
+                let values = &mut stack.items_mut()[start..];
+                if !values.is_empty() {
                     if shift >= 0 {
-                        (num << shift) as f32
+                        values.rotate_right(shift as usize % values.len());
                     } else {
-                        (num >> -shift) as f32
+                        values.rotate_left(shift.unsigned_abs() as usize % values.len());
                     }
-                });
-            }
-            PostScriptOp::Eq => {
-                two_f!(|n1: f32, n2: f32| bf(n1 == n2));
-            }
-            PostScriptOp::False => {
-                zero!(Argument::Bool(false));
-            }
-            PostScriptOp::Ge => {
-                two_f!(|n1: f32, n2: f32| bf(n1 >= n2));
-            }
-            PostScriptOp::Gt => {
-                two_f!(|n1: f32, n2: f32| bf(n1 > n2));
-            }
-            PostScriptOp::Le => {
-                two_f!(|n1: f32, n2: f32| bf(n1 <= n2));
-            }
-            PostScriptOp::Lt => {
-                two_f!(|n1: f32, n2: f32| bf(n1 < n2));
-            }
-            PostScriptOp::Ne => {
-                two_f!(|n1: f32, n2: f32| bf(n1 != n2));
-            }
-            PostScriptOp::Not => {
-                let arg = arg_stack.pop()?;
-
-                let res = match arg {
-                    Argument::Float(f) => Argument::Float(!(f as i32) as f32),
-                    Argument::Bool(b) => Argument::Bool(!b),
-                };
-
-                arg_stack.push(res);
-            }
-            PostScriptOp::Or => {
-                four!(
-                    |n1: f32, n2: f32| ((n1 as i32) | (n2 as i32)) as f32,
-                    |b1: bool, b2: bool| b1 || b2
-                );
-            }
-            PostScriptOp::True => {
-                zero!(Argument::Bool(true));
-            }
-            PostScriptOp::Xor => {
-                four!(
-                    |n1: f32, n2: f32| ((n1 as i32) ^ (n2 as i32)) as f32,
-                    |b1: bool, b2: bool| b1 ^ b2
-                );
-            }
-            PostScriptOp::If(p) => {
-                let cond = arg_stack.pop()?.as_bool();
-
-                if cond {
-                    eval_inner(p, arg_stack)?;
                 }
             }
-            PostScriptOp::IfElse(p1, p2) => {
-                let cond = arg_stack.pop()?.as_bool();
-
-                if cond {
-                    eval_inner(p1, arg_stack)?;
-                } else {
-                    eval_inner(p2, arg_stack)?;
-                }
+            Op::Abs
+            | Op::Ceiling
+            | Op::Cos
+            | Op::Cvi
+            | Op::Cvr
+            | Op::Floor
+            | Op::Ln
+            | Op::Log
+            | Op::Neg
+            | Op::Not
+            | Op::Round
+            | Op::Sin
+            | Op::Sqrt
+            | Op::Truncate => {
+                let value = stack.pop()?.unary(op)?;
+                stack.push(value)?;
             }
-            PostScriptOp::Copy => {
-                let n = arg_stack.pop()?.as_f32() as u32 as usize;
-                let start = arg_stack.len().checked_sub(n)?;
-                for i in start..arg_stack.len() {
-                    arg_stack.push(*arg_stack.at(i)?);
-                }
-            }
-            PostScriptOp::Dup => {
-                arg_stack.push(*arg_stack.last()?);
-            }
-            PostScriptOp::Exch => {
-                let n2 = arg_stack.pop()?;
-                let n1 = arg_stack.pop()?;
-
-                arg_stack.push(n2);
-                arg_stack.push(n1);
-            }
-            PostScriptOp::Index => {
-                let n = arg_stack.pop()?.as_f32() as u32 as usize;
-                let n = arg_stack.len().checked_sub(n + 1)?;
-
-                arg_stack.push(*arg_stack.at(n)?);
-            }
-            PostScriptOp::Pop => {
-                arg_stack.pop()?;
-            }
-            PostScriptOp::Roll => {
-                let j = arg_stack.pop()?.as_f32() as i32;
-                let n = arg_stack.pop()?.as_f32() as u32 as usize;
-                let trimmed_n = arg_stack.len().checked_sub(n)?;
-
-                let target = &mut arg_stack.items_mut()[trimmed_n..];
-
-                if target.is_empty() {
-                    continue;
-                }
-
-                if j >= 0 {
-                    let shift = j as usize % target.len();
-                    target.rotate_right(shift);
-                } else {
-                    let shift = (-j) as usize % target.len();
-                    target.rotate_left(shift);
-                }
+            _ => {
+                let second = stack.pop()?;
+                let value = stack.pop()?.binary(second, op)?;
+                stack.push(value)?;
             }
         }
     }
-
     Some(())
 }
 
@@ -472,7 +279,7 @@ fn parse_procedure_inner(
 
             break;
         } else if r.peek_byte()? == b'{' {
-            stack.push(parse_procedure_inner(r, depth + 1, operation_count)?);
+            stack.push(parse_procedure_inner(r, depth + 1, operation_count)?)?;
         } else {
             let op = PostScriptOp::from_reader(r, &mut stack)?;
             *operation_count = operation_count.checked_add(1)?;
@@ -496,7 +303,11 @@ fn flatten_program(
 ) -> Option<()> {
     for op in program {
         let instruction = match op {
-            PostScriptOp::Number(number) => CalculatorInstruction::Number(number.as_f64() as f32),
+            PostScriptOp::Number(number) => match Argument::from_number(*number)? {
+                Argument::Integer(value) => CalculatorInstruction::Integer(value),
+                Argument::Float(value) => CalculatorInstruction::Number(value),
+                Argument::Bool(_) => return None,
+            },
             PostScriptOp::Abs => CalculatorInstruction::Abs,
             PostScriptOp::Add => CalculatorInstruction::Add,
             PostScriptOp::Atan => CalculatorInstruction::Atan,
@@ -617,7 +428,7 @@ pub(super) enum PostScriptOp {
 impl PostScriptOp {
     fn from_reader(r: &mut Reader<'_>, stack: &mut ParseStack) -> Option<Self> {
         let op = if let Some(n) = r.read::<Number>(&ReaderContext::dummy()) {
-            // TODO: Support radix numbers
+            // Calculator operands use PDF numeric syntax, without PostScript radix tokens.
             Self::Number(n)
         } else {
             let op = r.read::<content::Operator<'_>>(&ReaderContext::dummy())?;
@@ -685,9 +496,7 @@ mod tests {
     use crate::function::type4::{
         MAX_CALCULATOR_NESTING, MAX_CALCULATOR_OPERATIONS, PostScriptOp, Type4, parse_procedure,
     };
-    use crate::function::{
-        CalculatorInstruction, Clamper, Function, FunctionType, TupleVec, Values,
-    };
+    use crate::function::{CalculatorInstruction, Clamper, Function, FunctionType, TupleVec};
     use std::f32::consts::LN_10;
     use std::sync::Arc;
 
@@ -746,12 +555,12 @@ mod tests {
             calculator.instructions,
             vec![
                 CalculatorInstruction::Dup,
-                CalculatorInstruction::Number(0.0),
+                CalculatorInstruction::Integer(0),
                 CalculatorInstruction::Gt,
                 CalculatorInstruction::JumpIfFalse(6),
-                CalculatorInstruction::Number(1.0),
+                CalculatorInstruction::Integer(1),
                 CalculatorInstruction::Jump(7),
-                CalculatorInstruction::Number(2.0),
+                CalculatorInstruction::Integer(2),
                 CalculatorInstruction::Add,
             ]
         );
@@ -785,8 +594,16 @@ mod tests {
             },
         };
 
-        let res = type4.eval(Values::new()).unwrap();
-
+        let mut stack = super::InterpreterStack::new();
+        super::eval_inner(&type4.program, &mut stack).unwrap();
+        let res = stack
+            .items()
+            .iter()
+            .map(|value| match value {
+                super::Argument::Bool(value) => f32::from(u8::from(*value)),
+                _ => value.as_f32().unwrap(),
+            })
+            .collect::<Vec<_>>();
         assert_eq!(res.as_slice(), out);
     }
 

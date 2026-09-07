@@ -1,221 +1,239 @@
-use crate::function::{Clamper, TupleVec, Values, interpolate};
+use crate::function::{Clamper, TupleVec, Values};
 use hayro_syntax::bit_reader::BitReader;
-use hayro_syntax::object::Array;
-use hayro_syntax::object::Stream;
-use hayro_syntax::object::dict::keys::{BITS_PER_SAMPLE, DECODE, ENCODE, SIZE};
+use hayro_syntax::object::{Array, Dict, Number, Object, Stream};
 use smallvec::{SmallVec, smallvec};
+
+#[cfg(test)]
+mod tests;
+
+// Bound owned sample storage and worst-case scalar interpolation contributions
+// before decoding or allocation. These do not bound the general stream decoder.
+const MAX_COMPONENTS: usize = 64;
+const MAX_SAMPLES: usize = 16 * 1024 * 1024;
+const MAX_CONTRIBUTIONS: usize = 65_536;
 
 /// A type 0 function (sampled function).
 #[derive(Debug)]
 pub(crate) struct Type0 {
-    sizes: IntVec,
+    sizes: SmallVec<[usize; 4]>,
     strides: Vec<usize>,
     table: Vec<u32>,
     clamper: Clamper,
-    range: TupleVec,
-    bits_per_sample: u8,
+    maximum: f64,
+    cubic: bool,
     encode: TupleVec,
     decode: TupleVec,
 }
 
 impl Type0 {
-    /// Create a new type 0 function.
     pub(crate) fn new(stream: &Stream<'_>) -> Option<Self> {
         let dict = stream.dict();
-        let bits_per_sample = dict.get::<u8>(BITS_PER_SAMPLE)?;
-
-        if !matches!(bits_per_sample, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
-            error!("invalid bits per sample: {bits_per_sample}");
-
+        let bits = integer(dict, b"BitsPerSample")?;
+        if !matches!(bits, 1 | 2 | 4 | 8 | 12 | 16 | 24 | 32) {
             return None;
         }
-
-        let clamper = Clamper::new(dict)?;
-        let range = clamper.range.clone()?;
-
-        if range.is_empty() {
-            warn!("encountered Type0 function with invalid range length 0.");
-
-            return None;
-        }
-
-        let sizes = dict
-            .get::<Array<'_>>(SIZE)?
-            .iter::<u32>()
-            .collect::<IntVec>();
-
-        let encode = dict
-            .get::<TupleVec>(ENCODE)
-            .unwrap_or(sizes.iter().map(|s| (0.0, (*s - 1) as f32)).collect());
-
-        let decode = dict.get::<TupleVec>(DECODE).unwrap_or(range.clone());
-
-        let mut data = {
-            let decoded = stream.decoded().ok()?;
-            let mut buf = vec![];
-            let mut reader = BitReader::new(&decoded);
-
-            while let Some(data) = reader.read(bits_per_sample) {
-                buf.push(data);
-            }
-
-            buf
+        let order = if dict.contains_key(b"Order") {
+            integer(dict, b"Order")?
+        } else {
+            1
         };
-
-        let mut stride = range.len();
+        if !matches!(order, 1 | 3) {
+            return None;
+        }
+        let domain = pairs(dict, b"Domain")?;
+        let range = pairs(dict, b"Range")?;
+        // A zero-width domain has no defined encoding denominator. Constant
+        // dimensions instead use Size 1 with an ordinary, nonempty domain.
+        if domain.iter().any(|&(a, b)| a >= b) || range.iter().any(|&(a, b)| a > b) {
+            return None;
+        }
+        let sizes = objects(dict, b"Size", MAX_COMPONENTS)?
+            .into_iter()
+            .map(|value| {
+                let size = Number::try_from(value).ok()?.as_i64_exact()?;
+                let size = usize::try_from(size).ok()?;
+                (size > 0).then_some(size)
+            })
+            .collect::<Option<SmallVec<[_; 4]>>>()?;
+        if sizes.len() != domain.len() {
+            return None;
+        }
+        let mut entries = range.len();
+        let mut contributions = range.len();
         let mut strides = Vec::with_capacity(sizes.len());
-        for size in &sizes {
-            strides.push(stride);
-            stride = stride.checked_mul(*size as usize)?;
+        for &size in &sizes {
+            strides.push(entries);
+            entries = entries.checked_mul(size)?;
+            // PDF 1.7 7.10.2 ignores Order 3 in dimensions smaller than 4.
+            let neighbors = if order == 3 && size >= 4 {
+                4
+            } else {
+                size.min(2)
+            };
+            contributions = contributions.checked_mul(neighbors)?;
+            if entries > MAX_SAMPLES || contributions > MAX_CONTRIBUTIONS {
+                return None;
+            }
         }
-        let num_expected_entries = stride;
-
-        if data.len() != num_expected_entries {
-            warn!("Type0 function didn't have the expected number of sample entries.");
-            data.truncate(num_expected_entries);
+        let encode = if dict.contains_key(b"Encode") {
+            pairs(dict, b"Encode")?
+        } else {
+            sizes.iter().map(|size| (0.0, (size - 1) as f32)).collect()
+        };
+        let decode = if dict.contains_key(b"Decode") {
+            pairs(dict, b"Decode")?
+        } else {
+            range.clone()
+        };
+        if encode.len() != domain.len() || decode.len() != range.len() {
+            return None;
         }
-
+        let decoded = stream.decoded().ok()?;
+        let bytes = entries.checked_mul(bits as usize)?.div_ceil(8);
+        if decoded.len() < bytes {
+            return None;
+        }
+        // Read precisely the declared samples; byte padding and trailing stream
+        // data are not sample entries and must not inflate the owned table.
+        let mut reader = BitReader::new(&decoded[..bytes]);
+        let table = (0..entries)
+            .map(|_| reader.read(bits as u8))
+            .collect::<Option<Vec<_>>>()?;
         Some(Self {
             sizes,
             strides,
-            clamper,
-            range,
-            bits_per_sample,
-            table: data,
+            table,
+            clamper: Clamper {
+                domain,
+                range: Some(range),
+            },
+            maximum: ((1_u64 << bits) - 1) as f64,
+            cubic: order == 3,
             encode,
             decode,
         })
     }
 
-    /// Evaluate a type 0 function with the given input.
-    pub(crate) fn eval(&self, mut input: Values) -> Option<Values> {
-        if input.len() != self.sizes.len() {
-            warn!("wrong number of arguments for sampled function");
-
+    pub(crate) fn eval(&self, input: Values) -> Option<Values> {
+        if input.len() != self.sizes.len() || input.iter().any(|value| !value.is_finite()) {
             return None;
         }
-
-        self.clamper.clamp_input(&mut input);
-
-        let mut key = input;
-
-        for (((x, domain), encode), size) in key
-            .iter_mut()
-            .zip(self.clamper.domain.iter())
-            .zip(self.encode.iter())
-            .zip(self.sizes.iter())
-        {
-            *x = interpolate(*x, domain.0, domain.1, encode.0, encode.1);
-            *x = x.max(0.0).min(*size as f32 - 1.0);
+        let mut axes = SmallVec::<[Axis; 4]>::new();
+        for (index, value) in input.into_iter().enumerate() {
+            let (low, high) = self.clamper.domain[index];
+            let (start, end) = self.encode[index];
+            // Binary64 avoids overflow/cancellation in finite binary32 dictionary
+            // bounds and preserves all 32 sample bits until the final output cast.
+            let fraction = (f64::from(value.clamp(low, high)) - f64::from(low))
+                / (f64::from(high) - f64::from(low));
+            let key = (f64::from(start) + fraction * (f64::from(end) - f64::from(start)))
+                .clamp(0.0, (self.sizes[index] - 1) as f64);
+            axes.push(Axis::new(key, self.sizes[index], self.cubic));
         }
-
-        let in_prev = key.iter().map(|v| v.floor() as u32).collect::<IntVec>();
-        let in_next = key.iter().map(|v| v.ceil() as u32).collect::<IntVec>();
-
-        let interpolator =
-            Interpolator::new(&key, in_prev, in_next, &self.strides, self.range.len());
-
-        let interpolated = interpolator.interpolate(&self.table)?;
-
-        let mut out = interpolated
-            .iter()
-            .zip(self.decode.iter())
-            .map(|(x, decode)| {
-                interpolate(
-                    *x,
-                    0.0,
-                    (2_u32.pow(self.bits_per_sample as u32) - 1) as f32,
-                    decode.0,
-                    decode.1,
-                )
-            })
-            .collect::<SmallVec<_>>();
-
-        self.clamper.clamp_output(&mut out);
-
-        Some(out)
-    }
-}
-
-type FloatVec = SmallVec<[f32; 4]>;
-type IntVec = SmallVec<[u32; 4]>;
-
-// See <https://github.com/apache/pdfbox/blob/bb778d4784f354c36ce032e91a0cee2169a4c598/pdfbox/src/main/java/org/apache/pdfbox/pdmodel/common/function/PDFunctionType0.java#L252>
-struct Interpolator<'a> {
-    input: &'a [f32],
-    strides: &'a [usize],
-    in_prev: IntVec,
-    in_next: IntVec,
-    out_len: usize,
-}
-
-impl<'a> Interpolator<'a> {
-    fn new(
-        input: &'a [f32],
-        in_prev: IntVec,
-        in_next: IntVec,
-        strides: &'a [usize],
-        out_len: usize,
-    ) -> Self {
-        Self {
-            input,
-            in_prev,
-            in_next,
-            strides,
-            out_len,
-        }
+        let mut samples: SmallVec<[f64; 4]> = smallvec![0.0_f64; self.decode.len()];
+        self.interpolate(&axes, 0, 0, 1.0, &mut samples);
+        let range = self.clamper.range.as_ref()?;
+        Some(
+            samples
+                .into_iter()
+                .enumerate()
+                .map(|(index, sample)| {
+                    let (start, end) = self.decode[index];
+                    let value = f64::from(start)
+                        + (sample / self.maximum) * (f64::from(end) - f64::from(start));
+                    value.clamp(f64::from(range[index].0), f64::from(range[index].1)) as f32
+                })
+                .collect(),
+        )
     }
 
-    fn interpolate(&self, table: &[u32]) -> Option<FloatVec> {
-        let mut out = smallvec![0.0; self.out_len];
-        self.interpolate_inner(0, 0, 1.0, table, &mut out)?;
-        Some(out)
-    }
-
-    fn interpolate_inner(
+    // First input dimension varies fastest, with output components adjacent.
+    // The previous multilinear traversal was based on PDFBox at
+    // https://github.com/apache/pdfbox/blob/bb778d4784f354c36ce032e91a0cee2169a4c598/pdfbox/src/main/java/org/apache/pdfbox/pdmodel/common/function/PDFunctionType0.java#L252
+    fn interpolate(
         &self,
-        step: usize,
+        axes: &[Axis],
+        dimension: usize,
         offset: usize,
-        weight: f32,
-        table: &[u32],
-        out: &mut [f32],
-    ) -> Option<()> {
-        if step == self.input.len() {
-            let sample = table.get(offset..offset + self.out_len)?;
-            for (out, sample) in out.iter_mut().zip(sample) {
-                *out += weight * *sample as f32;
+        weight: f64,
+        out: &mut [f64],
+    ) {
+        if dimension == axes.len() {
+            for (output, sample) in out.iter_mut().zip(&self.table[offset..]) {
+                *output += weight * f64::from(*sample);
             }
-            return Some(());
+            return;
         }
-
-        let prev = self.in_prev[step];
-        let next = self.in_next[step];
-        let stride = self.strides[step];
-
-        if prev == next {
-            self.interpolate_inner(
-                step + 1,
-                offset + prev as usize * stride,
-                weight,
-                table,
+        for &(index, factor) in &axes[dimension].0 {
+            self.interpolate(
+                axes,
+                dimension + 1,
+                offset + index * self.strides[dimension],
+                weight * factor,
                 out,
-            )
-        } else {
-            let next_weight = self.input[step] - prev as f32;
-            self.interpolate_inner(
-                step + 1,
-                offset + prev as usize * stride,
-                weight * (1.0 - next_weight),
-                table,
-                out,
-            )?;
-            self.interpolate_inner(
-                step + 1,
-                offset + next as usize * stride,
-                weight * next_weight,
-                table,
-                out,
-            )
+            );
         }
     }
+}
+
+struct Axis(SmallVec<[(usize, f64); 4]>);
+
+impl Axis {
+    fn new(key: f64, size: usize, cubic: bool) -> Self {
+        let lower = key.floor() as usize;
+        let t = key - lower as f64;
+        if t == 0.0 {
+            return Self(smallvec![(lower, 1.0)]);
+        }
+        if !cubic || size < 4 {
+            return Self(smallvec![(lower, 1.0 - t), (lower + 1, t)]);
+        }
+        // Cubic Hermite interpolation: endpoint derivatives are half the
+        // difference of neighboring samples; repeat boundary samples. Written
+        // from the Hermite basis, with Ghostscript 10.07.1 as an external oracle.
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+        let h10 = t3 - 2.0 * t2 + t;
+        let h01 = -2.0 * t3 + 3.0 * t2;
+        let h11 = t3 - t2;
+        Self(smallvec![
+            (lower.saturating_sub(1), -0.5 * h10),
+            (lower, h00 - 0.5 * h11),
+            (lower + 1, h01 + 0.5 * h10),
+            ((lower + 2).min(size - 1), 0.5 * h11),
+        ])
+    }
+}
+
+fn integer(dict: &Dict<'_>, key: &[u8]) -> Option<i64> {
+    dict.get::<Number>(key)?.as_i64_exact()
+}
+
+fn objects<'a>(dict: &Dict<'a>, key: &[u8], limit: usize) -> Option<Vec<Object<'a>>> {
+    let array = dict.get::<Array<'_>>(key)?;
+    let count = array.raw_iter().take(limit + 1).count();
+    if count == 0 || count > limit {
+        return None;
+    }
+    let values = array
+        .iter::<Object<'_>>()
+        .take(limit + 1)
+        .collect::<Vec<_>>();
+    (values.len() == count).then_some(values)
+}
+
+fn pairs(dict: &Dict<'_>, key: &[u8]) -> Option<TupleVec> {
+    let values = objects(dict, key, MAX_COMPONENTS * 2)?;
+    if !values.len().is_multiple_of(2) {
+        return None;
+    }
+    values
+        .chunks_exact(2)
+        .map(|pair| {
+            let start = f32::try_from(pair[0].clone()).ok()?;
+            let end = f32::try_from(pair[1].clone()).ok()?;
+            (start.is_finite() && end.is_finite()).then_some((start, end))
+        })
+        .collect()
 }

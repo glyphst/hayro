@@ -297,7 +297,12 @@ fn eval_inner(procedure: &[PostScriptOp], arg_stack: &mut InterpreterStack) -> O
                 one_f!(|n: f32| -n);
             }
             PostScriptOp::Round => {
-                one_f!(|n: f32| n.round());
+                one_f!(|n: f32| {
+                    // PostScript ties go toward +infinity. Adding 0.5 first
+                    // would lose the representable neighbor just below a half.
+                    let lower = n.floor();
+                    if n - lower >= 0.5 { lower + 1.0 } else { lower }
+                });
             }
             PostScriptOp::Sin => {
                 one_f!(|n: f32| n.to_radians().sin());
@@ -888,9 +893,41 @@ mod tests {
         op_impl("3.2 round", &[3.0]);
         op_impl("6.5 round", &[7.0]);
         op_impl("-4.8 round", &[-5.0]);
-        // TODO: This rounding doesn't match the PS spec.
-        // op_impl("-6.5 round", &[-6.0]);
+        op_impl("-6.5 round", &[-6.0]);
         op_impl("99 round", &[99.0]);
+        op_impl("99.0 round", &[99.0]);
+    }
+
+    #[test]
+    fn op_round_halfway_neighbors() {
+        // The oracle is the stated nearest integer, with ties toward +infinity
+        // (PostScript Language Reference, third edition, section 8.2, round).
+        for (half, lower, upper) in [
+            (-6.5_f32, -7.0, -6.0),
+            (-1.5, -2.0, -1.0),
+            (-0.5, -1.0, 0.0),
+            (0.5, 0.0, 1.0),
+            (1.5, 1.0, 2.0),
+            (6.5, 6.0, 7.0),
+        ] {
+            for (input, expected) in [
+                (half.next_down(), lower),
+                (half, upper),
+                (half.next_up(), upper),
+            ] {
+                op_impl(&format!("{input} round"), &[expected]);
+            }
+        }
+        // Integral values must not move when the spacing reaches one or more.
+        for value in [
+            -16_777_216.0_f32,
+            -8_388_609.0,
+            0.0,
+            8_388_609.0,
+            16_777_216.0,
+        ] {
+            op_impl(&format!("{value} round"), &[value]);
+        }
     }
 
     #[test]

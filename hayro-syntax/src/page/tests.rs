@@ -164,6 +164,7 @@ fn small_source_boxes_are_scaled_before_pixel_dimension_rounding() {
             page.render_dimensions(),
             ((width * unit) as f32, (height * unit) as f32)
         );
+        assert_eq!(page.render_dimensions_f64(), (width * unit, height * unit));
     }
 }
 

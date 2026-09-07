@@ -60,11 +60,11 @@ impl<'a> Readable<'a> for Rect {
 }
 
 fn from_arr(array: &Array<'_>) -> Option<Rect> {
-    let mut iter = array.iter::<f32>();
-    let x0 = iter.next()? as f64;
-    let y0 = iter.next()? as f64;
-    let x1 = iter.next()? as f64;
-    let y1 = iter.next()? as f64;
+    let mut iter = array.iter::<f64>();
+    let x0 = iter.next()?;
+    let y0 = iter.next()?;
+    let x1 = iter.next()?;
+    let y1 = iter.next()?;
 
     Some(Rect::new(x0.min(x1), y0.min(y1), x1.max(x0), y1.max(y0)))
 }
@@ -81,3 +81,18 @@ impl TryFrom<Object<'_>> for Rect {
 }
 
 impl ObjectLike<'_> for Rect {}
+
+#[cfg(test)]
+mod tests {
+    use super::Rect;
+    use crate::object::FromBytes;
+
+    #[test]
+    fn fractional_rectangles_preserve_width_at_large_origins() {
+        let rect =
+            Rect::from_bytes(b"[1000000000.125 -0.00000001 1000000000.375 0.00000002]").unwrap();
+        assert_eq!(rect.width(), 0.25);
+        assert_eq!(rect.y0, -0.00000001);
+        assert_eq!(rect.y1, 0.00000002);
+    }
+}

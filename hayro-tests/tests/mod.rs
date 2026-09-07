@@ -487,6 +487,7 @@ fn visibility() {
             LoadPdfError::Decryption(d) => match d {
                 DecryptionError::MissingIDEntry => {}
                 DecryptionError::PasswordProtected => {}
+                DecryptionError::PasswordEncoding => {}
                 DecryptionError::InvalidEncryption => {}
                 DecryptionError::UnsupportedAlgorithm => {}
             },

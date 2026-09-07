@@ -4,6 +4,7 @@ use crate::object::Object;
 use crate::object::macros::object;
 use crate::reader::Reader;
 use crate::reader::{Readable, ReaderContext, ReaderExt, Skippable};
+use crate::trivia::is_regular_character;
 
 impl Skippable for bool {
     fn skip(r: &mut Reader<'_>, _: bool) -> Option<()> {
@@ -17,7 +18,11 @@ impl Skippable for bool {
 
 impl Readable<'_> for bool {
     fn read(r: &mut Reader<'_>, _: &ReaderContext<'_>) -> Option<Self> {
-        match r.skip::<Self>(true)? {
+        let token = r.skip::<Self>(true)?;
+        if r.peek_byte().is_some_and(is_regular_character) {
+            return None;
+        }
+        match token {
             b"true" => Some(true),
             b"false" => Some(false),
             _ => None,
@@ -52,10 +57,22 @@ mod tests {
 
     #[test]
     fn bool_trailing() {
-        assert!(
-            Reader::new("trueabdf".as_bytes())
-                .read_without_context::<bool>()
-                .unwrap()
-        );
+        for token in ["trueabdf", "falsejunk", "true0", "false#20", "true-false"] {
+            assert!(
+                Reader::new(token.as_bytes())
+                    .read_without_context::<bool>()
+                    .is_none()
+            );
+        }
+        for suffix in b"\x00\t\n\x0c\r ()<>[]{}/%" {
+            for token in ["true", "false"] {
+                let mut bytes = token.as_bytes().to_vec();
+                bytes.push(*suffix);
+                assert_eq!(
+                    Reader::new(&bytes).read_without_context::<bool>(),
+                    Some(token == "true")
+                );
+            }
+        }
     }
 }

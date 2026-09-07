@@ -1,6 +1,30 @@
 use super::PageStreamError;
 use crate::Pdf;
-use crate::object::{Null, ObjectIdentifier};
+use crate::object::{Dict, Name, Null, Object, ObjectIdentifier};
+
+#[test]
+fn typed_keywords_reject_prefixes_without_losing_following_dictionary_fields() {
+    let pdf = pdf("", b"<< /A falsejunk /B true /C nulljunk /D /Keep >>");
+    let dict = pdf
+        .xref()
+        .get::<Dict<'_>>(ObjectIdentifier::new(5, 0))
+        .unwrap();
+    assert!(dict.get::<bool>(b"A").is_none());
+    assert!(dict.get::<Null>(b"C").is_none());
+    assert_eq!(dict.get::<bool>(b"B"), Some(true));
+    assert_eq!(dict.get::<Name<'_>>(b"D").unwrap().as_ref(), b"Keep");
+    // The generic object API remains a recovering reader. Its null result is
+    // deliberately not proof that an optional typed entry is absent.
+    assert!(matches!(
+        dict.get::<Object<'_>>(b"A"),
+        Some(Object::Null(_))
+    ));
+    assert!(matches!(
+        dict.get::<Object<'_>>(b"C"),
+        Some(Object::Null(_))
+    ));
+    assert_eq!(dict.entries().count(), 4);
+}
 
 #[test]
 fn xref_definition_distinguishes_undefined_null_and_unreadable_objects() {

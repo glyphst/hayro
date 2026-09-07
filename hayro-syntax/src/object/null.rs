@@ -4,6 +4,7 @@ use crate::object::Object;
 use crate::object::macros::object;
 use crate::reader::Reader;
 use crate::reader::{Readable, ReaderContext, Skippable};
+use crate::trivia::is_regular_character;
 use core::fmt::{Display, Formatter};
 
 /// The null object.
@@ -27,6 +28,9 @@ impl Skippable for Null {
 impl Readable<'_> for Null {
     fn read(r: &mut Reader<'_>, ctx: &ReaderContext<'_>) -> Option<Self> {
         Self::skip(r, ctx.in_content_stream())?;
+        if r.peek_byte().is_some_and(is_regular_character) {
+            return None;
+        }
 
         Some(Self)
     }
@@ -55,11 +59,17 @@ mod tests {
 
     #[test]
     fn null_trailing() {
-        assert_eq!(
-            Reader::new("nullabs".as_bytes())
-                .read_without_context::<Null>()
-                .unwrap(),
-            Null
-        );
+        for token in ["nullabs", "null0", "null#20", "null-null"] {
+            assert!(
+                Reader::new(token.as_bytes())
+                    .read_without_context::<Null>()
+                    .is_none()
+            );
+        }
+        for suffix in b"\x00\t\n\x0c\r ()<>[]{}/%" {
+            let mut bytes = b"null".to_vec();
+            bytes.push(*suffix);
+            assert!(Reader::new(&bytes).read_without_context::<Null>().is_some());
+        }
     }
 }

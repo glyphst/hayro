@@ -27,6 +27,19 @@ fn decoded(
         pdf.extend(profile);
         pdf.extend_from_slice(b"\nendstream\nendobj\n");
     }
+    if space.contains("7 0 R") {
+        let function = b"{ pop pop pop pop pop pop pop }";
+        pdf.extend_from_slice(
+            format!(
+                "7 0 obj<</FunctionType 4/Domain[{}]/Range[0 1]/Length {}>>stream\n",
+                "0 1 ".repeat(8),
+                function.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(function);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    }
     pdf.extend_from_slice(b"trailer<</Root 1 0 R>>\n%%EOF");
     let pdf = Pdf::new(pdf).unwrap();
     let stream = pdf
@@ -535,4 +548,22 @@ fn indexed_matte_jpx_and_varying_opacity_preserve_palette_ownership() {
             .collect::<Vec<_>>()
     );
     assert_eq!(image.alpha.unwrap().data, [0, 64, 128, 255]);
+}
+
+#[test]
+fn indexed_matte_many_component_conversion_crosses_bounded_batches() {
+    let count = CONVERSION_BATCH_PIXELS + 3;
+    let data: Vec<u8> = (0..count).map(|i| (i % 2) as u8).collect();
+    let alpha = [2_u8, 2].repeat(count);
+    let image = decoded(
+        "[/Indexed [/DeviceN [/A /B /C /D /E /F /G /H] [/CalGray<</WhitePoint[1 1 1]>>] 7 0 R] 1 <01010101010101010000000000000000>]",
+        count as u32, 1, "/BitsPerComponent 8", &data,
+        "/BitsPerComponent 16/Matte[1]", &alpha,
+    ).unwrap();
+    let expected: Vec<u8> = data
+        .iter()
+        .flat_map(|index| [if *index == 0 { 188 } else { 0 }; 3])
+        .collect();
+    assert_eq!(rgb(&image), expected);
+    assert_eq!(image.alpha.unwrap().data, vec![2; count]);
 }

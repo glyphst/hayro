@@ -10,6 +10,8 @@ use hayro_syntax::object::dict::keys::*;
 use hayro_syntax::object::{Array, Name, Object, Stream};
 use smallvec::SmallVec;
 
+const CONVERSION_BATCH_PIXELS: usize = 4096;
+
 pub(super) fn decode(
     obj: &ImageXObject<'_>,
     context: &DecodeContext<'_>,
@@ -99,19 +101,20 @@ pub(super) fn decode(
             | ColorSpaceKind::CalRgb
             | ColorSpaceKind::Lab
     );
-    let channels = if gray {
-        1
-    } else if native {
-        3
-    } else {
-        components
-    };
+    let channels = if gray { 1 } else { 3 };
     let mut data = Vec::new();
     data.try_reserve_exact(count.checked_mul(channels)?).ok()?;
+    // Indexed images can expand one source index into many DeviceN components.
+    // Bound that intermediate plane independently of image dimensions.
+    let batch_length = count.min(CONVERSION_BATCH_PIXELS).checked_mul(components)?;
+    let mut batch = Vec::new();
+    if !native {
+        batch.try_reserve_exact(batch_length).ok()?;
+    }
     let mut alpha = Vec::new();
     alpha.try_reserve_exact(count).ok()?;
     let mut values = vec![0.0; components];
-    for _ in 0..count {
+    for pixel in 0..count {
         if let Some(indexed) = indexed {
             let mut index = [0.0];
             source.read(&mut index).ok()?;
@@ -147,20 +150,20 @@ pub(super) fn decode(
             );
         } else {
             // Keep the existing byte-input ICC/tint policy, but quantize only
-            // after recovering the source components. Convert the full batch.
+            // after recovering the source components. Bound each conversion.
             let values = values
                 .iter()
                 .map(|v| *v as f32)
                 .collect::<SmallVec<[f32; 4]>>();
-            data.extend(color_space.encode_values(&values));
+            batch.extend(color_space.encode_values(&values));
+            if batch.len() == batch_length || pixel + 1 == count {
+                let start = data.len();
+                let length = (batch.len() / components).checked_mul(3)?;
+                data.resize(start.checked_add(length)?, 0);
+                color_space.convert(&batch, &mut data[start..])?;
+                batch.clear();
+            }
         }
-    }
-    if !native && color_space.convert_in_place(&mut data).is_none() {
-        let mut output = Vec::new();
-        output.try_reserve_exact(count.checked_mul(3)?).ok()?;
-        output.resize(count * 3, 0);
-        color_space.convert(&data, &mut output)?;
-        data = output;
     }
     let mut gray = gray;
     if gray

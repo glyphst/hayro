@@ -122,3 +122,61 @@ fn cache_identity_includes_full_function_and_channel_order() {
         key(&format!("[/Identity {INVERT} /Identity /Identity]"))
     );
 }
+
+#[test]
+fn shading_patterns_keep_parent_initial_transfer_and_explicit_override() {
+    use crate::pattern::{Pattern, ShadingPattern};
+    let warning: crate::interpret::WarningSinkFn =
+        std::sync::Arc::new(|warning| panic!("{warning:?}"));
+    let initial = Some(ActiveTransferFunction::Single(parse(INVERT).unwrap()));
+    for (entries, expected) in [
+        ("", Some(0.75)),
+        ("/ExtGState << /TR /Identity >>", None),
+        ("/ExtGState << /TR2 /Default >>", None),
+    ] {
+        let source = format!(
+            "<< /PatternType 2 {entries} /Shading << /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 1 0] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >> >>"
+        );
+        let dict = Dict::from_bytes(source.as_bytes()).unwrap();
+        let shading = ShadingPattern::new(
+            &dict,
+            &crate::cache::Cache::new(),
+            1.0,
+            initial.clone(),
+            &warning,
+        )
+        .unwrap();
+        let mut pattern = Pattern::Shading(shading);
+        pattern
+            .set_selecting_transfer_function(Some(ActiveTransferFunction::Single(
+                parse("<< /FunctionType 2 /Domain [0 1] /N 2 >>").unwrap(),
+            )))
+            .unwrap();
+        let Pattern::Shading(shading) = pattern else {
+            panic!("shading")
+        };
+        let actual = shading.transfer_function.as_ref().map(|function| {
+            function
+                .apply(&AlphaColor::new([0.25; 4]))
+                .unwrap()
+                .components()[0]
+        });
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn identical_byte_tables_do_not_alias_different_real_transfer_boundaries() {
+    let make = |bound| {
+        parse(&format!("<< /FunctionType 3 /Domain [0 1] /Functions [<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [0] /N 1 >> << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [1] /N 1 >>] /Bounds [{bound}] /Encode [0 1 0 1] >>")).unwrap()
+    };
+    let a = make(0.499);
+    let b = make(0.5);
+    let mut first = std::array::from_fn::<_, 256, _>(|index| index as u8);
+    let mut second = first;
+    a.apply_to(&mut first);
+    b.apply_to(&mut second);
+    assert_eq!(first, second);
+    assert_ne!(a.apply_f32(0.4995), b.apply_f32(0.4995));
+    assert_ne!(a.cache_key(), b.cache_key());
+}

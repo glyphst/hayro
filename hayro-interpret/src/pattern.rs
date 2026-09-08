@@ -44,6 +44,7 @@ impl<'a> Pattern<'a> {
                 &dict,
                 &ctx.interpreter_cache.object_cache,
                 ctx.get().graphics_state.non_stroke_alpha,
+                ctx.initial_transfer_function.clone(),
                 &ctx.settings.warning_sink,
             )?)),
             Object::Stream(stream) => Some(Self::Tiling(Box::new(TilingPattern::new(
@@ -85,12 +86,13 @@ impl<'a> Pattern<'a> {
         }
     }
 
-    pub(crate) fn set_transfer_function(
+    pub(crate) fn set_selecting_transfer_function(
         &mut self,
         tf: Option<ActiveTransferFunction>,
     ) -> Option<()> {
         match self {
-            Self::Shading(pattern) => pattern.transfer_function = tf,
+            // Colored patterns use their parent stream's initial state.
+            Self::Shading(_) => {}
             Self::Tiling(pattern) => {
                 if !pattern.is_color
                     && let Some(tf) = &tf
@@ -100,7 +102,6 @@ impl<'a> Pattern<'a> {
                     pattern.non_stroking_paint =
                         Color::from_rgba(tf.apply(&pattern.non_stroking_paint.to_rgba())?);
                 }
-                pattern.transfer_function = tf;
             }
         }
         Some(())
@@ -141,6 +142,7 @@ impl ShadingPattern {
         dict: &Dict<'_>,
         cache: &Cache,
         opacity: f32,
+        mut transfer_function: Option<ActiveTransferFunction>,
         warning_sink: &interpret::WarningSinkFn,
     ) -> Option<Self> {
         let shading = dict.get::<Object<'_>>(SHADING).and_then(|o| {
@@ -153,15 +155,23 @@ impl ShadingPattern {
             .map(Affine::new)
             .unwrap_or_default();
 
-        if dict.contains_key(EXT_G_STATE) {
-            warn!("shading patterns with ext_g_state are not supported yet");
+        if let Some(state) = dict.get::<Dict<'_>>(EXT_G_STATE)
+            && let Some((key, object)) = crate::selected_transfer_function(&state)
+        {
+            transfer_function = match ActiveTransferFunction::from_object(&object, key == b"TR2") {
+                Ok(function) => function,
+                Err(_) => {
+                    warning_sink(crate::InterpreterWarning::TransferFunctionFailure);
+                    return None;
+                }
+            };
         }
 
         Some(Self {
             shading: Arc::new(shading),
             opacity,
             matrix,
-            transfer_function: None,
+            transfer_function,
             background_applies: true,
         })
     }
@@ -287,7 +297,7 @@ impl<'a> TilingPattern<'a> {
             xref: ctx.xref,
             nesting_depth,
             rendering_intent: state.graphics_state.rendering_intent,
-            transfer_function: None,
+            transfer_function: ctx.initial_transfer_function.clone(),
         })
     }
 

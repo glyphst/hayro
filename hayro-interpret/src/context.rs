@@ -330,6 +330,7 @@ mod shared_cache_tests {
 
 /// A per-page interpretation context that borrows shared data from an [`InterpreterCache`].
 pub struct Context<'a> {
+    pub(crate) initial_transfer_function: Option<crate::ActiveTransferFunction>,
     states: Vec<State<'a>>,
     path: BezPath,
     sub_path_start: Point,
@@ -376,6 +377,7 @@ impl<'a> Context<'a> {
         };
 
         Self {
+            initial_transfer_function: state.graphics_state.transfer_function.clone(),
             states: vec![state],
             settings,
             xref,
@@ -532,7 +534,7 @@ impl<'a> Context<'a> {
                     return failed(error);
                 }
                 if pattern
-                    .set_transfer_function(data.transfer_function.clone())
+                    .set_selecting_transfer_function(data.transfer_function.clone())
                     .is_none()
                 {
                     (self.settings.warning_sink)(

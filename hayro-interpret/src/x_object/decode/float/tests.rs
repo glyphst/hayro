@@ -411,6 +411,13 @@ fn implicit_jpx_palette_is_resolved_and_raw_transfer_requires_explicit_pdf_space
 #[test]
 fn jpx_mask_decode_and_calibrated_conversion_follow_pdf_dictionary_rules() {
     with_image(
+        "/Width 3 /Height 2 /Filter /JPXDecode /ImageMask true /BitsPerComponent 1",
+        jpx_fixtures::DEPTH_8,
+        |image| {
+            assert!(decode_context(image, None).is_none());
+        },
+    );
+    with_image(
         "/Width 3 /Height 2 /Filter /JPXDecode /ImageMask true /Decode [1 0] /BitsPerComponent 8",
         jpx_fixtures::DEPTH_1,
         |image| {

@@ -117,8 +117,14 @@ fn decode_context<'a>(
         .or(dict_bpc)
         .unwrap_or(fallback_bpc);
 
-    let ignore_decode =
-        crate::x_object::image::uses_jpx_decode(dict) && obj.kind != ImageKind::StencilMask;
+    let jpx = crate::x_object::image::uses_jpx_decode(dict);
+    if jpx
+        && obj.kind == ImageKind::StencilMask
+        && (bits_per_component != 1 || color_space.num_components() != 1)
+    {
+        return None;
+    }
+    let ignore_decode = jpx && obj.kind != ImageKind::StencilMask;
     let decode_arr = (!ignore_decode)
         .then(|| {
             dict.get::<Array<'_>>(D)

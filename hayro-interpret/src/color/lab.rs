@@ -194,6 +194,26 @@ mod tests {
     }
 
     #[test]
+    fn lab_lookup_encoding_handles_unbounded_and_constant_chroma_ranges() {
+        let bound = "300000000000000000000000000000000000000";
+        let lab = space(&format!(
+            "[/Lab <</WhitePoint[1 1 1]/Range[-{bound} {bound} 20 20]>>]"
+        ));
+        assert_eq!(
+            lab.encode_values(&[50.0, 0.0, 20.0]).as_slice(),
+            [128, 128, 0]
+        );
+        assert_eq!(
+            lab.encode_values(&[0.0, -3e38, -100.0]).as_slice(),
+            [0, 0, 0]
+        );
+        assert_eq!(
+            lab.encode_values(&[100.0, 3e38, 100.0]).as_slice(),
+            [255, 255, 0]
+        );
+    }
+
+    #[test]
     fn lab_malformed_parameters_fail_closed() {
         for definition in [
             "[/Lab <<>>]",

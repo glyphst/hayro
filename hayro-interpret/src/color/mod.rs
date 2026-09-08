@@ -545,6 +545,24 @@ impl ColorSpace {
     }
 
     pub(crate) fn encode_values(&self, input: &[f32]) -> SmallVec<[u8; 4]> {
+        if let ColorSpaceType::Lab(_) = self.0.as_ref() {
+            // Lab chroma bounds are finite but otherwise unbounded. Their
+            // difference can overflow binary32 even for a valid dictionary.
+            let ranges = self.component_ranges();
+            return input
+                .iter()
+                .zip(ranges.iter().cycle())
+                .map(|(value, &(low, high))| {
+                    if low == high {
+                        0
+                    } else {
+                        let t = (f64::from(*value) - f64::from(low))
+                            / (f64::from(high) - f64::from(low));
+                        (t * 255.0 + 0.5) as u8
+                    }
+                })
+                .collect();
+        }
         if let Some(hival) = self.indexed_hival() {
             return input
                 .iter()

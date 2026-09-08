@@ -113,7 +113,10 @@ impl EncodedRadialAxialShading {
         components[3] *= pattern.opacity;
 
         if let Some(tf) = &pattern.transfer_function {
-            return tf.apply(&AlphaColor::new(components)).components();
+            return tf
+                .apply(&AlphaColor::new(components))
+                .unwrap_or(AlphaColor::TRANSPARENT)
+                .components();
         }
 
         components

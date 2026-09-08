@@ -10,7 +10,7 @@ use crate::types::BlendMode;
 use crate::util::OptionLog;
 use crate::x_object::soft_mask::SoftMask;
 use hayro_syntax::content::ops::{LineCap, LineJoin};
-use hayro_syntax::object::dict::keys::{FONT, SMASK, TR, TR2};
+use hayro_syntax::object::dict::keys::{FONT, SMASK};
 use hayro_syntax::object::{Array, Dict, Name, Number, Object};
 use hayro_syntax::page::Resources;
 use kurbo::{Affine, BezPath, Vec2};
@@ -27,25 +27,63 @@ pub enum ActiveTransferFunction {
 }
 
 impl ActiveTransferFunction {
+    /// Parse a selected TR/TR2 value. Only TR2 permits the page-default name.
+    /// A reset returns `None`; malformed functions return an error.
+    pub fn from_object(
+        object: &Object<'_>,
+        allow_default: bool,
+    ) -> Result<Option<Self>, &'static str> {
+        if let Object::Name(name) = object {
+            return match name.as_ref() {
+                b"Identity" => Ok(None),
+                b"Default" if allow_default => Ok(None),
+                _ => Err("unknown or disallowed transfer name"),
+            };
+        }
+        let parse = |object: Object<'_>| {
+            if matches!(&object, Object::Name(name) if name.as_ref() == b"Identity") {
+                return Some(TransferFunction::identity());
+            }
+            TransferFunction::new(Function::new(&object)?)
+        };
+        if let Object::Array(array) = object {
+            if array.raw_iter().take(5).count() != 4 {
+                return Err("transfer array must have four entries");
+            }
+            let mut values = array.iter::<Object<'_>>();
+            let mut next = || {
+                values
+                    .next()
+                    .and_then(&parse)
+                    .ok_or("invalid transfer channel function")
+            };
+            Ok(Some(Self::Four([next()?, next()?, next()?, next()?])))
+        } else {
+            Ok(Some(Self::Single(
+                parse(object.clone()).ok_or("invalid transfer function arity or value")?,
+            )))
+        }
+    }
+
     /// Apply the transfer function to the RGB channels of an RGBA color.
     /// The alpha channel is left unchanged.
-    pub fn apply(&self, color: &AlphaColor) -> AlphaColor {
+    pub fn apply(&self, color: &AlphaColor) -> Option<AlphaColor> {
         let mut rgba = color.components();
 
         match self {
             Self::Single(f) => {
                 for c in &mut rgba[..3] {
-                    *c = f.apply_f32(*c);
+                    *c = f.apply_f32(*c)?;
                 }
             }
             Self::Four(functions) => {
                 for (i, f) in functions[..3].iter().enumerate() {
-                    rgba[i] = f.apply_f32(rgba[i]);
+                    rgba[i] = f.apply_f32(rgba[i])?;
                 }
             }
         }
 
-        AlphaColor::new(rgba)
+        Some(AlphaColor::new(rgba))
     }
 
     pub(crate) fn apply_to(&self, values: &mut [u8]) {
@@ -56,6 +94,17 @@ impl ActiveTransferFunction {
                 for (channel, function) in functions[..3].iter().enumerate() {
                     function.apply_to_stride(&mut values[channel..], 3);
                 }
+            }
+        }
+    }
+}
+
+impl crate::CacheKey for ActiveTransferFunction {
+    fn cache_key(&self) -> u128 {
+        match self {
+            Self::Single(f) => crate::util::hash128(&(0, f.cache_key())),
+            Self::Four(functions) => {
+                crate::util::hash128(&(1, functions.each_ref().map(|f| f.cache_key())))
             }
         }
     }
@@ -368,29 +417,16 @@ pub(crate) fn handle_gs_single<'a>(
         "AIS" => context.get_mut().graphics_state.alpha_is_shape = dict.get::<bool>(key)?,
         "TK" => context.get_mut().graphics_state.text_knockout = dict.get::<bool>(key)?,
         "TR" | "TR2" => {
-            let function = match dict
-                .get::<Object<'_>>(TR2)
-                .or_else(|| dict.get::<Object<'_>>(TR))?
+            if let Some((selected, object)) = crate::selected_transfer_function(dict)
+                && selected == key.as_ref()
             {
-                Object::Array(array) => {
-                    let mut iter = array.iter::<Object<'_>>();
-                    let functions = [
-                        TransferFunction::new(Function::new(&iter.next()?)?),
-                        TransferFunction::new(Function::new(&iter.next()?)?),
-                        TransferFunction::new(Function::new(&iter.next()?)?),
-                        TransferFunction::new(Function::new(&iter.next()?)?),
-                    ];
-
-                    Some(ActiveTransferFunction::Four(functions))
+                match ActiveTransferFunction::from_object(&object, selected == b"TR2") {
+                    Ok(function) => context.get_mut().graphics_state.transfer_function = function,
+                    Err(_) => (context.settings.warning_sink)(
+                        crate::InterpreterWarning::TransferFunctionFailure,
+                    ),
                 }
-                // Only `Identity` and `Default` are valid, which both just reset it.
-                Object::Name(_) => None,
-                o => Some(ActiveTransferFunction::Single(TransferFunction::new(
-                    Function::new(&o)?,
-                ))),
-            };
-
-            context.get_mut().graphics_state.transfer_function = function;
+            }
         }
         "SMask" => {
             if let Some(name) = dict.get::<Name<'_>>(SMASK) {

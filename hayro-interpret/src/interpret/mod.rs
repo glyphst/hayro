@@ -396,6 +396,8 @@ pub enum InterpreterWarning {
     UnsupportedFont,
     /// An image failed to decode.
     ImageDecodeFailure,
+    /// A selected transfer definition or evaluated component was invalid.
+    TransferFunctionFailure,
     /// An image color-space declaration or selected default could not be resolved.
     ImageColorSpace(crate::color::ImageColorSpaceError),
     /// A selected paint or shading color space could not be resolved exactly.

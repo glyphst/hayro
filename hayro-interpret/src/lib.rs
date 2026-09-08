@@ -61,7 +61,10 @@ pub use annotation::{
 pub use cache::CacheKey;
 pub use context::*;
 pub use device::*;
-pub use function::{CalculatorFunction, CalculatorInstruction, Function, TransferFunction};
+pub use function::{
+    CalculatorFunction, CalculatorInstruction, Function, TransferFunction,
+    selected_transfer_function,
+};
 pub use hayro_cmap;
 pub use hayro_syntax;
 pub use interpret::*;

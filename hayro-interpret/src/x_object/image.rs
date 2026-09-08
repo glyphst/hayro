@@ -349,7 +349,11 @@ fn uses_jpx_decode(dict: &Dict<'_>) -> bool {
 
 impl CacheKey for ImageXObject<'_> {
     fn cache_key(&self) -> u128 {
-        crate::util::hash128(&(self.stream.cache_key(), self.rendering_intent))
+        crate::util::hash128(&(
+            self.stream.cache_key(),
+            self.rendering_intent,
+            self.transfer_function.as_ref().map(CacheKey::cache_key),
+        ))
     }
 }
 

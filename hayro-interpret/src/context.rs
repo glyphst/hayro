@@ -531,8 +531,14 @@ impl<'a> Context<'a> {
                 if let Err(error) = pattern.set_rendering_intent(intent) {
                     return failed(error);
                 }
-                if let Some(tf) = &data.transfer_function {
-                    pattern.set_transfer_function(tf.clone());
+                if pattern
+                    .set_transfer_function(data.transfer_function.clone())
+                    .is_none()
+                {
+                    (self.settings.warning_sink)(
+                        crate::InterpreterWarning::TransferFunctionFailure,
+                    );
+                    return Paint::Color(Color::from_rgba(crate::color::AlphaColor::TRANSPARENT));
                 }
 
                 pattern.pre_concat_transform(self.root_transform());
@@ -550,7 +556,15 @@ impl<'a> Context<'a> {
             let color = Color::new(color_space, data.color, data.alpha);
 
             if let Some(tf) = &data.transfer_function {
-                Paint::Color(Color::from_rgba(tf.apply(&color.to_rgba())))
+                match tf.apply(&color.to_rgba()) {
+                    Some(rgba) => Paint::Color(Color::from_rgba(rgba)),
+                    None => {
+                        (self.settings.warning_sink)(
+                            crate::InterpreterWarning::TransferFunctionFailure,
+                        );
+                        Paint::Color(Color::from_rgba(crate::color::AlphaColor::TRANSPARENT))
+                    }
+                }
             } else {
                 Paint::Color(color)
             }

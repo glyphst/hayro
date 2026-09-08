@@ -101,7 +101,10 @@ impl EncodedShadingPattern {
                 components[3] *= self.opacity;
 
                 if let Some(tf) = &self.transfer_function {
-                    return tf.apply(&AlphaColor::new(components)).components();
+                    return tf
+                        .apply(&AlphaColor::new(components))
+                        .unwrap_or(AlphaColor::TRANSPARENT)
+                        .components();
                 }
 
                 components

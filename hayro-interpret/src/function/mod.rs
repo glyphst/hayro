@@ -4,6 +4,10 @@
 //! as input, do some processing on them and then return some output.
 
 mod numeric;
+mod transfer;
+#[cfg(test)]
+mod transfer_tests;
+pub use transfer::{TransferFunction, selected_transfer_function};
 mod type0;
 mod type2;
 #[cfg(test)]
@@ -19,7 +23,7 @@ use hayro_syntax::object::Dict;
 use hayro_syntax::object::dict::keys::{DOMAIN, FUNCTION_TYPE, RANGE};
 use hayro_syntax::object::{Number, Object, dict_or_stream};
 use smallvec::SmallVec;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// The input/output type of functions.
 pub(crate) type Values = SmallVec<[f32; 4]>;
@@ -225,51 +229,6 @@ impl Function {
             FunctionType::Type4(t4) => t4.calculator_function(),
             _ => None,
         }
-    }
-}
-
-/// A transfer function.
-#[derive(Clone, Debug)]
-pub struct TransferFunction {
-    function: Function,
-    samples: Arc<OnceLock<[u8; 256]>>,
-}
-
-impl TransferFunction {
-    pub(crate) fn new(function: Function) -> Self {
-        Self {
-            function,
-            samples: Arc::new(OnceLock::new()),
-        }
-    }
-
-    /// Apply the transfer function to a buffer of values.
-    pub fn apply_to(&self, values: &mut [u8]) {
-        self.apply_to_stride(values, 1);
-    }
-
-    pub(crate) fn apply_to_stride(&self, values: &mut [u8], stride: usize) {
-        let samples = self.samples();
-
-        for value in values.iter_mut().step_by(stride) {
-            *value = samples[*value as usize];
-        }
-    }
-
-    pub(crate) fn apply_f32(&self, value: f32) -> f32 {
-        self.samples()[(value * 255.0 + 0.5) as u8 as usize] as f32 / 255.0
-    }
-
-    fn samples(&self) -> &[u8; 256] {
-        self.samples.get_or_init(|| {
-            std::array::from_fn(|sample| {
-                self.function
-                    .eval(smallvec::smallvec![sample as f32 / 255.0])
-                    .and_then(|output| output.first().copied())
-                    .map(|output| (output * 255.0 + 0.5) as u8)
-                    .unwrap_or(sample as u8)
-            })
-        })
     }
 }
 

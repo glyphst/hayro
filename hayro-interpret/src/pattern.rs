@@ -85,10 +85,25 @@ impl<'a> Pattern<'a> {
         }
     }
 
-    pub(crate) fn set_transfer_function(&mut self, tf: ActiveTransferFunction) {
-        if let Self::Shading(p) = self {
-            p.transfer_function = Some(tf);
+    pub(crate) fn set_transfer_function(
+        &mut self,
+        tf: Option<ActiveTransferFunction>,
+    ) -> Option<()> {
+        match self {
+            Self::Shading(pattern) => pattern.transfer_function = tf,
+            Self::Tiling(pattern) => {
+                if !pattern.is_color
+                    && let Some(tf) = &tf
+                {
+                    pattern.stroke_paint =
+                        Color::from_rgba(tf.apply(&pattern.stroke_paint.to_rgba())?);
+                    pattern.non_stroking_paint =
+                        Color::from_rgba(tf.apply(&pattern.non_stroking_paint.to_rgba())?);
+                }
+                pattern.transfer_function = tf;
+            }
         }
+        Some(())
     }
 }
 
@@ -158,6 +173,8 @@ impl CacheKey for ShadingPattern {
             self.shading.cache_key(),
             self.matrix.cache_key(),
             self.background_applies,
+            self.opacity.to_bits(),
+            self.transfer_function.as_ref().map(CacheKey::cache_key),
         ))
     }
 }
@@ -186,6 +203,7 @@ pub struct TilingPattern<'a> {
     pub(crate) xref: &'a XRef,
     nesting_depth: u32,
     rendering_intent: crate::color::RenderingIntent,
+    transfer_function: Option<ActiveTransferFunction>,
 }
 
 impl Debug for TilingPattern<'_> {
@@ -269,6 +287,7 @@ impl<'a> TilingPattern<'a> {
             xref: ctx.xref,
             nesting_depth,
             rendering_intent: state.graphics_state.rendering_intent,
+            transfer_function: None,
         })
     }
 
@@ -331,6 +350,7 @@ impl<'a> TilingPattern<'a> {
     ) -> Option<()> {
         let mut state = State::new(initial_transform);
         state.graphics_state.rendering_intent = self.rendering_intent;
+        state.graphics_state.transfer_function = self.transfer_function.clone();
 
         let mut context = Context::new_with(
             state.ctm,
@@ -381,7 +401,11 @@ impl<'a> TilingPattern<'a> {
 
 impl CacheKey for TilingPattern<'_> {
     fn cache_key(&self) -> u128 {
-        hash128(&(self.cache_key, self.rendering_intent))
+        hash128(&(
+            self.cache_key,
+            self.rendering_intent,
+            self.transfer_function.as_ref().map(CacheKey::cache_key),
+        ))
     }
 }
 

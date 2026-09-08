@@ -107,7 +107,7 @@ impl<'a> SoftMask<'a> {
         let transfer_function = dict
             .get::<Object<'_>>(TR)
             .and_then(|o| Function::new(&o))
-            .map(TransferFunction::new);
+            .and_then(TransferFunction::new);
         let (mask_type, background) = match dict.get::<Name<'_>>(S)?.deref() {
             LUMINOSITY => {
                 let color = dict

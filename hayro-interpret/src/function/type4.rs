@@ -23,6 +23,13 @@ pub(crate) struct Type4 {
 }
 
 impl Type4 {
+    pub(super) fn arity(&self) -> Option<(usize, usize)> {
+        Some((
+            self.clamper.domain.len(),
+            self.clamper.range.as_ref()?.len(),
+        ))
+    }
+
     /// Create a new type 4 function.
     pub(crate) fn new(stream: &Stream<'_>) -> Option<Self> {
         let dict = stream.dict().clone();

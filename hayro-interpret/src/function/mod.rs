@@ -3,8 +3,11 @@
 //! PDF has the concept of functions, representing objects that take a certain number of values
 //! as input, do some processing on them and then return some output.
 
+mod numeric;
 mod type0;
 mod type2;
+#[cfg(test)]
+mod type23_tests;
 mod type3;
 mod type4;
 
@@ -14,7 +17,7 @@ use crate::function::type3::Type3;
 use crate::function::type4::Type4;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::dict::keys::{DOMAIN, FUNCTION_TYPE, RANGE};
-use hayro_syntax::object::{Object, dict_or_stream};
+use hayro_syntax::object::{Number, Object, dict_or_stream};
 use smallvec::SmallVec;
 use std::sync::{Arc, OnceLock};
 
@@ -149,12 +152,20 @@ pub struct Function(Arc<FunctionType>);
 impl Function {
     /// Create a new function.
     pub fn new(obj: &Object<'_>) -> Option<Self> {
+        Self::parse(obj, 0, &mut 4096)
+    }
+
+    fn parse(obj: &Object<'_>, depth: usize, remaining: &mut usize) -> Option<Self> {
+        if depth >= 32 || *remaining == 0 {
+            return None;
+        }
+        *remaining -= 1;
         let (dict, stream) = dict_or_stream(obj)?;
 
-        let function_type = match dict.get::<u8>(FUNCTION_TYPE)? {
+        let function_type = match dict.get::<Number>(FUNCTION_TYPE)?.as_i64_exact()? {
             0 => FunctionType::Type0(Type0::new(stream?)?),
             2 => FunctionType::Type2(Type2::new(dict)?),
-            3 => FunctionType::Type3(Type3::new(dict)?),
+            3 => FunctionType::Type3(Type3::new(dict, depth, remaining)?),
             4 => FunctionType::Type4(Type4::new(stream?)?),
             _ => return None,
         };
@@ -164,11 +175,27 @@ impl Function {
 
     /// Evaluate the function with the given input.
     pub fn eval(&self, input: Values) -> Option<Values> {
+        if input.iter().any(|value| !value.is_finite())
+            || self.arity().is_some_and(|(count, _)| count != input.len())
+        {
+            return None;
+        }
         match self.0.as_ref() {
             FunctionType::Type0(t0) => t0.eval(input),
-            FunctionType::Type2(t2) => Some(t2.eval(*input.first()?)),
+            FunctionType::Type2(t2) => t2.eval(*input.first()?),
             FunctionType::Type3(t3) => t3.eval(*input.first()?),
             FunctionType::Type4(t4) => Some(t4.eval(input)?),
+        }
+    }
+
+    /// Return the declared input and output counts. A legacy calculator with
+    /// no Range has no known output count and returns `None`.
+    pub fn arity(&self) -> Option<(usize, usize)> {
+        match self.0.as_ref() {
+            FunctionType::Type0(function) => Some(function.arity()),
+            FunctionType::Type2(function) => Some(function.arity()),
+            FunctionType::Type3(function) => function.arity(),
+            FunctionType::Type4(function) => function.arity(),
         }
     }
 
@@ -254,9 +281,19 @@ struct Clamper {
 
 impl Clamper {
     fn new(dict: &Dict<'_>) -> Option<Self> {
-        let domain = dict.get::<TupleVec>(DOMAIN)?;
-        let range = dict.get::<TupleVec>(RANGE);
-
+        let domain = numeric::pairs(dict, DOMAIN, numeric::MAX_COMPONENTS)?;
+        let range = if numeric::present(dict, RANGE) {
+            Some(numeric::pairs(dict, RANGE, numeric::MAX_COMPONENTS)?)
+        } else {
+            None
+        };
+        if domain
+            .iter()
+            .chain(range.iter().flatten())
+            .any(|&(low, high)| low > high)
+        {
+            return None;
+        }
         Some(Self { domain, range })
     }
 

@@ -1,6 +1,7 @@
+use super::numeric::{affine, objects, present};
 use crate::function::{Clamper, TupleVec, Values};
 use hayro_syntax::bit_reader::BitReader;
-use hayro_syntax::object::{Array, Dict, Number, Object, Stream};
+use hayro_syntax::object::{Dict, Number, Stream};
 use smallvec::{SmallVec, smallvec};
 
 #[cfg(test)]
@@ -26,13 +27,17 @@ pub(crate) struct Type0 {
 }
 
 impl Type0 {
+    pub(super) fn arity(&self) -> (usize, usize) {
+        (self.clamper.domain.len(), self.decode.len())
+    }
+
     pub(crate) fn new(stream: &Stream<'_>) -> Option<Self> {
         let dict = stream.dict();
         let bits = integer(dict, b"BitsPerSample")?;
         if !matches!(bits, 1 | 2 | 4 | 8 | 12 | 16 | 24 | 32) {
             return None;
         }
-        let order = if dict.contains_key(b"Order") {
+        let order = if present(dict, b"Order") {
             integer(dict, b"Order")?
         } else {
             1
@@ -82,12 +87,12 @@ impl Type0 {
                 return None;
             }
         }
-        let encode = if dict.contains_key(b"Encode") {
+        let encode = if present(dict, b"Encode") {
             pairs(dict, b"Encode")?
         } else {
             sizes.iter().map(|size| (0.0, (size - 1) as f32)).collect()
         };
-        let decode = if dict.contains_key(b"Decode") {
+        let decode = if present(dict, b"Decode") {
             pairs(dict, b"Decode")?
         } else {
             range.clone()
@@ -157,11 +162,7 @@ impl Type0 {
             // All four products are exact in binary64 because their operands
             // are binary32. Compensated summation preserves small inputs when
             // large opposing Domain/Encode bounds cancel (including identity).
-            let x = f64::from(value.clamp(low, high));
-            let (low, high) = (f64::from(low), f64::from(high));
-            let (start, end) = (f64::from(start), f64::from(end));
-            let key = (sum_products([start * high, -start * x, end * x, -end * low])
-                / (high - low))
+            let key = affine(value.clamp(low, high), low, high, start, end)
                 .clamp(0.0, (self.sizes[index] - 1) as f64);
             axes.push(Axis::new(key, self.sizes[index], self.cubic));
         }
@@ -245,55 +246,6 @@ fn integer(dict: &Dict<'_>, key: &[u8]) -> Option<i64> {
     dict.get::<Number>(key)?.as_i64_exact()
 }
 
-fn objects<'a>(dict: &Dict<'a>, key: &[u8], limit: usize) -> Option<Vec<Object<'a>>> {
-    let array = dict.get::<Array<'_>>(key)?;
-    let count = array.raw_iter().take(limit + 1).count();
-    if count == 0 || count > limit {
-        return None;
-    }
-    let values = array
-        .iter::<Object<'_>>()
-        .take(limit + 1)
-        .collect::<Vec<_>>();
-    (values.len() == count).then_some(values)
-}
-
 fn pairs(dict: &Dict<'_>, key: &[u8]) -> Option<TupleVec> {
-    let values = objects(dict, key, MAX_COMPONENTS * 2)?;
-    if !values.len().is_multiple_of(2) {
-        return None;
-    }
-    values
-        .chunks_exact(2)
-        .map(|pair| {
-            let start = f32::try_from(pair[0].clone()).ok()?;
-            let end = f32::try_from(pair[1].clone()).ok()?;
-            (start.is_finite() && end.is_finite()).then_some((start, end))
-        })
-        .collect()
-}
-
-// Grow a nonoverlapping expansion with error-free TwoSum operations. Four
-// binary32 products fit in four binary64 components and cannot overflow or
-// underflow binary64, so cancellation does not discard the smaller products.
-fn sum_products(terms: [f64; 4]) -> f64 {
-    let mut parts = [0.0; 4];
-    let mut len = 0;
-    for mut value in terms {
-        let mut next = 0;
-        for index in 0..len {
-            let term = parts[index];
-            let sum = value + term;
-            let virtual_term = sum - value;
-            let error = (value - (sum - virtual_term)) + (term - virtual_term);
-            if error != 0.0 {
-                parts[next] = error;
-                next += 1;
-            }
-            value = sum;
-        }
-        parts[next] = value;
-        len = next + 1;
-    }
-    parts[..len].iter().sum()
+    super::numeric::pairs(dict, key, MAX_COMPONENTS)
 }

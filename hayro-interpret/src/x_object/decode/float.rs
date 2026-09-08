@@ -1,5 +1,5 @@
 //! Full-precision decoded image colors for retained transfer execution.
-use super::decode_context;
+use super::{DecodeContext, decode_context};
 use crate::color::ColorSpaceKind;
 use crate::x_object::image::{ImageKind, ImageXObject, uses_jpx_decode};
 use crate::{FloatImageError as Error, RgbF32Data, RgbF64Data};
@@ -57,7 +57,7 @@ fn decode_rgb<const BYTES: usize>(
     let jpx = uses_jpx_decode(dict);
     let components = match obj.color_space.as_ref().map(|space| space.kind()) {
         Some(ColorSpaceKind::DeviceGray | ColorSpaceKind::CalGray) => 1,
-        Some(ColorSpaceKind::DeviceRgb | ColorSpaceKind::CalRgb) => 3,
+        Some(ColorSpaceKind::DeviceRgb | ColorSpaceKind::CalRgb | ColorSpaceKind::Lab) => 3,
         _ => return Err(Error::Unsupported),
     };
     if obj.kind != ImageKind::Image
@@ -68,10 +68,31 @@ fn decode_rgb<const BYTES: usize>(
     {
         return Err(Error::Unsupported);
     }
+    validate_decode(obj, components)?;
+    output_bytes(obj.width, obj.height, BYTES, max_bytes)?;
+    let context = decode_context(obj, None).ok_or(Error::Decode)?;
+    if !checkpoint() {
+        return Err(Error::Cancelled);
+    }
+    if context.color_space.num_components() as usize != components {
+        return Err(Error::Unsupported);
+    }
+    let data = decode_context_rgb(&context, jpx, max_bytes, checkpoint, encode)?;
+    Ok(DecodedFloat {
+        data,
+        width: context.width,
+        height: context.height,
+        interpolate: obj.interpolate,
+        scale_factors: context.scale_factors,
+    })
+}
+
+pub(super) fn validate_decode(obj: &ImageXObject<'_>, components: usize) -> Result<(), Error> {
+    let dict = obj.stream.dict();
     // Do not let typed array iteration silently discard malformed members.
     for key in [b"D".as_slice(), b"Decode".as_slice()]
         .into_iter()
-        .filter(|_| !jpx)
+        .filter(|_| !uses_jpx_decode(dict))
     {
         match dict.get::<Object<'_>>(key) {
             None | Some(Object::Null(_)) => {}
@@ -79,20 +100,23 @@ fn decode_rgb<const BYTES: usize>(
             _ => return Err(Error::Unsupported),
         }
     }
-    output_bytes(obj.width, obj.height, BYTES, max_bytes)?;
-    let context = decode_context(obj, None).ok_or(Error::Decode)?;
-    if !checkpoint() {
-        return Err(Error::Cancelled);
-    }
-    let decoded_components = match context.color_space.kind() {
+    Ok(())
+}
+
+// Share native component decoding with ordinary unmasked Lab images. The
+// caller retains decoding ownership and chooses the final RGB storage width.
+pub(super) fn decode_context_rgb<const BYTES: usize>(
+    context: &DecodeContext<'_>,
+    jpx: bool,
+    max_bytes: u64,
+    mut checkpoint: impl FnMut() -> bool,
+    encode: impl Fn(f64) -> [u8; BYTES],
+) -> Result<Vec<u8>, Error> {
+    let components = match context.color_space.kind() {
         ColorSpaceKind::DeviceGray | ColorSpaceKind::CalGray => 1,
-        ColorSpaceKind::DeviceRgb | ColorSpaceKind::CalRgb => 3,
+        ColorSpaceKind::DeviceRgb | ColorSpaceKind::CalRgb | ColorSpaceKind::Lab => 3,
         _ => return Err(Error::Unsupported),
     };
-    if components != decoded_components {
-        return Err(Error::Unsupported);
-    }
-    let components = decoded_components;
     if !(if jpx {
         (1..=16).contains(&context.bits_per_component)
     } else {
@@ -162,13 +186,7 @@ fn decode_rgb<const BYTES: usize>(
     if !checkpoint() {
         return Err(Error::Cancelled);
     }
-    Ok(DecodedFloat {
-        data: output,
-        width: context.width,
-        height: context.height,
-        interpolate: obj.interpolate,
-        scale_factors: context.scale_factors,
-    })
+    Ok(output)
 }
 
 fn output_bytes(

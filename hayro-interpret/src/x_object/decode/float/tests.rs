@@ -465,3 +465,138 @@ fn jpx_mask_decode_and_calibrated_conversion_follow_pdf_dictionary_rules() {
         },
     );
 }
+
+#[test]
+fn lab_native_samples_decode_before_color_conversion_at_all_pdf_depths() {
+    for bits in [1, 2, 4, 8, 16] {
+        let maximum = (1_u32 << bits) - 1;
+        let mut data = Vec::new();
+        // Two three-pixel rows; pad each row separately for packed depths.
+        let samples = [0, maximum / 2, maximum, maximum, 1, 0];
+        for row in samples.chunks_exact(3) {
+            let mut row_data = vec![0_u8; (9 * bits as usize).div_ceil(8)];
+            for (i, sample) in row.iter().flat_map(|v| [*v, 0, 0]).enumerate() {
+                for bit in 0..bits as usize {
+                    let offset = i * bits as usize + bit;
+                    row_data[offset / 8] |=
+                        (((sample >> (bits as usize - bit - 1)) & 1) as u8) << (7 - offset % 8);
+                }
+            }
+            data.extend(row_data);
+        }
+        for decode in ["0 100 0 0 0 0", "100 0 0 0 0 0", "-50 150 0 0 0 0"] {
+            let bounds: Vec<f64> = decode
+                .split_whitespace()
+                .map(|v| v.parse().unwrap())
+                .collect();
+            let header = format!(
+                "/Width 3 /Height 2 /ColorSpace [/Lab <</WhitePoint[.95047 1 1.08883]>>] /BitsPerComponent {bits} /Decode [{decode}]"
+            );
+            with_image(&header, &data, |image| {
+                let wide = decode_rgb_f64(image, 144, || true).unwrap();
+                let ordinary = super::super::decode_image(image, None).unwrap();
+                let crate::ImageData::Rgb(ordinary) = ordinary.image else {
+                    panic!("Lab remains RGB")
+                };
+                for ((sample, pixel), bytes) in samples
+                    .iter()
+                    .zip(wide.data.chunks_exact(24))
+                    .zip(ordinary.data.chunks_exact(3))
+                {
+                    let lightness = (bounds[0]
+                        + f64::from(*sample) / f64::from(maximum) * (bounds[1] - bounds[0]))
+                        .clamp(0.0, 100.0);
+                    let y = if lightness <= 8.0 {
+                        lightness * 27.0 / 24389.0
+                    } else {
+                        ((lightness + 16.0) / 116.0).powi(3)
+                    };
+                    let expected = if y <= 0.0031308 {
+                        12.92 * y
+                    } else {
+                        1.055 * y.powf(1.0 / 2.4) - 0.055
+                    };
+                    for (channel, byte) in pixel.chunks_exact(8).zip(bytes) {
+                        let value = f64::from_le_bytes(channel.try_into().unwrap());
+                        assert!(
+                            (value - expected).abs() < 2e-6,
+                            "{bits}, {decode}, {sample}: {value} != {expected}"
+                        );
+                        assert_eq!(*byte, (value * 255.0).round() as u8);
+                    }
+                }
+                assert!(matches!(
+                    decode_rgb_f64(image, 143, || true),
+                    Err(Error::Limit { requested: 144 })
+                ));
+                assert!(matches!(
+                    decode_rgb_f64(image, 144, || false),
+                    Err(Error::Cancelled)
+                ));
+            });
+        }
+    }
+}
+
+#[test]
+fn lab_sixteen_bit_neighbors_survive_transfer_cut_and_invalid_inputs_fail_closed() {
+    let header = "/Width 2 /Height 1 /ColorSpace [/Lab <</WhitePoint[.95047 1 1.08883]>>] /BitsPerComponent 16 /Decode [0 100 0 0 0 0]";
+    let data: Vec<u8> = [32768_u16, 0, 0, 32769, 0, 0]
+        .into_iter()
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    with_image(header, &data, |image| {
+        let wide = decode_rgb_f64(image, 48, || true).unwrap();
+        let samples: Vec<f64> = wide
+            .data
+            .chunks_exact(8)
+            .map(|v| f64::from_le_bytes(v.try_into().unwrap()))
+            .collect();
+        assert!(samples[..3].iter().all(|v| *v < 0.466342));
+        assert!(samples[3..].iter().all(|v| *v > 0.466342));
+    });
+    with_image(header, &data[..11], |image| {
+        assert!(matches!(
+            decode_rgb_f64(image, 48, || true),
+            Err(Error::Decode)
+        ));
+        assert!(super::super::decode_image(image, None).is_none());
+    });
+    for extra in [
+        "/Decode [0 100 0 0 0 0 false]",
+        "/Decode false",
+        "/Mask [0 0 0 0 0 0]",
+        "/SMask null",
+    ] {
+        with_image(&format!("{header} {extra}"), &data, |image| {
+            assert!(
+                matches!(decode_rgb_f64(image, 48, || true), Err(Error::Unsupported)),
+                "{extra}"
+            );
+        });
+    }
+}
+
+#[test]
+fn jpx_lab_uses_native_components_and_ignores_dictionary_decode() {
+    let header = "/Width 3 /Height 2 /Filter /JPXDecode /ColorSpace [/Lab <</WhitePoint[.95047 1 1.08883]/Range[-10 10 -20 20]>>] /BitsPerComponent 1 /Decode false";
+    with_image(header, jpx_fixtures::RGB16, |image| {
+        let wide = decode_rgb_f64(image, 144, || true).unwrap();
+        let space = image.color_space.as_ref().unwrap();
+        for (i, pixel) in wide.data.chunks_exact(24).enumerate() {
+            let samples: [f64; 3] = core::array::from_fn(|c| {
+                f64::from((i as u32 * 10711 + c as u32 * 19789 + 32767) & 65535) / 65535.0
+            });
+            let expected = space
+                .image_rgb_f64(&[
+                    samples[0] * 100.0,
+                    -10.0 + samples[1] * 20.0,
+                    -20.0 + samples[2] * 40.0,
+                ])
+                .unwrap();
+            for (channel, expected) in pixel.chunks_exact(8).zip(expected) {
+                assert!((f64::from_le_bytes(channel.try_into().unwrap()) - expected).abs() < 1e-12);
+            }
+        }
+    });
+}

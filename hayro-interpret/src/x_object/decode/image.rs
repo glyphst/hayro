@@ -83,6 +83,31 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
     }
 
     fn decode_image(&mut self) -> Option<ImageData> {
+        let dict = self.obj.stream.dict();
+        if self.ctx.color_space.kind() == ColorSpaceKind::Lab
+            && !dict.contains_key(MASK)
+            && !dict.contains_key(SMASK)
+            && self.obj.embedded_alpha_mode().is_none()
+        {
+            super::float::validate_decode(self.obj, 3).ok()?;
+            let data = super::float::decode_context_rgb(
+                &self.ctx,
+                crate::x_object::image::uses_jpx_decode(dict),
+                u64::MAX,
+                || true,
+                |value| [(value * 255.0).round() as u8],
+            )
+            .ok()?;
+            let mut rgb = RgbData {
+                data,
+                width: self.ctx.width,
+                height: self.ctx.height,
+                interpolate: self.obj.interpolate,
+                scale_factors: self.ctx.scale_factors,
+            };
+            self.apply_transfer_function(&mut rgb);
+            return Some(ImageData::Rgb(rgb));
+        }
         let mut components = self.decode_components()?;
 
         if self

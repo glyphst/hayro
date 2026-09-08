@@ -1,12 +1,12 @@
 use super::ToRgb;
+use super::cie::{CieRgb, numbers};
+use hayro_syntax::object::Dict;
 use hayro_syntax::object::dict::keys::{BLACK_POINT, GAMMA, MATRIX, WHITE_POINT};
-use hayro_syntax::object::{Array, Dict};
-use moxcms::{Matrix3d, Vector3d, Xyz, adaption_matrix_d};
+use moxcms::Matrix3d;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CalRgb {
-    matrix: Matrix3d,
-    offset: Vector3d,
+    transform: CieRgb,
     gamma: [f32; 3],
 }
 
@@ -22,14 +22,6 @@ impl CalRgb {
     fn from_dict(dict: &Dict<'_>, gray: bool) -> Option<Self> {
         let white = numbers(dict, WHITE_POINT, None)?;
         let black = numbers(dict, BLACK_POINT, Some([0.0; 3]))?;
-        if white[0] <= 0.0
-            || white[1] != 1.0
-            || white[2] <= 0.0
-            || black.iter().any(|value| *value < 0.0)
-            || black == white
-        {
-            return None;
-        }
         let gamma = if gray {
             [if dict.contains_key(GAMMA) {
                 dict.get::<f32>(GAMMA)?
@@ -62,57 +54,8 @@ impl CalRgb {
                 core::array::from_fn(|column| f64::from(matrix[column * 3 + row]))
             }),
         };
-        let d65 = Xyz {
-            x: 0.95047,
-            y: 1.0,
-            z: 1.08883,
-        };
-        let mut adaptation = adaption_matrix_d(
-            Xyz {
-                x: white[0],
-                y: white[1],
-                z: white[2],
-            },
-            d65,
-        );
-        let adapted_black = adaptation.mul_vector(Vector3d {
-            v: black.map(f64::from),
-        });
-        let mut offset = Vector3d::default();
-        // Fixed sRGB output policy: adapt both points, then map the declared
-        // XYZ black to zero while preserving D65 white. BlackPoint is not L*.
-        for (i, white) in [d65.x, d65.y, d65.z].map(f64::from).into_iter().enumerate() {
-            let denominator = white - adapted_black.v[i];
-            if !denominator.is_finite() || denominator <= 0.0 {
-                return None;
-            }
-            let scale = white / denominator;
-            adaptation.v[i] = adaptation.v[i].map(|value| value * scale);
-            offset.v[i] = -adapted_black.v[i] * scale;
-        }
-        let xyz_to_rgb = Matrix3d {
-            v: [
-                [3.2404542, -1.5371385, -0.4985314],
-                [-0.969266, 1.8760108, 0.0415560],
-                [0.0556434, -0.2040259, 1.0572252],
-            ],
-        };
-        let matrix = xyz_to_rgb.mat_mul(adaptation).mat_mul(pdf_matrix);
-        let offset = xyz_to_rgb.mul_vector(offset);
-        if matrix
-            .v
-            .iter()
-            .flatten()
-            .chain(&offset.v)
-            .any(|value| !value.is_finite())
-        {
-            return None;
-        }
-        Some(Self {
-            matrix,
-            offset,
-            gamma,
-        })
+        let transform = CieRgb::new(white, black)?.compose(pdf_matrix)?;
+        Some(Self { transform, gamma })
     }
 
     pub(super) fn convert_pixel(&self, input: [u8; 3]) -> [u8; 3] {
@@ -125,40 +68,10 @@ impl CalRgb {
     }
 
     pub(super) fn convert_real(&self, input: [f64; 3]) -> [f64; 3] {
-        let decoded = Vector3d {
-            v: core::array::from_fn(|i| input[i].clamp(0.0, 1.0).powf(f64::from(self.gamma[i]))),
-        };
-        let linear = self.matrix.mul_vector(decoded);
-        core::array::from_fn(|i| {
-            // IEC 61966-2-1: clip in linear RGB, encode, then quantize once.
-            let value = (linear.v[i] + self.offset.v[i]).clamp(0.0, 1.0);
-            if value <= 0.0031308 {
-                12.92 * value
-            } else {
-                1.055 * value.powf(1.0 / 2.4) - 0.055
-            }
-        })
+        let decoded =
+            core::array::from_fn(|i| input[i].clamp(0.0, 1.0).powf(f64::from(self.gamma[i])));
+        self.transform.convert(decoded)
     }
-}
-
-fn numbers<const N: usize>(
-    dict: &Dict<'_>,
-    key: &[u8],
-    default: Option<[f32; N]>,
-) -> Option<[f32; N]> {
-    if !dict.contains_key(key) {
-        return default;
-    }
-    let array = dict.get::<Array<'_>>(key)?;
-    // A typed iterator may stop at a non-number, including a trailing object.
-    if array.raw_iter().take(N + 1).count() != N {
-        return None;
-    }
-    let values = <[f32; N]>::try_from(array).ok()?;
-    values
-        .iter()
-        .all(|value| value.is_finite())
-        .then_some(values)
 }
 
 impl ToRgb for CalRgb {

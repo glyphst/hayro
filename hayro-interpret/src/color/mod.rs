@@ -2,6 +2,7 @@
 
 mod cal_gray;
 mod cal_rgb;
+mod cie;
 mod device_cmyk;
 mod device_gray;
 mod device_n;
@@ -244,6 +245,9 @@ impl ColorSpaceType {
                 DEVICE_GRAY | G => return Some(Self::DeviceGray(DeviceGray)),
                 DEVICE_CMYK | CMYK => return Some(Self::DeviceCmyk(DeviceCmyk)),
                 LAB => {
+                    if color_array.raw_iter().take(3).count() != 2 {
+                        return None;
+                    }
                     let lab_dict = iter.next::<Dict<'_>>()?;
                     return Some(Self::Lab(Lab::new(&lab_dict)?));
                 }
@@ -481,9 +485,11 @@ impl ColorSpace {
             ColorSpaceType::ICCBased(i) => smallvec![(0.0, 1.0); i.number_components()],
             ColorSpaceType::CalGray(_) => smallvec![(0.0, 1.0)],
             ColorSpaceType::CalRgb(_) => smallvec![(0.0, 1.0); 3],
-            ColorSpaceType::Lab(_) => {
-                smallvec![(0.0, 100.0), (-128.0, 127.0), (-128.0, 127.0)]
-            }
+            ColorSpaceType::Lab(l) => smallvec![
+                (0.0, 100.0),
+                (l.range[0], l.range[1]),
+                (l.range[2], l.range[3]),
+            ],
             ColorSpaceType::Indexed(i) => smallvec![(0.0, i.hival() as f32)],
             ColorSpaceType::Separation(_) => smallvec![(0.0, 1.0)],
             ColorSpaceType::Pattern(pattern) => pattern.color_space().component_ranges(),
@@ -497,6 +503,11 @@ impl ColorSpace {
         let calibrated = match self.0.as_ref() {
             ColorSpaceType::CalGray(gray) => Some(gray.convert_value(*input.first()?)),
             ColorSpaceType::CalRgb(rgb) => Some(rgb.convert_components([
+                f64::from(*input.first()?),
+                f64::from(*input.get(1)?),
+                f64::from(*input.get(2)?),
+            ])),
+            ColorSpaceType::Lab(lab) => Some(lab.convert_components([
                 f64::from(*input.first()?),
                 f64::from(*input.get(1)?),
                 f64::from(*input.get(2)?),
@@ -522,6 +533,9 @@ impl ColorSpace {
             ColorSpaceType::CalGray(gray) => gray.convert_real(*input.first()?),
             ColorSpaceType::CalRgb(rgb) => {
                 rgb.convert_real([*input.first()?, *input.get(1)?, *input.get(2)?])
+            }
+            ColorSpaceType::Lab(lab) => {
+                lab.convert_real([*input.first()?, *input.get(1)?, *input.get(2)?])
             }
             _ => return None,
         };
@@ -599,6 +613,12 @@ impl ColorSpace {
             }
             ColorSpaceType::DeviceRgb(_) => {
                 AlphaColor::new([component(0), component(1), component(2), opacity])
+            }
+            ColorSpaceType::Lab(lab) => {
+                let [r, g, b] = lab.convert_real(core::array::from_fn(|i| {
+                    f64::from(c.get(i).copied().unwrap_or(0.0))
+                }));
+                AlphaColor::new([r as f32, g as f32, b as f32, opacity])
             }
             ColorSpaceType::DeviceCmyk(device_cmyk) if c.len() == 4 => {
                 let input = [

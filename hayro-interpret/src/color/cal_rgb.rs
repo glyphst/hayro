@@ -120,6 +120,11 @@ impl CalRgb {
     }
 
     pub(super) fn convert_components(&self, input: [f64; 3]) -> [u8; 3] {
+        self.convert_real(input)
+            .map(|encoded| (encoded * 255.0).round() as u8)
+    }
+
+    pub(super) fn convert_real(&self, input: [f64; 3]) -> [f64; 3] {
         let decoded = Vector3d {
             v: core::array::from_fn(|i| input[i].clamp(0.0, 1.0).powf(f64::from(self.gamma[i]))),
         };
@@ -127,12 +132,11 @@ impl CalRgb {
         core::array::from_fn(|i| {
             // IEC 61966-2-1: clip in linear RGB, encode, then quantize once.
             let value = (linear.v[i] + self.offset.v[i]).clamp(0.0, 1.0);
-            let encoded = if value <= 0.0031308 {
+            if value <= 0.0031308 {
                 12.92 * value
             } else {
                 1.055 * value.powf(1.0 / 2.4) - 0.055
-            };
-            (encoded * 255.0).round() as u8
+            }
         })
     }
 }

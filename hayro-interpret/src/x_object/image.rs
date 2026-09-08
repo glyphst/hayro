@@ -344,7 +344,7 @@ fn embedded_alpha_mode(dict: &Dict<'_>) -> Option<EmbeddedImageAlphaMode> {
     }
 }
 
-fn uses_jpx_decode(dict: &Dict<'_>) -> bool {
+pub(crate) fn uses_jpx_decode(dict: &Dict<'_>) -> bool {
     let is_jpx = |name: &Name<'_>| name.as_ref() == JPX_DECODE;
 
     dict.get::<Name<'_>>(F)

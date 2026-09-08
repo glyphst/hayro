@@ -1,5 +1,8 @@
+mod float;
 mod image;
 mod mask;
+
+pub(crate) use float::decode_rgb_f32;
 
 pub(crate) use image::{DecodedCmykImage, DecodedImage, decode_device_cmyk_image, decode_image};
 pub(crate) use mask::{DecodedMask, decode_mask};

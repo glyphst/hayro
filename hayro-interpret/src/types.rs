@@ -70,6 +70,22 @@ impl CacheKey for StencilImage<'_, '_> {
 pub struct RasterImage<'a>(pub(crate) ImageXObject<'a>);
 
 impl RasterImage<'_> {
+    /// Decode unmasked direct/calibrated Gray/RGB to unquantized output RGB.
+    ///
+    /// Samples retain their full 1/2/4/8/16-bit precision through Decode and
+    /// color conversion. Transfer functions must be deferred by the caller.
+    /// JPEG 2000 is refused because its current decoder narrows samples to bytes.
+    /// `max_bytes` bounds the output before allocation; `checkpoint` is called
+    /// before decoding and at most every 1024 output pixels. General filter
+    /// decoding still has its existing allocation and cancellation contract.
+    pub fn decode_rgb_f32(
+        &self,
+        max_bytes: u64,
+        checkpoint: impl FnMut() -> bool,
+    ) -> Result<RgbF32Data, FloatImageError> {
+        crate::x_object::decode_rgb_f32(&self.0, max_bytes, checkpoint)
+    }
+
     /// Return how a JPEG 2000 opacity channel is associated with its color samples.
     ///
     /// `None` means that the image does not have an active embedded opacity
@@ -142,6 +158,52 @@ impl RasterImage<'_> {
         self.0.height()
     }
 }
+
+/// Unassociated, normalized output-device RGB with no byte quantization.
+pub struct RgbF32Data {
+    /// Consecutive RGB triples, encoded as little-endian binary32 values.
+    pub data: Vec<u8>,
+    /// Decoded pixel width.
+    pub width: u32,
+    /// Decoded pixel height.
+    pub height: u32,
+    /// Whether the image requests interpolation.
+    pub interpolate: bool,
+    /// Original dimensions divided by the decoded dimensions.
+    pub scale_factors: (f32, f32),
+}
+
+/// A precision-preserving image decode did not produce a complete output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FloatImageError {
+    /// Source semantics or decoder precision are outside the declared subset.
+    Unsupported,
+    /// A decoder, sample payload or color conversion failed.
+    Decode,
+    /// Output storage exceeds the caller's limit.
+    Limit {
+        /// Requested output byte length before allocation.
+        requested: u64,
+    },
+    /// The bounded output allocation failed.
+    Allocation,
+    /// The caller's checkpoint cancelled the operation.
+    Cancelled,
+}
+
+impl std::fmt::Display for FloatImageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unsupported => "unsupported precise image semantics",
+            Self::Decode => "precise image decoding failed",
+            Self::Limit { .. } => "precise image output exceeds its storage limit",
+            Self::Allocation => "precise image output allocation failed",
+            Self::Cancelled => "precise image decoding cancelled",
+        })
+    }
+}
+
+impl std::error::Error for FloatImageError {}
 
 /// The association between JPEG 2000 color samples and an embedded opacity channel.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

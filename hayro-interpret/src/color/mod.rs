@@ -514,6 +514,22 @@ impl ColorSpace {
         self.convert(&converted, output)
     }
 
+    /// Convert admitted image components without quantizing either side to bytes.
+    pub(crate) fn image_rgb_f32(&self, input: &[f64]) -> Option<[f32; 3]> {
+        let rgb = match self.0.as_ref() {
+            ColorSpaceType::DeviceGray(_) => [*input.first()?; 3],
+            ColorSpaceType::DeviceRgb(_) => [*input.first()?, *input.get(1)?, *input.get(2)?],
+            ColorSpaceType::CalGray(gray) => gray.convert_real(*input.first()?),
+            ColorSpaceType::CalRgb(rgb) => {
+                rgb.convert_real([*input.first()?, *input.get(1)?, *input.get(2)?])
+            }
+            _ => return None,
+        };
+        rgb.iter()
+            .all(|value| value.is_finite())
+            .then(|| rgb.map(|value| value.clamp(0.0, 1.0) as f32))
+    }
+
     pub(crate) fn encode_values(&self, input: &[f32]) -> SmallVec<[u8; 4]> {
         if let Some(hival) = self.indexed_hival() {
             return input

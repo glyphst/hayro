@@ -1,11 +1,9 @@
 use crate::bit_reader::BitWriter;
 use crate::filter::FilterResult;
-use crate::math::round_f32;
 use crate::object::stream::{ImageColorSpace, ImageData, ImageDecodeParams};
 use alloc::borrow::Cow;
-use alloc::vec;
 use alloc::vec::Vec;
-use hayro_jpeg2000::{ColorSpace, DecodeSettings};
+use hayro_jpeg2000::{ColorSpace, ComponentData, DecodeSettings};
 
 impl ImageColorSpace {
     fn num_components(&self) -> u8 {
@@ -22,7 +20,7 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
     use crate::object::stream::ImageColorSpace;
 
     let settings = DecodeSettings {
-        resolve_palette_indices: false,
+        resolve_palette_indices: params.num_components.is_none(),
         strict: false,
         target_resolution: params.target_dimension,
     };
@@ -31,7 +29,20 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
 
     let width = image.width();
     let height = image.height();
-    let bpc = params.bpc.unwrap_or(image.original_bit_depth());
+    // PDF 1.7 Table 89: BitsPerComponent is ignored for JPXDecode. A
+    // full-resolution image dictionary must also describe the encoded extent.
+    if params.target_dimension.is_none()
+        && ((params.width != 0 && params.width != width)
+            || (params.height != 0 && params.height != height))
+    {
+        return None;
+    }
+    if let Some(components) = params.num_components
+        && image.component_bit_depths().len()
+            != usize::from(components) + usize::from(image.has_alpha())
+    {
+        return None;
+    }
     let cs = match image.color_space() {
         ColorSpace::Gray => ImageColorSpace::Gray,
         ColorSpace::RGB => ImageColorSpace::Rgb,
@@ -53,32 +64,47 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
     };
     let has_alpha = image.has_alpha();
     let mut decoder_context = hayro_jpeg2000::DecoderContext::default();
-    let bitmap = image.decode(&mut decoder_context).ok()?.data_u8();
-
-    let (mut data, alpha) = if !has_alpha {
-        (bitmap, None)
+    let decoded = if params.num_components.is_some() {
+        // An explicit PDF ColorSpace overrides the JP2 colr box (7.4.9).
+        image.decode_unconverted(&mut decoder_context).ok()?
     } else {
-        // Extract the alpha channel.
-        let total_channels = cs.num_components() + 1;
-        let mut color_channels = Vec::with_capacity(
-            (bitmap.len() / total_channels as usize) * cs.num_components() as usize,
-        );
-        let mut alpha_channel = Vec::with_capacity(bitmap.len() / total_channels as usize);
-
-        for sample in bitmap.chunks_exact(total_channels as usize) {
-            let (alpha, color) = sample.split_last()?;
-            alpha_channel.push(*alpha);
-            color_channels.extend_from_slice(color);
-        }
-
-        (color_channels, Some(alpha_channel))
+        image.decode(&mut decoder_context).ok()?
     };
-
-    // The decoded image is always 8-bit, so if necessary we have to rescale
-    // ourselves.
-    if bpc != 8 {
-        data = scale(&data, bpc, cs.num_components(), width, height)?;
+    let components = decoded.components();
+    let color_count = usize::from(params.num_components.unwrap_or(cs.num_components()));
+    if components.len() != color_count + usize::from(has_alpha) {
+        return None;
     }
+    let color = components.get(..color_count)?;
+    let bpc = color.first()?.bit_depth();
+    if !(1..=31).contains(&bpc) || color.iter().any(|c| c.bit_depth() != bpc) {
+        // FilterResult describes one packed depth. Mixed colour depths need a
+        // different representation; never silently normalize them through u8.
+        return None;
+    }
+    let data = pack_components(color, width, height, bpc)?;
+    let alpha = if has_alpha {
+        let component = components.last()?;
+        let maximum = sample_maximum(component.bit_depth())?;
+        let count = (width as usize).checked_mul(height as usize)?;
+        if component.samples().len() != count {
+            return None;
+        }
+        let mut alpha = Vec::new();
+        alpha.try_reserve_exact(count).ok()?;
+        for &sample in component.samples() {
+            if !sample.is_finite() {
+                return None;
+            }
+            alpha.push(
+                (f64::from(sample).clamp(0.0, f64::from(maximum)) * 255.0 / f64::from(maximum)
+                    + 0.5) as u8,
+            );
+        }
+        Some(alpha)
+    } else {
+        None
+    };
 
     Some(FilterResult {
         data: Cow::Owned(data),
@@ -93,39 +119,116 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
     })
 }
 
-fn scale(
-    data: &[u8],
-    bit_per_component: u8,
-    num_components: u8,
+fn sample_maximum(bits: u8) -> Option<u32> {
+    (1..=31).contains(&bits).then(|| (1_u32 << bits) - 1)
+}
+
+fn pack_components(
+    components: &[ComponentData],
     width: u32,
     height: u32,
+    bits: u8,
 ) -> Option<Vec<u8>> {
-    if bit_per_component == 0 || bit_per_component > 32 {
+    let maximum = sample_maximum(bits)?;
+    let count = (width as usize).checked_mul(height as usize)?;
+    if components.iter().any(|c| c.samples().len() != count) {
         return None;
     }
-
-    let div_factor = ((1 << 8) - 1) as f32;
-    let mul_factor = ((1_u32 << bit_per_component) - 1) as f32;
-
-    let bits_per_row = (width as usize)
-        .checked_mul(num_components as usize)?
-        .checked_mul(bit_per_component as usize)?;
-    let input_len = bits_per_row.div_ceil(8).checked_mul(height as usize)?;
-    let mut input = vec![0; input_len];
-    let mut writer = BitWriter::new(&mut input, bit_per_component)?;
-    let components_per_row = (num_components as usize).checked_mul(width as usize)?;
-
-    for bytes in data.chunks_exact(components_per_row) {
-        for byte in bytes {
-            let scaled = round_f32((*byte as f32 / div_factor) * mul_factor) as u32;
-            writer.write(scaled)?;
+    let row_bits = (width as usize)
+        .checked_mul(components.len())?
+        .checked_mul(usize::from(bits))?;
+    let bytes = row_bits.div_ceil(8).checked_mul(height as usize)?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(bytes).ok()?;
+    data.resize(bytes, 0);
+    let mut writer = BitWriter::new(&mut data, bits)?;
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            for component in components {
+                let sample = component.samples()[y * width as usize + x];
+                if !sample.is_finite() {
+                    return None;
+                }
+                // The decoder's component values are in their original sample
+                // units. Round at that depth, never at an intermediate 8 bits.
+                let sample = ((f64::from(sample).max(0.0) + 0.5) as u32).min(maximum);
+                writer.write(sample)?;
+            }
         }
-
         writer.align();
     }
+    Some(data)
+}
 
-    let final_pos = writer.cur_pos();
-    input.truncate(final_pos);
+#[cfg(test)]
+#[allow(dead_code)] // Shared controls also exercise the interpreter's color path.
+#[path = "jpx_fixtures.rs"]
+mod fixtures;
 
-    Some(input)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bit_reader::BitReader;
+
+    #[test]
+    fn native_sample_depths_and_row_padding_survive_jpx_decoding() {
+        for (bits, data) in [
+            (1, fixtures::DEPTH_1),
+            (2, fixtures::DEPTH_2),
+            (3, fixtures::DEPTH_3),
+            (4, fixtures::DEPTH_4),
+            (5, fixtures::DEPTH_5),
+            (6, fixtures::DEPTH_6),
+            (7, fixtures::DEPTH_7),
+            (8, fixtures::DEPTH_8),
+            (9, fixtures::DEPTH_9),
+            (10, fixtures::DEPTH_10),
+            (11, fixtures::DEPTH_11),
+            (12, fixtures::DEPTH_12),
+            (13, fixtures::DEPTH_13),
+            (14, fixtures::DEPTH_14),
+            (15, fixtures::DEPTH_15),
+            (16, fixtures::DEPTH_16),
+            (17, fixtures::DEPTH_17),
+        ] {
+            let params = ImageDecodeParams {
+                width: 3,
+                height: 2,
+                bpc: Some(1),
+                num_components: Some(1),
+                ..Default::default()
+            };
+            let decoded = decode(data, &params).unwrap();
+            assert_eq!(decoded.image_data.unwrap().bits_per_component, bits);
+            let maximum = (1_u32 << bits) - 1;
+            let expected = [0, maximum / 2, maximum, 1, maximum - 1, maximum.div_ceil(2)];
+            let mut reader = BitReader::new(&decoded.data);
+            for row in expected.chunks_exact(3) {
+                for &sample in row {
+                    assert_eq!(reader.read(bits), Some(sample), "depth {bits}");
+                }
+                reader.align();
+            }
+            assert!(
+                decode(
+                    data,
+                    &ImageDecodeParams {
+                        width: 1,
+                        ..params.clone()
+                    }
+                )
+                .is_none()
+            );
+            assert!(
+                decode(
+                    data,
+                    &ImageDecodeParams {
+                        num_components: Some(3),
+                        ..params
+                    }
+                )
+                .is_none()
+            );
+        }
+    }
 }

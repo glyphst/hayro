@@ -43,8 +43,14 @@ opacity, blend mode, soft masks and AIS independently of elementary transfer.
 
 The device must implement PDF 11.7.5.2 region selection, including zero-opacity
 objects with positive shape. Deferral alone does not render transparent pages
-correctly. Image decoding retains its existing sample/conversion precision;
-this option does not provide an original high-bit-depth sample buffer.
+correctly. The float image decoder retains 1–16-bit JPX components for explicit
+PDF DeviceGray/DeviceRGB and CalGray/CalRGB spaces, without an intermediate byte
+conversion. JPX dictionary BitsPerComponent and non-mask Decode are ignored.
+Embedded color-space conversion, mixed component depths, greater depths and
+alpha-bearing images remain outside this raw transfer path. JPEG2000 core
+wavelet/color transforms retain their existing floating-point arithmetic; this
+is not an exactness guarantee for every codestream. Ordinary JPX decoding also
+resolves palettes when the PDF omits ColorSpace.
 
 `TransferFunction::function` and `Function::definition` expose executable data
 for retained storage. Large sample tables and stitching children are borrowed

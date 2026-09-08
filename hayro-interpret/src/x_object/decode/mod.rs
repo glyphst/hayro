@@ -117,9 +117,14 @@ fn decode_context<'a>(
         .or(dict_bpc)
         .unwrap_or(fallback_bpc);
 
-    let decode_arr = dict
-        .get::<Array<'_>>(D)
-        .or_else(|| dict.get::<Array<'_>>(DECODE))
+    let ignore_decode =
+        crate::x_object::image::uses_jpx_decode(dict) && obj.kind != ImageKind::StencilMask;
+    let decode_arr = (!ignore_decode)
+        .then(|| {
+            dict.get::<Array<'_>>(D)
+                .or_else(|| dict.get::<Array<'_>>(DECODE))
+        })
+        .flatten()
         .map(|a| a.iter::<(f32, f32)>().collect::<SmallVec<_>>())
         .unwrap_or(color_space.default_decode_arr(bits_per_component as f32));
 

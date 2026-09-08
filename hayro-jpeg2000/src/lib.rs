@@ -200,9 +200,32 @@ impl<'a> Image<'a> {
         &'a self,
         decoder_context: &'b mut DecoderContext<'a>,
     ) -> Result<DecodedImage<'b>> {
+        let mut decoded_image = self.decode_unconverted(decoder_context)?;
+        let bit_depth = decoded_image
+            .decoded_components
+            .first()
+            .ok_or(ValidationError::InvalidComponentMetadata)?
+            .bit_depth;
+        if !(1..=31).contains(&bit_depth) {
+            bail!(ValidationError::InvalidComponentMetadata);
+        }
+        convert_color_space(&mut decoded_image, bit_depth)?;
+
+        Ok(decoded_image)
+    }
+
+    /// Decode components without applying the container's colour-space conversion.
+    ///
+    /// Codestream transforms, palette resolution (when enabled), and channel
+    /// ordering still apply. Use this when the containing format supplies its
+    /// own colour space, as a PDF image dictionary may do.
+    pub fn decode_unconverted<'b>(
+        &'a self,
+        decoder_context: &'b mut DecoderContext<'a>,
+    ) -> Result<DecodedImage<'b>> {
         let settings = &self.settings;
         j2c::decode(self.codestream, &self.header, decoder_context)?;
-        let mut decoded_image = DecodedImage {
+        let decoded_image = DecodedImage {
             decoded_components: &mut decoder_context.channel_data,
             boxes: self.boxes.clone(),
         };
@@ -234,11 +257,15 @@ impl<'a> Image<'a> {
             *decoded_image.decoded_components = components.into_iter().map(|c| c.0).collect();
         }
 
-        // Note that this is only valid if all images have the same bit depth.
-        let bit_depth = decoded_image.decoded_components[0].bit_depth;
-        convert_color_space(&mut decoded_image, bit_depth)?;
-
         Ok(decoded_image)
+    }
+
+    /// Bit depths of the source codestream components, before palette mapping.
+    pub fn component_bit_depths(&self) -> impl ExactSizeIterator<Item = u8> + '_ {
+        self.header
+            .component_infos
+            .iter()
+            .map(|info| info.size_info.precision)
     }
 }
 

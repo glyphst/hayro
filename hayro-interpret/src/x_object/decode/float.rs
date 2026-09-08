@@ -54,6 +54,7 @@ fn decode_rgb<const BYTES: usize>(
         return Err(Error::Cancelled);
     }
     let dict = obj.stream.dict();
+    let jpx = uses_jpx_decode(dict);
     let components = match obj.color_space.as_ref().map(|space| space.kind()) {
         Some(ColorSpaceKind::DeviceGray | ColorSpaceKind::CalGray) => 1,
         Some(ColorSpaceKind::DeviceRgb | ColorSpaceKind::CalRgb) => 3,
@@ -61,14 +62,17 @@ fn decode_rgb<const BYTES: usize>(
     };
     if obj.kind != ImageKind::Image
         || obj.transfer_function.is_some()
-        || uses_jpx_decode(dict)
         || dict.contains_key(b"Mask")
         || dict.contains_key(b"SMask")
+        || obj.embedded_alpha_mode().is_some()
     {
         return Err(Error::Unsupported);
     }
     // Do not let typed array iteration silently discard malformed members.
-    for key in [b"D".as_slice(), b"Decode".as_slice()] {
+    for key in [b"D".as_slice(), b"Decode".as_slice()]
+        .into_iter()
+        .filter(|_| !jpx)
+    {
         match dict.get::<Object<'_>>(key) {
             None | Some(Object::Null(_)) => {}
             Some(Object::Array(array)) if valid_decode(&array, components) => {}
@@ -80,8 +84,20 @@ fn decode_rgb<const BYTES: usize>(
     if !checkpoint() {
         return Err(Error::Cancelled);
     }
-    if !matches!(context.bits_per_component, 1 | 2 | 4 | 8 | 16)
-        || context.color_space.num_components() as usize != components
+    let decoded_components = match context.color_space.kind() {
+        ColorSpaceKind::DeviceGray | ColorSpaceKind::CalGray => 1,
+        ColorSpaceKind::DeviceRgb | ColorSpaceKind::CalRgb => 3,
+        _ => return Err(Error::Unsupported),
+    };
+    if components != decoded_components {
+        return Err(Error::Unsupported);
+    }
+    let components = decoded_components;
+    if !(if jpx {
+        (1..=16).contains(&context.bits_per_component)
+    } else {
+        matches!(context.bits_per_component, 1 | 2 | 4 | 8 | 16)
+    }) || context.color_space.num_components() as usize != components
         || context.decode_arr.len() != components
         || context
             .decode_arr

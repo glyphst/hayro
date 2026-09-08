@@ -497,6 +497,19 @@ impl ColorSpace {
         }
     }
 
+    /// Whether matte components are valid for native source-space recovery.
+    /// Indexed palette preblending and pattern sources require separate handling.
+    pub fn image_matte_is_valid(&self, values: &[f32]) -> bool {
+        !matches!(
+            self.0.as_ref(),
+            ColorSpaceType::Indexed(_) | ColorSpaceType::Pattern(_)
+        ) && values.len() == self.num_components() as usize
+            && values
+                .iter()
+                .zip(self.component_ranges())
+                .all(|(value, (low, high))| value.is_finite() && *value >= low && *value <= high)
+    }
+
     pub(crate) fn convert_values(&self, input: &[f32], output: &mut [u8]) -> Option<()> {
         // Calibrated paints and sampled shadings carry real components.
         // Quantizing before gamma creates large steps in their dark colors.

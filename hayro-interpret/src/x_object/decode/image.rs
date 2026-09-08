@@ -55,8 +55,11 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
     }
 
     fn decode(mut self) -> Option<DecodedImage> {
-        let mut image = self.decode_image()?;
-        let alpha = self.decode_alpha(&mut image);
+        if self.has_soft_mask_matte() {
+            return super::matte::decode(self.obj, &self.ctx, self.target_dimension);
+        }
+        let image = self.decode_image()?;
+        let alpha = self.decode_alpha_without_matte();
 
         Some(DecodedImage { image, alpha })
     }
@@ -269,19 +272,6 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
         }
     }
 
-    fn decode_alpha(&mut self, image: &mut ImageData) -> Option<LumaData> {
-        if let Some((alpha, matte_rgb)) = self.resolve_matte()
-            && alpha.width == self.ctx.width
-            && alpha.height == self.ctx.height
-        {
-            unpremultiply(image, &alpha.data, &matte_rgb);
-
-            return Some(alpha);
-        }
-
-        self.decode_alpha_without_matte()
-    }
-
     fn decode_alpha_without_matte(&mut self) -> Option<LumaData> {
         // If the alpha channel is invalid, return no alpha so the main image can
         // still be returned (see PDFJS-19611).
@@ -330,30 +320,6 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
                 .is_some_and(|mask| mask.dict().contains_key(MATTE))
     }
 
-    fn resolve_matte(&self) -> Option<(LumaData, [u8; 3])> {
-        // An active embedded opacity channel takes precedence over a malformed
-        // simultaneous /SMask entry.
-        if self.obj.embedded_alpha_mode().is_some() {
-            return None;
-        }
-        let s_mask = self.obj.stream.dict().get::<Stream<'_>>(SMASK)?;
-        let matte = s_mask.dict().get::<ColorComponents>(MATTE)?;
-
-        if matte.len() != self.ctx.color_space.num_components() as usize {
-            return None;
-        }
-
-        // In theory, matte needs to be applied in the image's original color space,
-        // but we always do it in RGB for now.
-        let mut matte_rgb = [0_u8; 3];
-        self.ctx.color_space.convert_values(&matte, &mut matte_rgb);
-
-        let mask_obj = ImageXObject::new_mask(&s_mask, &self.obj.warning_sink, &self.obj.cache)?;
-        let alpha = decode_mask(&mask_obj, self.target_dimension)?.luma;
-
-        Some((alpha, matte_rgb))
-    }
-
     fn decode_color_key_mask(&self) -> Option<LumaData> {
         let color_key_mask = self.color_key_mask.as_deref()?;
         let num_components = self.ctx.color_space.num_components() as usize;
@@ -388,33 +354,6 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
             interpolate: self.obj.interpolate,
             scale_factors: self.ctx.scale_factors,
         })
-    }
-}
-
-fn unpremultiply(image: &mut ImageData, alpha: &[u8], matte_rgb: &[u8]) {
-    match image {
-        ImageData::Rgb(rgb) => {
-            for (pixel, &a) in rgb.data.chunks_exact_mut(3).zip(alpha.iter()) {
-                if a == 0 {
-                    continue;
-                }
-                let inv_alpha = 255.0 / a as f32;
-                for (c, &m) in pixel.iter_mut().zip(matte_rgb.iter()) {
-                    let m = m as f32;
-                    *c = (m + (*c as f32 - m) * inv_alpha) as u8;
-                }
-            }
-        }
-        ImageData::Luma(luma) => {
-            let m = matte_rgb[0] as f32;
-            for (c, &a) in luma.data.iter_mut().zip(alpha.iter()) {
-                if a == 0 {
-                    continue;
-                }
-                let inv_alpha = 255.0 / a as f32;
-                *c = (m + (*c as f32 - m) * inv_alpha) as u8;
-            }
-        }
     }
 }
 

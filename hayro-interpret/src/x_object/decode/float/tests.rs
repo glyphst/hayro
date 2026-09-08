@@ -262,9 +262,7 @@ fn binary64_decode_retains_source_side_of_binary32_cutoff_and_charges_capacity()
     );
 }
 
-#[allow(dead_code)]
-#[path = "../../../../../hayro-syntax/src/filter/jpx_fixtures.rs"]
-mod jpx_fixtures;
+use super::super::jpx_fixtures;
 
 #[test]
 fn jpx_samples_retain_native_depth_and_ignore_nonmask_decode_and_dictionary_depth() {

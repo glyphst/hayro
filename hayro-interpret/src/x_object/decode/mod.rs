@@ -1,6 +1,12 @@
 mod float;
 mod image;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../../hayro-syntax/src/filter/jpx_fixtures.rs"]
+mod jpx_fixtures;
 mod mask;
+mod matte;
+mod samples;
 
 pub(crate) use float::{decode_rgb_f32, decode_rgb_f64};
 

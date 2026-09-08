@@ -137,6 +137,7 @@ impl<'a> SvgRenderer<'a> {
                     DrawProps {
                         transform,
                         paint: paint.clone(),
+                        deferred_transfer_function: None,
                         soft_mask: None,
                         blend_mode: BlendMode::Normal,
                         alpha_constant: 1.0,

@@ -3,7 +3,11 @@
 //! PDF has the concept of functions, representing objects that take a certain number of values
 //! as input, do some processing on them and then return some output.
 
+#[cfg(test)]
+mod deferred_tests;
+mod definition;
 mod numeric;
+pub use definition::FunctionDefinition;
 mod transfer;
 #[cfg(test)]
 mod transfer_tests;
@@ -229,6 +233,22 @@ impl Function {
             FunctionType::Type4(t4) => t4.calculator_function(),
             _ => None,
         }
+    }
+
+    /// Inspect the complete validated data needed for owned retained execution.
+    ///
+    /// Unlike a byte lookup table, this preserves real-input discontinuities
+    /// and the original sample precision. Returns `None` for legacy calculator
+    /// functions that cannot expose a bounded typed program.
+    pub fn definition(&self) -> Option<FunctionDefinition<'_>> {
+        Some(match self.0.as_ref() {
+            FunctionType::Type0(function) => function.definition(),
+            FunctionType::Type2(function) => function.definition(),
+            FunctionType::Type3(function) => function.definition(),
+            FunctionType::Type4(function) => {
+                FunctionDefinition::Calculator(function.calculator_function()?)
+            }
+        })
     }
 }
 

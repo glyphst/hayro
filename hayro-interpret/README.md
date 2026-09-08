@@ -32,6 +32,28 @@ This crate has one optional feature:
 
 <!-- cargo-rdme end -->
 
+## Retained transfer state
+
+A retaining device can set `InterpreterSettings::defer_transfer_functions` to
+receive untransferred source colors and selected functions separately.
+`DrawProps` and `ImageDrawProps` expose an unapplied function; patterns retain
+their own inherited or selecting state. Encoded shading samples and gradient
+stops also remain raw in this mode. Group callbacks continue to carry invocation
+opacity, blend mode, soft masks and AIS independently of elementary transfer.
+
+The device must implement PDF 11.7.5.2 region selection, including zero-opacity
+objects with positive shape. Deferral alone does not render transparent pages
+correctly. Image decoding retains its existing sample/conversion precision;
+this option does not provide an original high-bit-depth sample buffer.
+
+`TransferFunction::function` and `Function::definition` expose executable data
+for retained storage. Large sample tables and stitching children are borrowed
+so the caller can check its own copy budget. Preserve their clamps, encoding,
+interpolation, integer exponent parity and typed calculator instructions.
+The default interpretation mode continues applying transfer to source colors;
+direct Gray/RGB color conversion retains real component and opacity values.
+
+
 ## License
 Licensed under either of
 

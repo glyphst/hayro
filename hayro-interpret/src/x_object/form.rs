@@ -175,7 +175,11 @@ impl<'a> FormInvocation<'a> {
         // share one locally interpreted visual subscene. Debug formatting is
         // deterministic for these value types and deliberately excludes the
         // page-space CTM and external clip stack normalized above.
-        let retained_key = hash128(&(form_key, format!("{normalized_state:?}")));
+        let retained_key = hash128(&(
+            form_key,
+            format!("{normalized_state:?}"),
+            context.settings.defer_transfer_functions,
+        ));
         Self {
             form: form.clone(),
             resources,

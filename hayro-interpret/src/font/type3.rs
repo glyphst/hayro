@@ -180,7 +180,13 @@ impl<'a> Type3<'a> {
         }
 
         if is_shape_glyph {
-            let mut device = Type3ShapeGlyphDevice::new(device, paint.clone());
+            let deferred_transfer_function = glyph
+                .settings
+                .defer_transfer_functions
+                .then(|| glyph.state.graphics_state.transfer_function.clone())
+                .flatten();
+            let mut device =
+                Type3ShapeGlyphDevice::new(device, paint.clone(), deferred_transfer_function);
             interpret(iter, &resources, &mut context, &mut device);
         } else {
             interpret(iter, &resources, &mut context, device);
@@ -210,13 +216,19 @@ impl CacheKey for Type3<'_> {
 struct Type3ShapeGlyphDevice<'a, 'b, T: Device<'a>> {
     inner: &'b mut T,
     paint: Paint<'a>,
+    deferred_transfer_function: Option<crate::ActiveTransferFunction>,
 }
 
 impl<'a, 'b, T: Device<'a>> Type3ShapeGlyphDevice<'a, 'b, T> {
-    pub(crate) fn new(device: &'b mut T, paint: Paint<'a>) -> Self {
+    pub(crate) fn new(
+        device: &'b mut T,
+        paint: Paint<'a>,
+        deferred_transfer_function: Option<crate::ActiveTransferFunction>,
+    ) -> Self {
         Self {
             inner: device,
             paint,
+            deferred_transfer_function,
         }
     }
 }
@@ -226,6 +238,7 @@ impl<'a, T: Device<'a>> Device<'a> for Type3ShapeGlyphDevice<'a, '_, T> {
     fn draw_path(&mut self, path: &BezPath, props: DrawProps<'a>, draw_mode: &DrawMode) {
         let props = DrawProps {
             paint: self.paint.clone(),
+            deferred_transfer_function: self.deferred_transfer_function.clone(),
             ..props
         };
         self.inner.draw_path(path, props, draw_mode);
@@ -268,9 +281,10 @@ impl<'a, T: Device<'a>> Device<'a> for Type3ShapeGlyphDevice<'a, '_, T> {
 
     fn pop_transparency_group(&mut self) {}
 
-    fn draw_image(&mut self, image: Image<'a, '_>, props: ImageDrawProps<'a>) {
+    fn draw_image(&mut self, image: Image<'a, '_>, mut props: ImageDrawProps<'a>) {
         if let Image::Stencil(mut s) = image {
             s.paint = self.paint.clone();
+            props.deferred_transfer_function = self.deferred_transfer_function.clone();
             self.inner.draw_image(Image::Stencil(s), props);
         }
     }

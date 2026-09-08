@@ -50,6 +50,7 @@ impl Hash for Repr<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.obj_id.hash(state);
         self.root_transform.cache_key().hash(state);
+        self.settings.defer_transfer_functions.hash(state);
     }
 }
 
@@ -66,6 +67,7 @@ impl Debug for SoftMask<'_> {
 impl PartialEq for SoftMask<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.0.obj_id == other.0.obj_id
+            && self.0.settings.defer_transfer_functions == other.0.settings.defer_transfer_functions
     }
 }
 

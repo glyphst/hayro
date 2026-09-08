@@ -377,6 +377,10 @@ pub struct DrawProps<'a> {
     pub transform: Affine,
     /// The paint.
     pub paint: Paint<'a>,
+    /// Unapplied transfer for a raw color paint when the interpreter's
+    /// `defer_transfer_functions` setting is enabled. Identity/Default are
+    /// represented by `None`. Pattern paints retain their own transfer state.
+    pub deferred_transfer_function: Option<crate::ActiveTransferFunction>,
     /// The soft mask.
     pub soft_mask: Option<SoftMask<'a>>,
     /// The blend mode.
@@ -400,6 +404,10 @@ pub struct DrawProps<'a> {
 pub struct ImageDrawProps<'a> {
     /// The transform.
     pub transform: Affine,
+    /// Unapplied transfer for the raw raster or stencil paint when transfer
+    /// deferral is enabled. Image alpha and masks do not affect this function's
+    /// identity; they separately determine whether the image is fully opaque.
+    pub deferred_transfer_function: Option<crate::ActiveTransferFunction>,
     /// The soft mask.
     pub soft_mask: Option<SoftMask<'a>>,
     /// The blend mode.

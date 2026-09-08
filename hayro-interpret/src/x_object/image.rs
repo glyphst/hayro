@@ -161,6 +161,11 @@ impl<'a> ImageXObject<'a> {
         }
 
         let mut bound = self.clone();
+        let mut deferred_transfer_function = if context.settings.defer_transfer_functions {
+            bound.transfer_function.take()
+        } else {
+            None
+        };
         let intent = if self.kind == ImageKind::Image && self.stream.dict().contains_key(b"Intent")
         {
             match crate::color::RenderingIntent::from_object(
@@ -233,9 +238,13 @@ impl<'a> ImageXObject<'a> {
         );
 
         let image = if self.kind.is_mask() {
+            let paint = context.get_paint(false);
+            if matches!(paint, crate::Paint::Pattern(_)) {
+                deferred_transfer_function = None;
+            }
             Image::Stencil(StencilImage {
-                paint: context.get_paint(false),
-                image_xobject: self.clone(),
+                paint,
+                image_xobject: bound,
             })
         } else {
             Image::Raster(RasterImage(bound))
@@ -245,6 +254,7 @@ impl<'a> ImageXObject<'a> {
             image,
             ImageDrawProps {
                 transform,
+                deferred_transfer_function,
                 soft_mask: None,
                 blend_mode: BlendMode::default(),
                 alpha_is_shape: context.get().graphics_state.alpha_is_shape,

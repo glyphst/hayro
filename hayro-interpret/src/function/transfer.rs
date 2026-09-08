@@ -25,6 +25,13 @@ pub struct TransferFunction {
 }
 
 impl TransferFunction {
+    /// The full owned function behind this transfer. A channel explicitly
+    /// selected as Identity has no function. Call [`Function::definition`] to
+    /// retain executable data instead of approximating this with byte samples.
+    pub fn function(&self) -> Option<&Function> {
+        self.function.as_ref()
+    }
+
     pub(crate) fn new(function: Function) -> Option<Self> {
         if function.arity() != Some((1, 1)) {
             return None;
@@ -62,7 +69,7 @@ impl TransferFunction {
 
     /// Preserve real paint/shading inputs; sampling a byte table first moves
     /// discontinuities and can amplify quantization through nonlinear functions.
-    pub(crate) fn apply_f32(&self, value: f32) -> Option<f32> {
+    pub fn apply_f32(&self, value: f32) -> Option<f32> {
         if !value.is_finite() {
             return None;
         }

@@ -506,9 +506,15 @@ impl<'a> Context<'a> {
         } else {
             self.get().graphics_state.non_stroke_alpha
         };
+        let paint = self.get_paint(is_stroke);
+        let deferred_transfer_function = (self.settings.defer_transfer_functions
+            && matches!(paint, Paint::Color(_)))
+        .then(|| self.get().graphics_state.transfer_function.clone())
+        .flatten();
         DrawProps {
             transform: self.get().ctm,
-            paint: self.get_paint(is_stroke),
+            paint,
+            deferred_transfer_function,
             soft_mask: self.get().graphics_state.soft_mask.clone(),
             blend_mode: self.get().graphics_state.blend_mode,
             alpha_constant,
@@ -557,7 +563,9 @@ impl<'a> Context<'a> {
             };
             let color = Color::new(color_space, data.color, data.alpha);
 
-            if let Some(tf) = &data.transfer_function {
+            if !self.settings.defer_transfer_functions
+                && let Some(tf) = &data.transfer_function
+            {
                 match tf.apply(&color.to_rgba()) {
                     Some(rgba) => Paint::Color(Color::from_rgba(rgba)),
                     None => {

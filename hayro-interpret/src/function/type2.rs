@@ -14,6 +14,18 @@ pub(crate) struct Type2 {
 }
 
 impl Type2 {
+    pub(super) fn definition(&self) -> super::FunctionDefinition<'_> {
+        let (low, high) = self.clamper.domain[0];
+        super::FunctionDefinition::Exponential {
+            domain: [low, high],
+            range: self.clamper.range.as_deref(),
+            c0: &self.c0,
+            c1: &self.c1,
+            exponent: self.n,
+            odd_integer_exponent: self.odd,
+        }
+    }
+
     pub(crate) fn new(dict: &Dict<'_>) -> Option<Self> {
         let c0 = if present(dict, b"C0") {
             values(dict, b"C0", MAX_COMPONENTS)?

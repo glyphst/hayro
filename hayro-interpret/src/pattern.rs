@@ -40,13 +40,17 @@ impl<'a> Pattern<'a> {
         resources: &Resources<'a>,
     ) -> Option<Self> {
         match object {
-            Object::Dict(dict) => Some(Self::Shading(ShadingPattern::new(
-                &dict,
-                &ctx.interpreter_cache.object_cache,
-                ctx.get().graphics_state.non_stroke_alpha,
-                ctx.initial_transfer_function.clone(),
-                &ctx.settings.warning_sink,
-            )?)),
+            Object::Dict(dict) => {
+                let mut pattern = ShadingPattern::new(
+                    &dict,
+                    &ctx.interpreter_cache.object_cache,
+                    ctx.get().graphics_state.non_stroke_alpha,
+                    ctx.initial_transfer_function.clone(),
+                    &ctx.settings.warning_sink,
+                )?;
+                pattern.defer_transfer_function = ctx.settings.defer_transfer_functions;
+                Some(Self::Shading(pattern))
+            }
             Object::Stream(stream) => Some(Self::Tiling(Box::new(TilingPattern::new(
                 stream, ctx, resources,
             )?))),
@@ -94,6 +98,11 @@ impl<'a> Pattern<'a> {
             // Colored patterns use their parent stream's initial state.
             Self::Shading(_) => {}
             Self::Tiling(pattern) => {
+                if pattern.settings.defer_transfer_functions {
+                    pattern.deferred_base_transfer_function =
+                        (!pattern.is_color).then_some(tf).flatten();
+                    return Some(());
+                }
                 if !pattern.is_color
                     && let Some(tf) = &tf
                 {
@@ -128,6 +137,9 @@ pub struct ShadingPattern {
     pub opacity: f32,
     /// An optional transfer function to apply to the shading's output colors.
     pub transfer_function: Option<ActiveTransferFunction>,
+    /// Whether sampling/encoding must leave this function unapplied so a
+    /// retaining device can select it in the final page region.
+    pub defer_transfer_function: bool,
     /// Whether the shading dictionary's `/Background` entry applies.
     ///
     /// PDF applies the entry only when a shading is selected through a
@@ -172,6 +184,7 @@ impl ShadingPattern {
             opacity,
             matrix,
             transfer_function,
+            defer_transfer_function: false,
             background_applies: true,
         })
     }
@@ -185,6 +198,7 @@ impl CacheKey for ShadingPattern {
             self.background_applies,
             self.opacity.to_bits(),
             self.transfer_function.as_ref().map(CacheKey::cache_key),
+            self.defer_transfer_function,
         ))
     }
 }
@@ -214,6 +228,7 @@ pub struct TilingPattern<'a> {
     nesting_depth: u32,
     rendering_intent: crate::color::RenderingIntent,
     transfer_function: Option<ActiveTransferFunction>,
+    deferred_base_transfer_function: Option<ActiveTransferFunction>,
 }
 
 impl Debug for TilingPattern<'_> {
@@ -298,6 +313,7 @@ impl<'a> TilingPattern<'a> {
             nesting_depth,
             rendering_intent: state.graphics_state.rendering_intent,
             transfer_function: ctx.initial_transfer_function.clone(),
+            deferred_base_transfer_function: None,
         })
     }
 
@@ -322,6 +338,12 @@ impl<'a> TilingPattern<'a> {
         } else {
             Some(&self.non_stroking_paint)
         }
+    }
+
+    /// Unapplied selecting transfer for a deferred uncolored base paint.
+    /// Colored cells instead retain transfer in their interpreted child paints.
+    pub fn uncolored_base_transfer_function(&self) -> Option<&ActiveTransferFunction> {
+        self.deferred_base_transfer_function.as_ref()
     }
 
     /// Return the validated PDF `/TilingType` value (1, 2, or 3).
@@ -397,7 +419,11 @@ impl<'a> TilingPattern<'a> {
                 Paint::Color(self.stroke_paint.clone())
             };
 
-            let mut device = StencilPatternDevice::new(device, paint.clone());
+            let mut device = StencilPatternDevice::new(
+                device,
+                paint.clone(),
+                self.deferred_base_transfer_function.clone(),
+            );
             interpret(iter, &resources, &mut context, &mut device);
         }
 
@@ -415,6 +441,10 @@ impl CacheKey for TilingPattern<'_> {
             self.cache_key,
             self.rendering_intent,
             self.transfer_function.as_ref().map(CacheKey::cache_key),
+            self.deferred_base_transfer_function
+                .as_ref()
+                .map(CacheKey::cache_key),
+            self.settings.defer_transfer_functions,
         ))
     }
 }
@@ -422,13 +452,19 @@ impl CacheKey for TilingPattern<'_> {
 struct StencilPatternDevice<'a, 'b, T: Device<'a>> {
     inner: &'b mut T,
     paint: Paint<'a>,
+    deferred_transfer_function: Option<ActiveTransferFunction>,
 }
 
 impl<'a, 'b, T: Device<'a>> StencilPatternDevice<'a, 'b, T> {
-    pub(crate) fn new(device: &'b mut T, paint: Paint<'a>) -> Self {
+    pub(crate) fn new(
+        device: &'b mut T,
+        paint: Paint<'a>,
+        deferred_transfer_function: Option<ActiveTransferFunction>,
+    ) -> Self {
         Self {
             inner: device,
             paint,
+            deferred_transfer_function,
         }
     }
 }
@@ -438,6 +474,7 @@ impl<'a, T: Device<'a>> Device<'a> for StencilPatternDevice<'a, '_, T> {
     fn draw_path(&mut self, path: &BezPath, props: DrawProps<'a>, draw_mode: &DrawMode) {
         let props = DrawProps {
             paint: self.paint.clone(),
+            deferred_transfer_function: self.deferred_transfer_function.clone(),
             ..props
         };
         self.inner.draw_path(path, props, draw_mode);
@@ -474,9 +511,10 @@ impl<'a, T: Device<'a>> Device<'a> for StencilPatternDevice<'a, '_, T> {
         self.inner.end_combined_fill_stroke();
     }
 
-    fn draw_image(&mut self, image: Image<'a, '_>, props: ImageDrawProps<'a>) {
+    fn draw_image(&mut self, image: Image<'a, '_>, mut props: ImageDrawProps<'a>) {
         if let Image::Stencil(mut s) = image {
             s.paint = self.paint.clone();
+            props.deferred_transfer_function = self.deferred_transfer_function.clone();
             self.inner.draw_image(Image::Stencil(s), props);
         }
     }

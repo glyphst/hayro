@@ -573,19 +573,17 @@ impl ColorSpace {
     /// Turn the given component values and opacity into an RGBA color.
     #[inline]
     pub fn to_rgba(&self, c: &[f32], opacity: f32) -> AlphaColor {
-        let alpha = f32_to_u8(opacity);
+        let opacity = opacity.clamp(0.0, 1.0);
+        let component = |index: usize| c.get(index).copied().unwrap_or(0.0).clamp(0.0, 1.0);
 
         match self.0.as_ref() {
             ColorSpaceType::DeviceGray(_) => {
-                let gray = c.first().copied().map(f32_to_u8).unwrap_or(0);
-                AlphaColor::from_rgba8(gray, gray, gray, alpha)
+                let gray = component(0);
+                AlphaColor::new([gray, gray, gray, opacity])
             }
-            ColorSpaceType::DeviceRgb(_) => AlphaColor::from_rgba8(
-                c.first().copied().map(f32_to_u8).unwrap_or(0),
-                c.get(1).copied().map(f32_to_u8).unwrap_or(0),
-                c.get(2).copied().map(f32_to_u8).unwrap_or(0),
-                alpha,
-            ),
+            ColorSpaceType::DeviceRgb(_) => {
+                AlphaColor::new([component(0), component(1), component(2), opacity])
+            }
             ColorSpaceType::DeviceCmyk(device_cmyk) if c.len() == 4 => {
                 let input = [
                     f32_to_u8(c[0]),
@@ -596,7 +594,12 @@ impl ColorSpace {
                 let mut output = [0; 3];
 
                 if device_cmyk.convert(&input, &mut output).is_some() {
-                    AlphaColor::from_rgba8(output[0], output[1], output[2], alpha)
+                    AlphaColor::new([
+                        u8_to_f32(output[0]),
+                        u8_to_f32(output[1]),
+                        u8_to_f32(output[2]),
+                        opacity,
+                    ])
                 } else {
                     AlphaColor::BLACK
                 }
@@ -617,12 +620,12 @@ impl ColorSpace {
             opacity = 0.0;
         }
 
-        Some(AlphaColor::from_rgba8(
-            output[0],
-            output[1],
-            output[2],
-            (opacity * 255.0 + 0.5) as u8,
-        ))
+        Some(AlphaColor::new([
+            u8_to_f32(output[0]),
+            u8_to_f32(output[1]),
+            u8_to_f32(output[2]),
+            opacity,
+        ]))
     }
 }
 

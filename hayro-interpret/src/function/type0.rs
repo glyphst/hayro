@@ -27,6 +27,23 @@ pub(crate) struct Type0 {
 }
 
 impl Type0 {
+    pub(super) fn definition(&self) -> super::FunctionDefinition<'_> {
+        super::FunctionDefinition::Sampled {
+            sizes: &self.sizes,
+            samples: &self.table,
+            sample_maximum: self.maximum as u32,
+            order: if self.cubic { 3 } else { 1 },
+            domain: &self.clamper.domain,
+            range: self
+                .clamper
+                .range
+                .as_deref()
+                .expect("sampled Range is required"),
+            encode: &self.encode,
+            decode: &self.decode,
+        }
+    }
+
     pub(super) fn arity(&self) -> (usize, usize) {
         (self.clamper.domain.len(), self.decode.len())
     }

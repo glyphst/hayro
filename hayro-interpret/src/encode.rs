@@ -21,6 +21,7 @@ pub struct EncodedShadingPattern {
     pub shading_type: EncodedShadingType,
     pub(crate) opacity: f32,
     pub(crate) transfer_function: Option<ActiveTransferFunction>,
+    deferred_transfer_function: Option<ActiveTransferFunction>,
 }
 
 /// The encoded shading type.
@@ -91,6 +92,12 @@ pub fn texture_dimensions(bbox: Rect, scale: f32) -> (u32, u32) {
 }
 
 impl EncodedShadingPattern {
+    /// Unapplied selected transfer when this pattern was encoded with transfer
+    /// deferral enabled. Samples and gradient stops then retain raw colors.
+    pub fn deferred_transfer_function(&self) -> Option<&ActiveTransferFunction> {
+        self.deferred_transfer_function.as_ref()
+    }
+
     /// Sample the shading at the given position.
     #[inline]
     pub fn sample(&self, pos: Point) -> [f32; 4] {
@@ -284,7 +291,13 @@ impl ShadingPattern {
             shading_type,
             base_transform,
             opacity: self.opacity,
-            transfer_function: self.transfer_function.clone(),
+            transfer_function: (!self.defer_transfer_function)
+                .then(|| self.transfer_function.clone())
+                .flatten(),
+            deferred_transfer_function: self
+                .defer_transfer_function
+                .then(|| self.transfer_function.clone())
+                .flatten(),
         }
     }
 }

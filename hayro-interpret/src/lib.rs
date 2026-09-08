@@ -62,7 +62,7 @@ pub use cache::CacheKey;
 pub use context::*;
 pub use device::*;
 pub use function::{
-    CalculatorFunction, CalculatorInstruction, Function, TransferFunction,
+    CalculatorFunction, CalculatorInstruction, Function, FunctionDefinition, TransferFunction,
     selected_transfer_function,
 };
 pub use hayro_cmap;

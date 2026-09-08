@@ -337,6 +337,14 @@ pub struct InterpreterSettings {
     /// raster devices. Retained-scene devices should enable this and evaluate
     /// the emitted expressions themselves.
     pub preserve_optional_content: bool,
+    /// Return raw paint/image/shading colors and expose their selected transfer
+    /// functions separately for a retaining device.
+    ///
+    /// The default applies transfer while producing source colors. Enabling
+    /// this requires the device to implement PDF 11.7.5.2 page-region transfer
+    /// selection, including untransferred backdrops and ancestor eligibility;
+    /// it does not make an immediate raster device transparency-correct.
+    pub defer_transfer_functions: bool,
     /// Maximum decoded metadata bytes copied from one marked-content property
     /// list.
     ///
@@ -376,6 +384,7 @@ impl Default for InterpreterSettings {
             warning_sink: Arc::new(|_| {}),
             render_annotations: true,
             preserve_optional_content: false,
+            defer_transfer_functions: false,
             max_marked_content_metadata_bytes: 64 * 1024 * 1024,
             max_marked_content_property_bytes: 64 * 1024 * 1024,
             max_marked_content_property_depth: 64,
@@ -1121,6 +1130,7 @@ pub fn interpret<'a>(
                             matrix: Affine::IDENTITY,
                             opacity: context.get().graphics_state.non_stroke_alpha,
                             transfer_function: transfer_function.clone(),
+                            defer_transfer_function: context.settings.defer_transfer_functions,
                             background_applies: false,
                         })
                     })

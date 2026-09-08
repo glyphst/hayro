@@ -13,6 +13,17 @@ pub(crate) struct Type3 {
 }
 
 impl Type3 {
+    pub(super) fn definition(&self) -> super::FunctionDefinition<'_> {
+        let (low, high) = self.clamper.domain[0];
+        super::FunctionDefinition::Stitching {
+            domain: [low, high],
+            range: self.clamper.range.as_deref(),
+            functions: &self.functions,
+            bounds: &self.bounds[1..self.bounds.len() - 1],
+            encode: &self.encode,
+        }
+    }
+
     pub(crate) fn new(dict: &Dict<'_>, depth: usize, remaining: &mut usize) -> Option<Self> {
         let clamper = Clamper::new(dict)?;
         if clamper.domain.len() != 1 {

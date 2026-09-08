@@ -446,6 +446,13 @@ impl ColorSpace {
         }
     }
 
+    pub(crate) fn indexed(&self) -> Option<&Indexed> {
+        match self.0.as_ref() {
+            ColorSpaceType::Indexed(indexed) => Some(indexed),
+            _ => None,
+        }
+    }
+
     /// Get the default decode array for the color space.
     pub(crate) fn default_decode_arr(&self, n: f32) -> SmallVec<[(f32, f32); 4]> {
         match self.0.as_ref() {
@@ -498,12 +505,10 @@ impl ColorSpace {
     }
 
     /// Whether matte components are valid for native source-space recovery.
-    /// Indexed palette preblending and pattern sources require separate handling.
+    /// Indexed matte values select a palette entry; pattern sources are invalid.
     pub fn image_matte_is_valid(&self, values: &[f32]) -> bool {
-        !matches!(
-            self.0.as_ref(),
-            ColorSpaceType::Indexed(_) | ColorSpaceType::Pattern(_)
-        ) && values.len() == self.num_components() as usize
+        !matches!(self.0.as_ref(), ColorSpaceType::Pattern(_))
+            && values.len() == self.num_components() as usize
             && values
                 .iter()
                 .zip(self.component_ranges())

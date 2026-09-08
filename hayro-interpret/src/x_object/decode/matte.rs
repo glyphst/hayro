@@ -1,7 +1,7 @@
 //! PDF 32000-1 11.6.5.3: undo preblending before source color conversion.
 use super::float::validate_decode;
 use super::image::DecodedImage;
-use super::samples::Samples;
+use super::samples::{Samples, decode_sample};
 use super::{DecodeContext, decode_context};
 use crate::color::{ColorSpaceKind, ToRgb};
 use crate::x_object::image::{ImageXObject, uses_jpx_decode};
@@ -74,9 +74,25 @@ pub(super) fn decode(
     let mut source = Samples::new(context, uses_jpx_decode(obj.stream.dict())).ok()?;
     let mut mask_samples = Samples::new(&mask_context, uses_jpx_decode(dict)).ok()?;
     let count = usize::try_from(u64::from(context.width) * u64::from(context.height)).ok()?;
-    let gray = context.color_space.kind() == ColorSpaceKind::DeviceGray;
+    let indexed = context.color_space.indexed();
+    let color_space = indexed.map_or(&context.color_space, |space| space.base());
+    let components = color_space.num_components() as usize;
+    let ranges = color_space.component_ranges();
+    // Matte has one index component in an Indexed space. Both it and each
+    // source sample select palette colors before preblending is reversed.
+    let matte: SmallVec<[f64; 4]> = if let Some(indexed) = indexed {
+        indexed
+            .entry(f64::from(matte[0]))
+            .iter()
+            .zip(&ranges)
+            .map(|(&sample, &(low, high))| decode_sample(u32::from(sample), 255, low, high))
+            .collect()
+    } else {
+        matte.into_iter().map(f64::from).collect()
+    };
+    let gray = color_space.kind() == ColorSpaceKind::DeviceGray;
     let native = matches!(
-        context.color_space.kind(),
+        color_space.kind(),
         ColorSpaceKind::DeviceGray
             | ColorSpaceKind::DeviceRgb
             | ColorSpaceKind::CalGray
@@ -95,15 +111,24 @@ pub(super) fn decode(
     let mut alpha = Vec::new();
     alpha.try_reserve_exact(count).ok()?;
     let mut values = vec![0.0; components];
-    let ranges = context.color_space.component_ranges();
     for _ in 0..count {
-        source.read(&mut values).ok()?;
+        if let Some(indexed) = indexed {
+            let mut index = [0.0];
+            source.read(&mut index).ok()?;
+            for ((value, &sample), &(low, high)) in
+                values.iter_mut().zip(indexed.entry(index[0])).zip(&ranges)
+            {
+                *value = decode_sample(u32::from(sample), 255, low, high);
+            }
+        } else {
+            source.read(&mut values).ok()?;
+        }
         let mut opacity = [0.0];
         mask_samples.read(&mut opacity).ok()?;
         let opacity = opacity[0].clamp(0.0, 1.0);
         alpha.push((opacity * 255.0).round() as u8);
         for ((value, matte), &(low, high)) in values.iter_mut().zip(&matte).zip(&ranges) {
-            let matte = f64::from(*matte);
+            let matte = *matte;
             // At zero opacity the original source is unrecoverable. Its color
             // cannot contribute, so use the declared matte deterministically.
             *value = if opacity == 0.0 {
@@ -114,7 +139,7 @@ pub(super) fn decode(
             .clamp(f64::from(low), f64::from(high));
         }
         if native {
-            let rgb = context.color_space.image_rgb_f64(&values)?;
+            let rgb = color_space.image_rgb_f64(&values)?;
             data.extend(
                 rgb.into_iter()
                     .take(channels)
@@ -127,14 +152,14 @@ pub(super) fn decode(
                 .iter()
                 .map(|v| *v as f32)
                 .collect::<SmallVec<[f32; 4]>>();
-            data.extend(context.color_space.encode_values(&values));
+            data.extend(color_space.encode_values(&values));
         }
     }
-    if !native && context.color_space.convert_in_place(&mut data).is_none() {
+    if !native && color_space.convert_in_place(&mut data).is_none() {
         let mut output = Vec::new();
         output.try_reserve_exact(count.checked_mul(3)?).ok()?;
         output.resize(count * 3, 0);
-        context.color_space.convert(&data, &mut output)?;
+        color_space.convert(&data, &mut output)?;
         data = output;
     }
     let mut gray = gray;

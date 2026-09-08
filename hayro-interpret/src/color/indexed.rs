@@ -1,5 +1,5 @@
 use super::{ColorSpace, ToLuma, ToRgb, U8Lookup};
-use hayro_syntax::object::{self, Array, Name, Object, Stream};
+use hayro_syntax::object::{self, Array, Name, Number, Object, Stream};
 use std::borrow::Cow;
 
 #[derive(Debug, Clone)]
@@ -27,11 +27,20 @@ impl Indexed {
         array: &Array<'a>,
         resolve: &mut dyn FnMut(Object<'a>) -> Option<ColorSpace>,
     ) -> Option<Self> {
+        if array.raw_iter().take(5).count() != 4 {
+            return None;
+        }
         let mut iter = array.flex_iter();
         // Skip name
         let _ = iter.next::<Name<'_>>()?;
         let base_color_space = resolve(iter.next::<Object<'_>>()?)?;
-        let hival = iter.next::<u32>()?.min(u8::MAX as u32) as u8;
+        if matches!(
+            base_color_space.kind(),
+            super::ColorSpaceKind::Indexed | super::ColorSpaceKind::Pattern
+        ) {
+            return None;
+        }
+        let hival = u8::try_from(iter.next::<Number>()?.as_i64_exact()?).ok()?;
 
         let values = {
             let data = iter
@@ -43,6 +52,9 @@ impl Indexed {
                 })?;
 
             let num_components = base_color_space.num_components();
+            if data.len() != (usize::from(hival) + 1) * num_components as usize {
+                return None;
+            }
 
             let mut byte_iter = data.iter().copied();
 
@@ -71,6 +83,15 @@ impl Indexed {
 
     pub(super) fn hival(&self) -> u8 {
         self.hival
+    }
+
+    pub(crate) fn base(&self) -> &ColorSpace {
+        &self.base
+    }
+
+    /// PDF 8.6.6.3 rounds real indices and clips them to the palette bounds.
+    pub(crate) fn entry(&self, index: f64) -> &[u8] {
+        &self.values[index.round().clamp(0.0, f64::from(self.hival)) as usize]
     }
 
     fn convert_inner(&self, input: &[u8], output: &mut [u8]) -> Option<()> {

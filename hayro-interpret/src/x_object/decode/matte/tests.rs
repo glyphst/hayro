@@ -40,8 +40,7 @@ fn decoded(
         &warning,
         &Cache::new(),
         None,
-    )
-    .unwrap();
+    )?;
     crate::x_object::decode::decode_image(&obj, None)
 }
 
@@ -290,18 +289,17 @@ fn matte_recovery_precedes_icc_and_tint_transforms() {
             rgb(&image)
         );
     }
-    assert!(
-        decoded(
-            "[/Indexed /DeviceRGB 0 <808080>]",
-            1,
-            1,
-            "/BitsPerComponent 8",
-            &[0],
-            "/BitsPerComponent 8/Matte[0]",
-            &[128]
-        )
-        .is_none()
-    );
+    let image = decoded(
+        "[/Indexed /DeviceRGB 0 <808080>]",
+        1,
+        1,
+        "/BitsPerComponent 8",
+        &[0],
+        "/BitsPerComponent 8/Matte[0]",
+        &[128],
+    )
+    .unwrap();
+    assert_eq!(rgb(&image), [128; 3]);
 }
 
 use super::super::jpx_fixtures;
@@ -358,4 +356,183 @@ fn matte_jpx_source_and_mask_retain_native_depth_and_dictionary_precedence() {
         image.alpha.unwrap().data,
         samples.map(|v| (f64::from(v) / 65535.0 * 255.0).round() as u8)
     );
+}
+
+#[test]
+fn indexed_matte_recovers_palette_components_before_base_conversion() {
+    for (base, palette, expected) in [
+        ("/DeviceRGB", "8040c0e61e64", [26, 98, 255]),
+        (
+            "[/CalGray<</WhitePoint[.95047 1 1.08883]>>]",
+            "80e6",
+            [90; 3],
+        ),
+        (
+            "[/CalRGB<</WhitePoint[.95047 1 1.08883]/Matrix[.95047 0 0 0 1 0 0 0 1.08883]>>]",
+            "808080e6e6e6",
+            [90; 3],
+        ),
+        (
+            "[/Lab<</WhitePoint[.95047 1 1.08883]/Range[0 0 0 0]>>]",
+            "800000cc0000",
+            [49; 3],
+        ),
+        ("/DeviceCMYK", "8080808000000000", [0; 3]),
+        ("[/ICCBased 6 0 R]", "80e6", [90; 3]),
+        (
+            "[/Separation /Spot [/CalGray<</WhitePoint[1 1 1]>>] <</FunctionType 2/Domain[0 1]/C0[0]/C1[1]/N 1>>]",
+            "80e6",
+            [90; 3],
+        ),
+        (
+            "[/DeviceN [/Spot] [/CalGray<</WhitePoint[1 1 1]>>] <</FunctionType 2/Domain[0 1]/C0[0]/C1[1]/N 1>>]",
+            "80e6",
+            [90; 3],
+        ),
+    ] {
+        for matte in ["1", ".75", ".5"] {
+            let image = decoded(
+                &format!("[/Indexed {base} 1 <{palette}>]"),
+                1,
+                1,
+                "/BitsPerComponent 8",
+                &[0],
+                &format!("/BitsPerComponent 8/Decode[.5 .5]/Matte[{matte}]"),
+                &[0],
+            )
+            .unwrap();
+            assert_eq!(rgb(&image), expected, "{base}: {matte}");
+            assert_eq!(image.alpha.unwrap().data, [128]);
+        }
+    }
+}
+
+#[test]
+fn indexed_matte_preserves_native_indices_opacity_and_packed_rows() {
+    let image = decoded(
+        "[/Indexed /DeviceGray 1 <0100>]",
+        2,
+        1,
+        "/BitsPerComponent 16/Decode[0 1]",
+        &[0x7f, 0xff, 0x80, 0],
+        "/BitsPerComponent 16/Matte[1]",
+        &[2, 2, 2, 2],
+    )
+    .unwrap();
+    // Adjacent 16-bit indices straddle 1/2. Alpha=514/65535=2/255;
+    // palette component 1/255 recovers exactly 1/2 before byte storage.
+    assert_eq!(rgb(&image), [128, 128, 128, 0, 0, 0]);
+    assert_eq!(image.alpha.unwrap().data, [2, 2]);
+    for bits in [1, 2, 4, 8, 16] {
+        let maximum = (1_u32 << bits) - 1;
+        let mut data = Vec::new();
+        for _ in 0..2 {
+            let mut row = vec![0; (3 * bits as usize).div_ceil(8)];
+            for (i, sample) in [0, maximum, 0].into_iter().enumerate() {
+                for bit in 0..bits as usize {
+                    let offset = i * bits as usize + bit;
+                    row[offset / 8] |=
+                        (((sample >> (bits as usize - bit - 1)) & 1) as u8) << (7 - offset % 8);
+                }
+            }
+            data.extend(row);
+        }
+        let image = decoded(
+            "[/Indexed /DeviceGray 1 <10e0>]",
+            3,
+            2,
+            &format!("/BitsPerComponent {bits}/Decode[2 -1]"),
+            &data,
+            "/BitsPerComponent 8/Matte[1]",
+            &[255; 6],
+        )
+        .unwrap();
+        assert_eq!(
+            rgb(&image),
+            [224, 224, 224, 16, 16, 16, 224, 224, 224].repeat(2),
+            "{bits}"
+        );
+    }
+}
+
+#[test]
+fn invalid_indexed_palettes_and_matte_components_fail_closed() {
+    for space in [
+        "[/Indexed /DeviceRGB 256 <808080>]",
+        "[/Indexed /DeviceRGB -1 <808080>]",
+        "[/Indexed /DeviceRGB 0.0 <808080>]",
+        "[/Indexed /DeviceRGB 0 <808080> false]",
+        "[/Indexed /DeviceRGB 0 <8080>]",
+        "[/Indexed /DeviceRGB 0 <80808080>]",
+        "[/Indexed [/Indexed /DeviceGray 0 <80>] 0 <00>]",
+        "[/Indexed [/Pattern /DeviceRGB] 0 <808080>]",
+    ] {
+        assert!(
+            decoded(
+                space,
+                1,
+                1,
+                "/BitsPerComponent 8",
+                &[0],
+                "/BitsPerComponent 8/Matte[0]",
+                &[128]
+            )
+            .is_none(),
+            "{space}"
+        );
+    }
+    for matte in ["-1", "2", "false", "0 false", "0 0 0"] {
+        assert!(
+            decoded(
+                "[/Indexed /DeviceRGB 1 <8040c0e61e64>]",
+                1,
+                1,
+                "/BitsPerComponent 8",
+                &[0],
+                &format!("/BitsPerComponent 8/Matte[{matte}]"),
+                &[128]
+            )
+            .is_none(),
+            "{matte}"
+        );
+    }
+}
+
+#[test]
+fn indexed_matte_jpx_and_varying_opacity_preserve_palette_ownership() {
+    let image = decoded(
+        "[/Indexed /DeviceGray 1 <80e6>]",
+        3,
+        2,
+        "/Filter/JPXDecode/BitsPerComponent 1/Decode[1 0]",
+        jpx_fixtures::DEPTH_16,
+        "/BitsPerComponent 8/Decode[.5 .5]/Matte[1]",
+        &[0; 6],
+    )
+    .unwrap();
+    assert_eq!(
+        rgb(&image),
+        [26, 230, 230, 230, 230, 230]
+            .into_iter()
+            .flat_map(|v| [v; 3])
+            .collect::<Vec<_>>()
+    );
+    let image = decoded(
+        "[/Indexed /DeviceGray 1 <80e6>]",
+        4,
+        1,
+        "/BitsPerComponent 8",
+        &[0; 4],
+        "/BitsPerComponent 8/Matte[1]",
+        &[0, 64, 128, 255],
+    )
+    .unwrap();
+    assert_eq!(
+        rgb(&image),
+        [230, 0, 27, 128]
+            .into_iter()
+            .flat_map(|v| [v; 3])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(image.alpha.unwrap().data, [0, 64, 128, 255]);
 }

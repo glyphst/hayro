@@ -9,6 +9,12 @@ fn decode(
     limit: u64,
     checkpoint: impl FnMut() -> bool,
 ) -> Result<RgbF32Data, Error> {
+    with_image(header, data, |image| {
+        decode_rgb_f32(image, limit, checkpoint)
+    })
+}
+
+fn with_image<T>(header: &str, data: &[u8], run: impl FnOnce(&ImageXObject<'_>) -> T) -> T {
     let mut bytes = format!(
         "%PDF-1.7\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
         2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
@@ -33,7 +39,7 @@ fn decode(
         None,
     )
     .unwrap();
-    decode_rgb_f32(&image, limit, checkpoint)
+    run(&image)
 }
 
 fn floats(image: &RgbF32Data) -> Vec<f32> {
@@ -203,5 +209,50 @@ fn decode_affine_keeps_opposing_bounds_and_clamps_only_after_mapping() {
             vec![1.0; 3]
         ]
         .concat()
+    );
+}
+
+#[test]
+fn binary64_decode_retains_source_side_of_binary32_cutoff_and_charges_capacity() {
+    let header = "/Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 16";
+    with_image(header, &[0xff, 0xfe], |image| {
+        let data = decode_rgb_f64(image, 24, || true).unwrap();
+        assert_eq!(data.data.len(), 24);
+        for bytes in data.data.chunks_exact(8) {
+            let value = f64::from_le_bytes(bytes.try_into().unwrap());
+            assert_eq!(value, 65534.0 / 65535.0);
+            assert!(value < f64::from(value as f32));
+        }
+        assert!(matches!(
+            decode_rgb_f64(image, 23, || true),
+            Err(Error::Limit { requested: 24 })
+        ));
+        assert!(matches!(
+            decode_rgb_f64(image, 24, || false),
+            Err(Error::Cancelled)
+        ));
+    });
+    with_image(header, &[0xff], |image| {
+        assert!(matches!(
+            decode_rgb_f64(image, 24, || true),
+            Err(Error::Decode)
+        ));
+    });
+    with_image(
+        "/Width 1 /Height 1 /ColorSpace [/CalGray <</WhitePoint[0.95047 1 1.08883]/Gamma 2>>] /BitsPerComponent 16",
+        &[0x80, 0],
+        |image| {
+            let wide = decode_rgb_f64(image, 24, || true).unwrap();
+            let narrow = decode_rgb_f32(image, 12, || true).unwrap();
+            assert!(
+                wide.data
+                    .chunks_exact(8)
+                    .zip(floats(&narrow))
+                    .any(|(bytes, value)| {
+                        let wide = f64::from_le_bytes(bytes.try_into().unwrap());
+                        wide != f64::from(value) && wide as f32 == value
+                    })
+            );
+        },
     );
 }

@@ -515,7 +515,7 @@ impl ColorSpace {
     }
 
     /// Convert admitted image components without quantizing either side to bytes.
-    pub(crate) fn image_rgb_f32(&self, input: &[f64]) -> Option<[f32; 3]> {
+    pub(crate) fn image_rgb_f64(&self, input: &[f64]) -> Option<[f64; 3]> {
         let rgb = match self.0.as_ref() {
             ColorSpaceType::DeviceGray(_) => [*input.first()?; 3],
             ColorSpaceType::DeviceRgb(_) => [*input.first()?, *input.get(1)?, *input.get(2)?],
@@ -527,7 +527,7 @@ impl ColorSpace {
         };
         rgb.iter()
             .all(|value| value.is_finite())
-            .then(|| rgb.map(|value| value.clamp(0.0, 1.0) as f32))
+            .then(|| rgb.map(|value| value.clamp(0.0, 1.0)))
     }
 
     pub(crate) fn encode_values(&self, input: &[f32]) -> SmallVec<[u8; 4]> {

@@ -2,15 +2,54 @@
 use super::decode_context;
 use crate::color::ColorSpaceKind;
 use crate::x_object::image::{ImageKind, ImageXObject, uses_jpx_decode};
-use crate::{FloatImageError as Error, RgbF32Data};
+use crate::{FloatImageError as Error, RgbF32Data, RgbF64Data};
 use hayro_syntax::bit_reader::BitReader;
 use hayro_syntax::object::{Array, Object};
 
 pub(crate) fn decode_rgb_f32(
     obj: &ImageXObject<'_>,
     max_bytes: u64,
-    mut checkpoint: impl FnMut() -> bool,
+    checkpoint: impl FnMut() -> bool,
 ) -> Result<RgbF32Data, Error> {
+    let decoded = decode_rgb(obj, max_bytes, checkpoint, |v| (v as f32).to_le_bytes())?;
+    Ok(RgbF32Data {
+        data: decoded.data,
+        width: decoded.width,
+        height: decoded.height,
+        interpolate: decoded.interpolate,
+        scale_factors: decoded.scale_factors,
+    })
+}
+
+pub(crate) fn decode_rgb_f64(
+    obj: &ImageXObject<'_>,
+    max_bytes: u64,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<RgbF64Data, Error> {
+    let decoded = decode_rgb(obj, max_bytes, checkpoint, f64::to_le_bytes)?;
+    Ok(RgbF64Data {
+        data: decoded.data,
+        width: decoded.width,
+        height: decoded.height,
+        interpolate: decoded.interpolate,
+        scale_factors: decoded.scale_factors,
+    })
+}
+
+struct DecodedFloat {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+    interpolate: bool,
+    scale_factors: (f32, f32),
+}
+
+fn decode_rgb<const BYTES: usize>(
+    obj: &ImageXObject<'_>,
+    max_bytes: u64,
+    mut checkpoint: impl FnMut() -> bool,
+    encode: impl Fn(f64) -> [u8; BYTES],
+) -> Result<DecodedFloat, Error> {
     if !checkpoint() {
         return Err(Error::Cancelled);
     }
@@ -36,7 +75,7 @@ pub(crate) fn decode_rgb_f32(
             _ => return Err(Error::Unsupported),
         }
     }
-    output_bytes(obj.width, obj.height, max_bytes)?;
+    output_bytes(obj.width, obj.height, BYTES, max_bytes)?;
     let context = decode_context(obj, None).ok_or(Error::Decode)?;
     if !checkpoint() {
         return Err(Error::Cancelled);
@@ -56,7 +95,7 @@ pub(crate) fn decode_rgb_f32(
     {
         return Err(Error::Unsupported);
     }
-    let capacity = output_bytes(context.width, context.height, max_bytes)?;
+    let capacity = output_bytes(context.width, context.height, BYTES, max_bytes)?;
     let row_bits = u64::from(context.width)
         .checked_mul(components as u64)
         .and_then(|value| value.checked_mul(u64::from(context.bits_per_component)))
@@ -96,10 +135,10 @@ pub(crate) fn decode_rgb_f32(
             }
             let rgb = context
                 .color_space
-                .image_rgb_f32(&values[..components])
+                .image_rgb_f64(&values[..components])
                 .ok_or(Error::Decode)?;
             for value in rgb {
-                output.extend_from_slice(&value.to_le_bytes());
+                output.extend_from_slice(&encode(value));
             }
         }
         reader.align();
@@ -107,7 +146,7 @@ pub(crate) fn decode_rgb_f32(
     if !checkpoint() {
         return Err(Error::Cancelled);
     }
-    Ok(RgbF32Data {
+    Ok(DecodedFloat {
         data: output,
         width: context.width,
         height: context.height,
@@ -116,10 +155,15 @@ pub(crate) fn decode_rgb_f32(
     })
 }
 
-fn output_bytes(width: u32, height: u32, limit: u64) -> Result<usize, Error> {
+fn output_bytes(
+    width: u32,
+    height: u32,
+    component_bytes: usize,
+    limit: u64,
+) -> Result<usize, Error> {
     let bytes = u64::from(width)
         .checked_mul(u64::from(height))
-        .and_then(|value| value.checked_mul(12))
+        .and_then(|value| value.checked_mul(3 * component_bytes as u64))
         .ok_or(Error::Limit {
             requested: u64::MAX,
         })?;

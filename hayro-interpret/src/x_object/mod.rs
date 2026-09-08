@@ -1,5 +1,5 @@
 mod decode;
-pub(crate) use decode::decode_rgb_f32;
+pub(crate) use decode::{decode_rgb_f32, decode_rgb_f64};
 mod form;
 mod image;
 pub(crate) mod soft_mask;

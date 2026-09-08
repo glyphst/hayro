@@ -86,6 +86,19 @@ impl RasterImage<'_> {
         crate::x_object::decode_rgb_f32(&self.0, max_bytes, checkpoint)
     }
 
+    /// Decode normalized RGB as binary64, preserving Decode and calibrated
+    /// conversion results without an intervening binary32 rounding step.
+    ///
+    /// This has the same source restrictions and cancellation checkpoints as
+    /// [`Self::decode_rgb_f32`], and charges 24 output bytes per decoded pixel.
+    pub fn decode_rgb_f64(
+        &self,
+        max_bytes: u64,
+        checkpoint: impl FnMut() -> bool,
+    ) -> Result<RgbF64Data, FloatImageError> {
+        crate::x_object::decode_rgb_f64(&self.0, max_bytes, checkpoint)
+    }
+
     /// Return how a JPEG 2000 opacity channel is associated with its color samples.
     ///
     /// `None` means that the image does not have an active embedded opacity
@@ -162,6 +175,20 @@ impl RasterImage<'_> {
 /// Unassociated, normalized output-device RGB with no byte quantization.
 pub struct RgbF32Data {
     /// Consecutive RGB triples, encoded as little-endian binary32 values.
+    pub data: Vec<u8>,
+    /// Decoded pixel width.
+    pub width: u32,
+    /// Decoded pixel height.
+    pub height: u32,
+    /// Whether the image requests interpolation.
+    pub interpolate: bool,
+    /// Original dimensions divided by the decoded dimensions.
+    pub scale_factors: (f32, f32),
+}
+
+/// Unassociated, normalized output-device RGB with no byte quantization.
+pub struct RgbF64Data {
+    /// Consecutive RGB triples, encoded as little-endian binary64 values.
     pub data: Vec<u8>,
     /// Decoded pixel width.
     pub width: u32,

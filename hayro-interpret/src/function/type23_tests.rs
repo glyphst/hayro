@@ -201,3 +201,20 @@ fn stitching_dictionary_shape_is_required_and_children_must_agree() {
         assert!(parse(&valid.replace(token, "")).is_none());
     }
 }
+
+#[test]
+fn shading_function_arrays_preserve_distinct_close_boundaries() {
+    let function = parse(&stitching(
+        "0 1",
+        &format!("{ID} {ID} {ID}"),
+        "0.01 0.01000008",
+        "0 1 0 1 0 1",
+    ))
+    .unwrap();
+    for shading in [
+        crate::shading::ShadingFunction::Single(function.clone()),
+        crate::shading::ShadingFunction::Multiple(smallvec![function.clone(), function]),
+    ] {
+        assert_eq!(shading.stitching_bounds(), [0.01, 0.01000008]);
+    }
+}

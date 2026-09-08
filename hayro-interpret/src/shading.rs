@@ -67,7 +67,7 @@ impl ShadingFunction {
         }
 
         bounds.sort_by(f32::total_cmp);
-        bounds.dedup_by(|a, b| (*a - *b).abs() <= f32::EPSILON);
+        bounds.dedup_by(|a, b| *a == *b);
         bounds.into_vec()
     }
 

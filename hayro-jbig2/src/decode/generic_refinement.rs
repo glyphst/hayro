@@ -131,8 +131,9 @@ pub(crate) struct RefinementContextGatherer<'a> {
     template: RefinementTemplate,
     at_pixels: &'a [AdaptiveTemplatePixel],
     use_default_at: bool,
-    reference_dx: i32,
-    reference_dy: i32,
+    // Widen before subtracting signed offsets or adding adaptive pixels.
+    reference_dx: i64,
+    reference_dy: i64,
     reg_y: u32,
     reg_cur_x: u32,
     reg_m1: Word,
@@ -161,8 +162,8 @@ impl<'a> RefinementContextGatherer<'a> {
             template,
             at_pixels,
             use_default_at,
-            reference_dx,
-            reference_dy,
+            reference_dx: i64::from(reference_dx),
+            reference_dy: i64::from(reference_dy),
             reg_y: 0,
             reg_cur_x: 0,
             reg_m1: 0,
@@ -177,7 +178,7 @@ impl<'a> RefinementContextGatherer<'a> {
 
     pub(crate) fn start_row(&mut self, region: &Bitmap, reference: &Bitmap, y: u32) {
         self.reg_y = y;
-        let ref_y = y as i32 - self.reference_dy;
+        let ref_y = i64::from(y) - self.reference_dy;
         // This will on purpose wrap to a very large `u32` for negative values, such that
         // they resolve to 0 in `ContextGatherer::load_word`.
         let ref_x0 = (-self.reference_dx) as u32;
@@ -190,10 +191,13 @@ impl<'a> RefinementContextGatherer<'a> {
         };
         self.reg_cur = 0;
 
-        self.ref_cur_x = 0;
-        self.ref_m1 = ContextGatherer::load_word(reference, (ref_y - 1) as u32, 0);
-        self.ref_cur = ContextGatherer::load_word(reference, ref_y as u32, 0);
-        self.ref_p1 = ContextGatherer::load_word(reference, (ref_y + 1) as u32, 0);
+        // Seed the rolling context at the actual reference origin, including
+        // its left neighbour. A positive offset starts outside the bitmap;
+        // retain the first word so pixel zero becomes visible at ref_x == -1.
+        self.ref_cur_x = (-self.reference_dx - 1).max(0) as u32;
+        self.ref_m1 = ContextGatherer::load_word(reference, (ref_y - 1) as u32, self.ref_cur_x);
+        self.ref_cur = ContextGatherer::load_word(reference, ref_y as u32, self.ref_cur_x);
+        self.ref_p1 = ContextGatherer::load_word(reference, (ref_y + 1) as u32, self.ref_cur_x);
 
         self.ctx = match self.template {
             RefinementTemplate::Template1 => {
@@ -255,18 +259,13 @@ impl<'a> RefinementContextGatherer<'a> {
             self.reg_cur = ContextGatherer::load_word(region, self.reg_y, new_start);
         }
 
-        let ref_x_signed = x as i32 - self.reference_dx;
-        if ref_x_signed < 0 {
-            self.ref_cur_x = 0;
-            self.ref_m1 = 0;
-            self.ref_cur = 0;
-            self.ref_p1 = 0;
-        } else {
+        let ref_x_signed = i64::from(x) - self.reference_dx;
+        if ref_x_signed >= 0 {
             let ref_x = ref_x_signed as u32;
 
             if ref_x + 1 >= self.ref_cur_x + WORD_BITS || ref_x < self.ref_cur_x {
                 let new_start = ref_x.saturating_sub(1);
-                let ref_y = self.reg_y as i32 - self.reference_dy;
+                let ref_y = i64::from(self.reg_y) - self.reference_dy;
                 self.ref_cur_x = new_start;
                 self.ref_m1 = ContextGatherer::load_word(reference, (ref_y - 1) as u32, new_start);
                 self.ref_cur = ContextGatherer::load_word(reference, ref_y as u32, new_start);
@@ -277,7 +276,7 @@ impl<'a> RefinementContextGatherer<'a> {
 
     #[inline(always)]
     pub(crate) fn tpgr_all_same(&self, x: u32) -> bool {
-        let ref_x = (x as i32 - self.reference_dx) as u32;
+        let ref_x = (i64::from(x) - self.reference_dx) as u32;
         let rbx = ref_x.wrapping_sub(self.ref_cur_x);
 
         #[inline(always)]
@@ -308,7 +307,7 @@ impl<'a> RefinementContextGatherer<'a> {
 
     #[inline(always)]
     pub(crate) fn ref_center_pixel(&self, x: u32) -> u8 {
-        let ref_x = (x as i32 - self.reference_dx) as u32;
+        let ref_x = (i64::from(x) - self.reference_dx) as u32;
         let rbx = ref_x.wrapping_sub(self.ref_cur_x);
 
         ContextGatherer::get_buf_pixel(self.ref_cur, rbx) as u8
@@ -327,7 +326,7 @@ impl<'a> RefinementContextGatherer<'a> {
     #[inline(always)]
     fn gather_template0_default(&mut self, _region: &Bitmap, _reference: &Bitmap, x: u32) -> u16 {
         let bx = x - self.reg_cur_x;
-        let ref_x = (x as i32 - self.reference_dx) as u32;
+        let ref_x = (i64::from(x) - self.reference_dx) as u32;
         let rbx = ref_x.wrapping_sub(self.ref_cur_x);
 
         let new_pixels = (ContextGatherer::get_buf_pixel(self.reg_m1, bx + 1) << 10)
@@ -343,12 +342,12 @@ impl<'a> RefinementContextGatherer<'a> {
     #[inline(always)]
     fn gather_template0_custom(&mut self, region: &Bitmap, reference: &Bitmap, x: u32) -> u16 {
         let bx = x - self.reg_cur_x;
-        let ref_x_i = x as i32 - self.reference_dx;
-        let rbx = ref_x_i as u32 - self.ref_cur_x;
+        let ref_x_i = i64::from(x) - self.reference_dx;
+        let rbx = (ref_x_i as u32).wrapping_sub(self.ref_cur_x);
 
         let xi = x as i32;
         let yi = self.reg_y as i32;
-        let ref_y = yi - self.reference_dy;
+        let ref_y = i64::from(yi) - self.reference_dy;
         let at1 = self.at_pixels[0];
         let at2 = self.at_pixels[1];
 
@@ -358,8 +357,8 @@ impl<'a> RefinementContextGatherer<'a> {
             | (ContextGatherer::get_buf_pixel(self.reg_m1, bx + 1) << 10)
             | (ContextGatherer::get_buf_pixel(self.reg_cur, bx.wrapping_sub(1)) << 9)
             | ((reference.get_pixel(
-                (ref_x_i + at2.x as i32) as u32,
-                (ref_y + at2.y as i32) as u32,
+                (ref_x_i + i64::from(at2.x)) as u32,
+                (ref_y + i64::from(at2.y)) as u32,
             ) as u16)
                 << 8)
             | (ContextGatherer::get_buf_pixel(self.ref_m1, rbx.wrapping_add(1)) << 6)
@@ -373,7 +372,7 @@ impl<'a> RefinementContextGatherer<'a> {
     #[inline(always)]
     fn gather_template1(&mut self, _region: &Bitmap, _reference: &Bitmap, x: u32) -> u16 {
         let bx = x - self.reg_cur_x;
-        let ref_x = (x as i32 - self.reference_dx) as u32;
+        let ref_x = (i64::from(x) - self.reference_dx) as u32;
         let rbx = ref_x.wrapping_sub(self.ref_cur_x);
 
         let new_pixels = (ContextGatherer::get_buf_pixel(self.reg_m1, bx + 1) << 7)
@@ -514,3 +513,7 @@ pub(crate) fn decode_bitmap(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "generic_refinement_tests.rs"]
+mod tests;

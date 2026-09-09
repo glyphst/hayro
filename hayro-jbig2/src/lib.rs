@@ -75,6 +75,10 @@ mod refinement_tests;
 mod segment;
 mod simd;
 mod symbol_id_decoder;
+#[cfg(test)]
+mod symbol_refinement_samples;
+#[cfg(test)]
+mod symbol_refinement_tests;
 
 use error::bail;
 pub use error::{

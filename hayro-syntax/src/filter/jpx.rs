@@ -1,6 +1,8 @@
 use crate::bit_reader::BitWriter;
 use crate::filter::FilterResult;
-use crate::object::stream::{ImageColorSpace, ImageData, ImageDecodeParams};
+use crate::object::stream::{
+    EmbeddedImageAlphaMode, ImageColorSpace, ImageData, ImageDecodeParams, JpxComponent, JpxSamples,
+};
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use hayro_jpeg2000::{ColorSpace, ComponentData, DecodeSettings};
@@ -63,13 +65,22 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
         _ => None,
     };
     let has_alpha = image.has_alpha();
+    if params.jpx_alpha_mode.is_some() && !has_alpha {
+        return None;
+    }
     let mut decoder_context = hayro_jpeg2000::DecoderContext::default();
-    let decoded = if params.num_components.is_some() {
+    let mut decoded = image.decode_unconverted(&mut decoder_context).ok()?;
+    let premultiplication_removed = params.num_components.is_none()
+        && params.jpx_alpha_mode == Some(EmbeddedImageAlphaMode::Premultiplied);
+    if premultiplication_removed {
+        // T.800 I-3 multiplies channel samples, before sYCC/Lab offsets and
+        // container colour transforms. PDF's mode controls the association.
+        decoded.unpremultiply_alpha().ok()?;
+    }
+    if params.num_components.is_none() {
         // An explicit PDF ColorSpace overrides the JP2 colr box (7.4.9).
-        image.decode_unconverted(&mut decoder_context).ok()?
-    } else {
-        image.decode(&mut decoder_context).ok()?
-    };
+        decoded.convert_color_space().ok()?;
+    }
     let components = decoded.components();
     let color_count = usize::from(params.num_components.unwrap_or(cs.num_components()));
     if components.len() != color_count + usize::from(has_alpha) {
@@ -82,7 +93,26 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
         // different representation; never silently normalize them through u8.
         return None;
     }
-    let data = pack_components(color, width, height, bpc)?;
+    let native = params.jpx_alpha_mode.is_some();
+    if native
+        && components
+            .iter()
+            .any(|component| !(1..=16).contains(&component.bit_depth()))
+    {
+        return None;
+    }
+    let count = (width as usize).checked_mul(height as usize)?;
+    if components.iter().any(|component| {
+        component.samples().len() != count
+            || component.samples().iter().any(|sample| !sample.is_finite())
+    }) {
+        return None;
+    }
+    let data = if native {
+        Vec::new()
+    } else {
+        pack_components(color, width, height, bpc)?
+    };
     let alpha = if has_alpha {
         let component = components.last()?;
         let maximum = sample_maximum(component.bit_depth())?;
@@ -106,9 +136,21 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
         None
     };
 
+    let jpx_samples = native.then(|| JpxSamples {
+        components: decoded
+            .into_components()
+            .into_iter()
+            .map(|component| JpxComponent {
+                bits_per_component: component.bit_depth(),
+                samples: component.into_samples(),
+            })
+            .collect(),
+        premultiplication_removed,
+    });
     Some(FilterResult {
         data: Cow::Owned(data),
         image_data: Some(ImageData {
+            jpx_samples,
             icc_profile,
             alpha,
             color_space: Some(cs),
@@ -166,9 +208,50 @@ fn pack_components(
 mod fixtures;
 
 #[cfg(test)]
+#[allow(dead_code)]
+#[path = "jpx_opacity_fixtures.rs"]
+mod opacity_fixtures;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::bit_reader::BitReader;
+
+    #[test]
+    fn native_opacity_components_are_owned_and_container_offsets_follow_recovery() {
+        for (data, expected) in [
+            (opacity_fixtures::SYCC8, [63.049, 64.27914, 62.864]),
+            // Default JP2 CIELab ranges (100,170,200), offsets (0,128,96).
+            (
+                opacity_fixtures::LAB_CONTAINER,
+                [127.5, 127.66667, 152.70589],
+            ),
+        ] {
+            let decoded = decode(
+                data,
+                &ImageDecodeParams {
+                    jpx_alpha_mode: Some(EmbeddedImageAlphaMode::Premultiplied),
+                    width: 1,
+                    height: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(decoded.data.is_empty());
+            let metadata = decoded.image_data.unwrap();
+            assert_eq!(metadata.alpha.unwrap(), [128]);
+            let native = metadata.jpx_samples.unwrap();
+            assert!(native.premultiplication_removed);
+            for (component, expected) in native.components.iter().zip(expected) {
+                assert!(
+                    (component.samples[0] - expected).abs() < 0.001,
+                    "{} != {expected}",
+                    component.samples[0]
+                );
+            }
+            assert_eq!(native.components[3].samples, [128.0]);
+        }
+    }
 
     #[test]
     fn native_sample_depths_and_row_padding_survive_jpx_decoding() {

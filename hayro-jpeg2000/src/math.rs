@@ -551,6 +551,11 @@ impl<const N: usize> SimdBuffer<N> {
         &self.data[..self.original_len]
     }
 
+    pub(crate) fn into_vec(mut self) -> Vec<f32> {
+        self.data.truncate(self.original_len);
+        self.data
+    }
+
     /// Returns the length padded to a multiple of `N`
     fn padded_len(original_len: usize) -> usize {
         let remainder = original_len % N;

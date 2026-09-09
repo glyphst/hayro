@@ -11,6 +11,8 @@ mod segment;
 mod tag_tree;
 mod tile;
 
+use alloc::vec::Vec;
+
 use super::jp2::ImageBoxes;
 use super::jp2::colr::{ColorSpace, ColorSpecificationBox, EnumeratedColorspace};
 use crate::error::{FormatError, MarkerError, Result, bail};
@@ -44,6 +46,11 @@ impl ComponentData {
     /// The decoded samples of this component.
     pub fn samples(&self) -> &[f32] {
         self.container.truncated()
+    }
+
+    /// Take the decoded samples without copying the component allocation.
+    pub fn into_samples(self) -> Vec<f32> {
+        self.container.into_vec()
     }
 }
 

@@ -1,5 +1,8 @@
 use super::*;
+use crate::ImageData;
 use crate::cache::Cache;
+use crate::color::ToRgb;
+use crate::x_object::decode::color_output::CONVERSION_BATCH_PIXELS;
 use hayro_syntax::Pdf;
 use hayro_syntax::object::ObjectIdentifier;
 

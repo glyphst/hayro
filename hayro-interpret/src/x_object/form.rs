@@ -1029,9 +1029,11 @@ mod tests {
                 .map(|(_, pixels)| pixels.as_slice())
                 .collect::<Vec<_>>(),
             [
-                [255, 255, 255, 0, 255, 0].as_slice(),
+                // T.800 channel recovery ignores a parent-image Matte key.
+                // Unrecoverable zero-alpha pixels use zero source samples.
+                [255, 255, 255, 0, 0, 0].as_slice(),
                 [255, 0, 0, 0, 0, 200].as_slice(),
-                [255, 255, 255, 0, 0, 255].as_slice(),
+                [255, 255, 255, 0, 0, 0].as_slice(),
                 [255, 0, 0, 0, 255, 0].as_slice(),
             ]
         );

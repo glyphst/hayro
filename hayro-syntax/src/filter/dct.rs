@@ -86,6 +86,7 @@ pub(crate) fn decode(
     let height = height as u32;
 
     let image_data = ImageData {
+        jpx_samples: None,
         icc_profile: None,
         alpha: None,
         color_space: Some(match components {

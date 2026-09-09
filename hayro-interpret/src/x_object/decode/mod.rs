@@ -1,3 +1,5 @@
+mod color_output;
+mod embedded;
 mod float;
 mod image;
 #[cfg(test)]
@@ -50,6 +52,9 @@ fn decode_context<'a>(
     let is_indexed = obj.color_space.as_ref().is_some_and(|cs| cs.is_indexed());
 
     let decode_params = ImageDecodeParams {
+        jpx_alpha_mode: hayro_syntax::object::stream::embedded_image_alpha_mode(dict)
+            .map_err(|_| (obj.warning_sink)(InterpreterWarning::ImageDecodeFailure))
+            .ok()?,
         is_indexed,
         bpc: dict_bpc,
         num_components: color_space.as_ref().map(|c| c.num_components()),

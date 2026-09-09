@@ -1,9 +1,9 @@
 use super::mask::decode_mask;
 use super::{DecodeContext, decode_context, decode_u8_samples, fix_image_length, unpack_samples};
-use crate::color::{ColorComponents, ColorSpaceKind, ToLuma, ToRgb};
+use crate::color::{ColorSpaceKind, ToLuma, ToRgb};
 use crate::interpret::state::ActiveTransferFunction;
 use crate::x_object::image::ImageXObject;
-use crate::{CmykData, EmbeddedImageAlphaMode, ImageData, LumaData, RgbData};
+use crate::{CmykData, ImageData, LumaData, RgbData};
 use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
 use smallvec::SmallVec;
@@ -55,6 +55,9 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
     }
 
     fn decode(mut self) -> Option<DecodedImage> {
+        if self.obj.embedded_alpha_mode().is_some() {
+            return super::embedded::decode(self.obj, &mut self.ctx);
+        }
         if self.has_soft_mask_matte() {
             return super::matte::decode(self.obj, &self.ctx, self.target_dimension);
         }
@@ -141,6 +144,9 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
     }
 
     fn decode_components(&mut self) -> Option<Vec<u8>> {
+        if self.obj.embedded_alpha_mode().is_some() {
+            return super::embedded::components(self.obj, &self.ctx);
+        }
         let num_components = self.ctx.color_space.num_components() as usize;
 
         // To prevent a panic when calling the `chunks` method.
@@ -177,7 +183,7 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
             None
         };
 
-        let mut components = if let Some(invert) = direct_invert {
+        let components = if let Some(invert) = direct_invert {
             // This is actually the most common case, where the PDF is embedded
             // in such a way where we don't need to decode. In this case,
             // we can use the raw decoded component values directly.
@@ -221,28 +227,7 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
             components
         };
 
-        if self.obj.embedded_alpha_mode() == Some(EmbeddedImageAlphaMode::Premultiplied) {
-            self.undo_embedded_preblend(&mut components, num_components)?;
-        }
-
         Some(components)
-    }
-
-    fn undo_embedded_preblend(&self, components: &mut [u8], num_components: usize) -> Option<()> {
-        let alpha = self.ctx.decoded.image_data.as_ref()?.alpha.as_deref()?;
-        let dict = self.obj.stream.dict();
-        let matte = if dict.contains_key(MATTE) {
-            let values = dict.get::<ColorComponents>(MATTE)?;
-            if values.len() != num_components || values.iter().any(|value| !value.is_finite()) {
-                return None;
-            }
-            self.ctx.color_space.encode_values(&values)
-        } else {
-            let zero_matte = SmallVec::<[f32; 4]>::from_elem(0.0, num_components);
-            self.ctx.color_space.encode_values(&zero_matte)
-        };
-
-        unpremultiply_components(components, alpha, &matte)
     }
 
     fn convert_to_rgb(&self, mut decoded: Vec<u8>) -> Option<RgbData> {
@@ -354,65 +339,5 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
             interpolate: self.obj.interpolate,
             scale_factors: self.ctx.scale_factors,
         })
-    }
-}
-
-fn unpremultiply_components(components: &mut [u8], alpha: &[u8], matte: &[u8]) -> Option<()> {
-    if matte.is_empty() || !components.len().is_multiple_of(matte.len()) {
-        return None;
-    }
-    if components.len() / matte.len() != alpha.len() {
-        return None;
-    }
-
-    for (pixel, &a) in components.chunks_exact_mut(matte.len()).zip(alpha) {
-        if a == 0 {
-            // The original color is mathematically unrecoverable and has no
-            // contribution at zero opacity. Preserve the encoded matte sample.
-            continue;
-        }
-        let inverse_alpha = 255.0 / f32::from(a);
-        for (component, &matte_component) in pixel.iter_mut().zip(matte) {
-            let matte_component = f32::from(matte_component);
-            let value = matte_component + (f32::from(*component) - matte_component) * inverse_alpha;
-            *component = value.round_ties_even().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    Some(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::unpremultiply_components;
-
-    #[test]
-    fn embedded_preblend_is_reversed_per_source_component() {
-        let mut rgb = vec![64, 0, 0, 255, 128, 0];
-        assert_eq!(
-            unpremultiply_components(&mut rgb, &[64, 128], &[0, 0, 0]),
-            Some(())
-        );
-        assert_eq!(rgb, [255, 0, 0, 255, 255, 0]);
-
-        let mut cmyk = vec![128, 64, 32, 191];
-        assert_eq!(
-            unpremultiply_components(&mut cmyk, &[128], &[0, 0, 0, 255]),
-            Some(())
-        );
-        assert_eq!(cmyk, [255, 128, 64, 128]);
-    }
-
-    #[test]
-    fn embedded_preblend_preserves_zero_alpha_and_rejects_mismatched_planes() {
-        let mut color = vec![10, 20, 30];
-        assert_eq!(
-            unpremultiply_components(&mut color, &[0], &[10, 20, 30]),
-            Some(())
-        );
-        assert_eq!(color, [10, 20, 30]);
-
-        assert_eq!(unpremultiply_components(&mut color, &[], &[0, 0, 0]), None);
-        assert_eq!(unpremultiply_components(&mut color, &[255], &[]), None);
     }
 }

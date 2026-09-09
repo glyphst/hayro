@@ -232,14 +232,7 @@ impl std::fmt::Display for FloatImageError {
 
 impl std::error::Error for FloatImageError {}
 
-/// The association between JPEG 2000 color samples and an embedded opacity channel.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum EmbeddedImageAlphaMode {
-    /// Color samples are independent of the opacity samples (`/SMaskInData 1`).
-    Unassociated,
-    /// Color samples are preblended with a matte (`/SMaskInData 2`).
-    Premultiplied,
-}
+pub use hayro_syntax::object::stream::EmbeddedImageAlphaMode;
 
 /// Typed source/effective color-space properties for a raster image.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

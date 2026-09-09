@@ -97,6 +97,7 @@ pub(crate) fn decode(
     Some(FilterResult {
         data: Cow::Owned(decoded),
         image_data: Some(ImageData {
+            jpx_samples: None,
             icc_profile: None,
             alpha: None,
             color_space: Some(ImageColorSpace::Gray),

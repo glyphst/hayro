@@ -7,7 +7,7 @@ use crate::object::Dict;
 use crate::object::Name;
 use crate::object::dict::keys::{
     BITS_PER_COMPONENT, BPC, DECODE_PARMS, DP, F, FILTER, FLATE_DECODE, FLATE_DECODE_ABBREVIATION,
-    LENGTH, TYPE,
+    JPX_DECODE, LENGTH, SMASK_IN_DATA, TYPE,
 };
 use crate::object::{Array, ObjectIdentifier};
 use crate::object::{Object, ObjectLike, ObjectRefLike};
@@ -41,6 +41,9 @@ impl PartialEq for Stream<'_> {
 /// Additional parameters for decoding images.
 #[derive(Clone, PartialEq, Default)]
 pub struct ImageDecodeParams {
+    /// Retain native JPX component allocations for this active opacity mode.
+    /// The result uses `ImageData::jpx_samples` instead of packed `FilterResult::data`.
+    pub jpx_alpha_mode: Option<EmbeddedImageAlphaMode>,
     /// Whether the color space of the image is an indexed color space.
     pub is_indexed: bool,
     /// The bits per component of the image, if that information is available.
@@ -55,6 +58,41 @@ pub struct ImageDecodeParams {
     pub width: u32,
     /// The height of the image as indicated by the image dictionary.
     pub height: u32,
+}
+
+/// The association of JPEG 2000 colour samples with whole-image opacity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum EmbeddedImageAlphaMode {
+    /// Colour samples are independent of opacity (`SMaskInData 1`).
+    Unassociated,
+    /// Channel samples are multiplied by opacity (`SMaskInData 2`).
+    Premultiplied,
+}
+
+/// Read the optional integer `SMaskInData` entry for a JPX image.
+/// Other filters ignore this entry; null and undefined values select zero.
+pub fn embedded_image_alpha_mode(
+    dict: &Dict<'_>,
+) -> Result<Option<EmbeddedImageAlphaMode>, DecodeFailure> {
+    let key = if dict.contains_key(F) { F } else { FILTER };
+    let jpx = match dict.get::<Object<'_>>(key) {
+        Some(Object::Name(name)) => name.as_ref() == JPX_DECODE,
+        Some(Object::Array(array)) => array.iter::<Name<'_>>().any(|n| n.as_ref() == JPX_DECODE),
+        _ => false,
+    };
+    if !jpx {
+        return Ok(None);
+    }
+    match dict.get::<Object<'_>>(SMASK_IN_DATA) {
+        None | Some(Object::Null(_)) => Ok(None),
+        Some(Object::Number(number)) => match number.as_i64_exact() {
+            Some(0) => Ok(None),
+            Some(1) => Ok(Some(EmbeddedImageAlphaMode::Unassociated)),
+            Some(2) => Ok(Some(EmbeddedImageAlphaMode::Premultiplied)),
+            _ => Err(DecodeFailure::StreamDecode),
+        },
+        _ => Err(DecodeFailure::StreamDecode),
+    }
 }
 
 impl<'a> Stream<'a> {
@@ -249,6 +287,7 @@ impl<'a> Stream<'a> {
         image_params: &ImageDecodeParams,
     ) -> Result<FilterResult<'a>, DecodeFailure> {
         let filters_and_params = self.filters_and_params()?;
+        embedded_image_alpha_mode(&self.dict)?;
         let data = self.raw_data();
 
         let mut current: Option<FilterResult<'a>> = None;
@@ -258,6 +297,15 @@ impl<'a> Stream<'a> {
             .iter()
             .zip(filters_and_params.params.iter())
         {
+            if current.as_ref().is_some_and(|result| {
+                result
+                    .image_data
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.jpx_samples.is_some())
+            }) {
+                // Native component output cannot be input to another byte filter.
+                return Err(DecodeFailure::StreamDecode);
+            }
             // DCT always delivers eight-bit samples. Inspect the original
             // Number so a real dictionary value cannot be truncated to eight.
             if *filter == Filter::DctDecode {
@@ -393,6 +441,8 @@ pub enum ImageColorSpace {
 
 /// Additional data that is extracted from some image streams.
 pub struct ImageData {
+    /// Native JPEG 2000 channels, when requested instead of packed byte output.
+    pub jpx_samples: Option<JpxSamples>,
     /// An optional normalized eight-bit alpha channel of the image.
     ///
     /// Unlike `FilterResult::data`, these samples remain unpacked even when
@@ -409,6 +459,22 @@ pub struct ImageData {
     pub width: u32,
     /// The height of the image.
     pub height: u32,
+}
+
+/// Native decoder samples retained until source colour conversion.
+pub struct JpxSamples {
+    /// Colour channels followed by whole-image opacity, in sample units.
+    pub components: Vec<JpxComponent>,
+    /// Whether channel multiplication was already undone before JP2 conversion.
+    pub premultiplication_removed: bool,
+}
+
+/// One native JPEG 2000 channel, with its original sample precision.
+pub struct JpxComponent {
+    /// The unsigned sample depth.
+    pub bits_per_component: u8,
+    /// Unpacked samples in the decoder's binary32 representation.
+    pub samples: Vec<f32>,
 }
 
 /// The result of applying a filter.

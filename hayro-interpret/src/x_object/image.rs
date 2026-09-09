@@ -333,15 +333,9 @@ fn mask_color_space_properties() -> ImageColorSpaceProperties {
 }
 
 fn embedded_alpha_mode(dict: &Dict<'_>) -> Option<EmbeddedImageAlphaMode> {
-    if !uses_jpx_decode(dict) {
-        return None;
-    }
-
-    match dict.get::<u8>(SMASK_IN_DATA) {
-        Some(1) => Some(EmbeddedImageAlphaMode::Unassociated),
-        Some(2) => Some(EmbeddedImageAlphaMode::Premultiplied),
-        _ => None,
-    }
+    hayro_syntax::object::stream::embedded_image_alpha_mode(dict)
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn uses_jpx_decode(dict: &Dict<'_>) -> bool {

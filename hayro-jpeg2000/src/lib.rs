@@ -201,15 +201,7 @@ impl<'a> Image<'a> {
         decoder_context: &'b mut DecoderContext<'a>,
     ) -> Result<DecodedImage<'b>> {
         let mut decoded_image = self.decode_unconverted(decoder_context)?;
-        let bit_depth = decoded_image
-            .decoded_components
-            .first()
-            .ok_or(ValidationError::InvalidComponentMetadata)?
-            .bit_depth;
-        if !(1..=31).contains(&bit_depth) {
-            bail!(ValidationError::InvalidComponentMetadata);
-        }
-        convert_color_space(&mut decoded_image, bit_depth)?;
+        decoded_image.convert_color_space()?;
 
         Ok(decoded_image)
     }
@@ -408,6 +400,62 @@ pub struct Bitmap {
 }
 
 impl DecodedImage<'_> {
+    /// Take the component allocations out of the decoder context without copying.
+    pub fn into_components(self) -> Vec<ComponentData> {
+        core::mem::take(self.decoded_components)
+    }
+
+    /// Undo channel multiplication before container colour conversion.
+    ///
+    /// The caller must establish that the last channel is whole-image opacity.
+    /// Implements T.800 (2002) I.5.3.6, equation I-3, in the decoder's binary32
+    /// sample representation. Zero-opacity colour is deterministically zero.
+    pub fn unpremultiply_alpha(&mut self) -> Result<()> {
+        let (alpha, color) = self
+            .decoded_components
+            .split_last_mut()
+            .ok_or(ValidationError::InvalidComponentMetadata)?;
+        if color.is_empty() || !(1..=31).contains(&alpha.bit_depth) {
+            bail!(ValidationError::InvalidComponentMetadata);
+        }
+        let alpha_max = f64::from((1_u32 << alpha.bit_depth) - 1);
+        for component in color {
+            if !(1..=31).contains(&component.bit_depth)
+                || component.samples().len() != alpha.samples().len()
+            {
+                bail!(ValidationError::InvalidComponentMetadata);
+            }
+            let maximum = f64::from((1_u32 << component.bit_depth) - 1);
+            for (sample, &opacity) in component.container.iter_mut().zip(alpha.samples()) {
+                if !sample.is_finite() || !opacity.is_finite() {
+                    bail!(ValidationError::InvalidComponentMetadata);
+                }
+                let opacity = f64::from(opacity).clamp(0.0, alpha_max);
+                *sample = if opacity == 0.0 {
+                    0.0
+                } else {
+                    (f64::from(*sample).clamp(0.0, maximum) * alpha_max / opacity)
+                        .clamp(0.0, maximum) as f32
+                };
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply the container colour conversion to the current native components.
+    /// Call this once, after any required opacity recovery.
+    pub fn convert_color_space(&mut self) -> Result<()> {
+        let bit_depth = self
+            .decoded_components
+            .first()
+            .ok_or(ValidationError::InvalidComponentMetadata)?
+            .bit_depth;
+        if !(1..=31).contains(&bit_depth) {
+            bail!(ValidationError::InvalidComponentMetadata);
+        }
+        convert_color_space(self, bit_depth)
+    }
+
     /// The decoded components of the image.
     pub fn components(&self) -> &[ComponentData] {
         self.decoded_components

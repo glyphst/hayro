@@ -10,7 +10,9 @@ use crate::ScratchBuffers;
 use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use crate::bitmap::{Bitmap, WORD_BITS, WORD_SHIFT, Word};
 use crate::decode::generic::ContextGatherer;
-use crate::error::{OverflowError, ParseError, RegionError, Result, bail};
+use crate::error::{
+    DecodeError, FormatError, ParseError, RegionError, Result, TemplateError, bail,
+};
 use crate::reader::Reader;
 
 /// Generic refinement region decoding procedure (6.3).
@@ -44,29 +46,13 @@ pub(crate) fn decode_into(
 ) -> Result<()> {
     let data = header.data;
 
-    // Validate that the region fits within the reference bitmap.
-    // When referring to another segment, dimensions must match exactly (7.4.7.5).
-    // When using the page bitmap as reference, the region must fit within the page.
-    if header.region_info.width > reference.width || header.region_info.height > reference.height {
+    // The caller supplies either the matching auxiliary region or a cropped
+    // page reference (§7.4.7.4). Both are local bitmaps with zero GRREFERENCE
+    // offsets, even when their page placement is nonzero (Table 35).
+    if header.region_info.width != reference.width || header.region_info.height != reference.height
+    {
         bail!(RegionError::InvalidDimension);
     }
-
-    let reference_dx = i32::try_from(reference.x_location)
-        .ok()
-        .and_then(|r: i32| {
-            i32::try_from(header.region_info.x_location)
-                .ok()
-                .and_then(|h| r.checked_sub(h))
-        })
-        .ok_or(OverflowError::ReferenceOffset)?;
-    let reference_dy = i32::try_from(reference.y_location)
-        .ok()
-        .and_then(|r: i32| {
-            i32::try_from(header.region_info.y_location)
-                .ok()
-                .and_then(|h| r.checked_sub(h))
-        })
-        .ok_or(OverflowError::ReferenceOffset)?;
 
     let mut decoder = ArithmeticDecoder::new(data);
     let num_context_bits = header.template.context_bits();
@@ -79,8 +65,8 @@ pub(crate) fn decode_into(
         &mut ctx.contexts,
         region,
         reference,
-        reference_dx,
-        reference_dy,
+        0,
+        0,
         header.template,
         &header.adaptive_template_pixels,
         header.tpgron,
@@ -102,11 +88,23 @@ pub(crate) struct GenericRefinementRegionHeader<'a> {
 /// Parse a generic refinement region segment header (7.4.7.1).
 pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<GenericRefinementRegionHeader<'a>> {
     let region_info = parse_region_segment_info(reader)?;
+    if region_info._colour_extension {
+        bail!(DecodeError::Unsupported);
+    }
     let flags = reader.read_byte().ok_or(ParseError::UnexpectedEof)?;
+    if flags & !3 != 0 {
+        bail!(FormatError::ReservedBits);
+    }
     let template = RefinementTemplate::from_byte(flags);
     let tpgron = flags & 0x02 != 0;
     let adaptive_template_pixels = if template == RefinementTemplate::Template0 {
-        parse_refinement_at_pixels(reader)?
+        let pixels = parse_refinement_at_pixels(reader)?;
+        // The first AT pixel belongs to the partially decoded target; the
+        // second belongs to the reference and may lie anywhere in its field.
+        if pixels[0].y > 0 || (pixels[0].y == 0 && pixels[0].x >= 0) {
+            bail!(TemplateError::InvalidAtPixel);
+        }
+        pixels
     } else {
         Vec::new()
     };

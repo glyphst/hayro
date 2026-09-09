@@ -68,6 +68,10 @@ mod pdf;
 #[cfg(test)]
 mod pdf_tests;
 mod reader;
+#[cfg(test)]
+mod refinement_test_samples;
+#[cfg(test)]
+mod refinement_tests;
 mod segment;
 mod simd;
 mod symbol_id_decoder;
@@ -80,7 +84,6 @@ pub use error::{
 
 use crate::file::parse_segments_sequential;
 use bitmap::Bitmap;
-use decode::CombinationOperator;
 use decode::generic;
 use decode::generic_refinement;
 use decode::halftone;
@@ -89,6 +92,7 @@ use decode::pattern::PatternDictionary;
 use decode::symbol;
 use decode::symbol::SymbolDictionary;
 use decode::text;
+use decode::{CombinationOperator, RegionBitmap};
 use file::parse_file;
 use huffman_table::{HuffmanTable, StandardHuffmanTables};
 use page_info::{PageInformation, parse_page_information};
@@ -310,12 +314,7 @@ fn decode_segments(
                     generic::decode_into(&header, page_bitmap, scratch_buffers)?;
                 } else {
                     let region = generic::decode(&header, scratch_buffers)?;
-                    page_bitmap.combine(
-                        &region.bitmap,
-                        region.bitmap.x_location as i32,
-                        region.bitmap.y_location as i32,
-                        region.combination_operator,
-                    );
+                    page_bitmap.combine_region(&region.bitmap, region.combination_operator);
                 }
                 page_state.page_pristine = false;
             }
@@ -323,7 +322,7 @@ fn decode_segments(
                 // Intermediate segments cannot have unknown length.
                 let header = generic::parse(&mut reader, false)?;
                 let region = generic::decode(&header, scratch_buffers)?;
-                page_state.store_region(seg.header.segment_number, region.bitmap);
+                page_state.store_region(seg.header.segment_number, region);
             }
             SegmentType::PatternDictionary => {
                 let header = pattern::parse(&mut reader)?;
@@ -413,12 +412,7 @@ fn decode_segments(
                         &page_state.standard_tables,
                         scratch_buffers,
                     )?;
-                    page_bitmap.combine(
-                        &region.bitmap,
-                        region.bitmap.x_location as i32,
-                        region.bitmap.y_location as i32,
-                        region.combination_operator,
-                    );
+                    page_bitmap.combine_region(&region.bitmap, region.combination_operator);
                 }
                 page_state.page_pristine = false;
             }
@@ -449,7 +443,7 @@ fn decode_segments(
                     &page_state.standard_tables,
                     scratch_buffers,
                 )?;
-                page_state.store_region(seg.header.segment_number, region.bitmap);
+                page_state.store_region(seg.header.segment_number, region);
             }
             SegmentType::ImmediateHalftoneRegion | SegmentType::ImmediateLosslessHalftoneRegion => {
                 let pattern_dict = seg
@@ -469,12 +463,7 @@ fn decode_segments(
                     halftone::decode_into(&header, pattern_dict, page_bitmap, scratch_buffers)?;
                 } else {
                     let region = halftone::decode(&header, pattern_dict, scratch_buffers)?;
-                    page_bitmap.combine(
-                        &region.bitmap,
-                        region.bitmap.x_location as i32,
-                        region.bitmap.y_location as i32,
-                        region.combination_operator,
-                    );
+                    page_bitmap.combine_region(&region.bitmap, region.combination_operator);
                 }
                 page_state.page_pristine = false;
             }
@@ -488,56 +477,60 @@ fn decode_segments(
 
                 let header = halftone::parse(&mut reader)?;
                 let region = halftone::decode(&header, pattern_dict, scratch_buffers)?;
-                page_state.store_region(seg.header.segment_number, region.bitmap);
+                page_state.store_region(seg.header.segment_number, region);
             }
-            SegmentType::IntermediateGenericRefinementRegion => {
-                // Same logic as immediate refinement, but store result instead of combining.
-                let reference = seg
-                    .header
-                    .referred_to_segments
-                    .first()
-                    .and_then(|&num| page_state.get_referred_segment(num))
-                    .unwrap_or(page_bitmap);
-
-                let header = generic_refinement::parse(&mut reader)?;
-                let region = generic_refinement::decode(&header, reference, scratch_buffers)?;
-                page_state.store_region(seg.header.segment_number, region.bitmap);
-            }
-            SegmentType::ImmediateGenericRefinementRegion
+            SegmentType::IntermediateGenericRefinementRegion
+            | SegmentType::ImmediateGenericRefinementRegion
             | SegmentType::ImmediateLosslessGenericRefinementRegion => {
-                // "3) Determine the buffer associated with the region segment that
-                // this segment refers to." (7.4.7.5)
-                //
-                // "2) If there are no referred-to segments, then use the page
-                // bitmap as the reference buffer." (7.4.7.5)
-                let referred_segment = seg
-                    .header
-                    .referred_to_segments
-                    .first()
-                    .and_then(|&num| page_state.get_referred_segment(num));
-
                 let header = generic_refinement::parse(&mut reader)?;
-
-                if let Some(referred_segment) = referred_segment
-                    && page_state.can_decode_directly(page_bitmap, &header.region_info, false)
-                {
+                let info = &header.region_info;
+                let intermediate =
+                    seg.header.segment_type == SegmentType::IntermediateGenericRefinementRegion;
+                let reference = match seg.header.referred_to_segments.as_slice() {
+                    [] if !intermediate
+                        && info.combination_operator == CombinationOperator::Replace =>
+                    {
+                        page_bitmap.crop(
+                            info.x_location,
+                            info.y_location,
+                            info.width,
+                            info.height,
+                        )?
+                    }
+                    [number] => {
+                        let reference = page_state
+                            .take_region(*number)
+                            .ok_or(SegmentError::InvalidReference)?;
+                        if reference.bitmap.width != info.width
+                            || reference.bitmap.height != info.height
+                            || reference.bitmap.x_location != info.x_location
+                            || reference.bitmap.y_location != info.y_location
+                            || reference.combination_operator != info.combination_operator
+                        {
+                            bail!(SegmentError::InvalidReference);
+                        }
+                        reference.bitmap
+                    }
+                    _ => bail!(SegmentError::InvalidReference),
+                };
+                if !intermediate && page_state.can_decode_directly(page_bitmap, info, false) {
                     generic_refinement::decode_into(
                         &header,
-                        referred_segment,
+                        &reference,
                         page_bitmap,
                         scratch_buffers,
                     )?;
                 } else {
-                    let reference = referred_segment.unwrap_or(page_bitmap);
-                    let region = generic_refinement::decode(&header, reference, scratch_buffers)?;
-                    page_bitmap.combine(
-                        &region.bitmap,
-                        region.bitmap.x_location as i32,
-                        region.bitmap.y_location as i32,
-                        region.combination_operator,
-                    );
+                    let region = generic_refinement::decode(&header, &reference, scratch_buffers)?;
+                    if intermediate {
+                        page_state.store_region(seg.header.segment_number, region);
+                    } else {
+                        page_bitmap.combine_region(&region.bitmap, region.combination_operator);
+                    }
                 }
-                page_state.page_pristine = false;
+                if !intermediate {
+                    page_state.page_pristine = false;
+                }
             }
             SegmentType::Tables => {
                 // "Tables – see 7.4.13." (type 53)
@@ -565,7 +558,7 @@ pub(crate) struct PageState {
     /// Whether the page bitmap is still in its initial state (not yet painted to).
     pub(crate) page_pristine: bool,
     /// Decoded intermediate regions, stored as (`segment_number`, region) pairs.
-    pub(crate) referred_segments: Vec<(u32, Bitmap)>,
+    pub(crate) referred_segments: Vec<(u32, Option<RegionBitmap>)>,
     /// Decoded pattern dictionaries, stored as (`segment_number`, dictionary) pairs.
     pub(crate) pattern_dictionaries: Vec<(u32, PatternDictionary)>,
     /// Decoded symbol dictionaries, stored as (`segment_number`, dictionary) pairs.
@@ -623,16 +616,19 @@ impl PageState {
     }
 
     /// Store a decoded region for later reference.
-    fn store_region(&mut self, segment_number: u32, region: Bitmap) {
-        self.referred_segments.push((segment_number, region));
+    fn store_region(&mut self, segment_number: u32, region: RegionBitmap) {
+        self.referred_segments.push((segment_number, Some(region)));
     }
 
-    /// Look up a referred segment by number.
-    fn get_referred_segment(&self, segment_number: u32) -> Option<&Bitmap> {
-        self.referred_segments
+    /// Move an auxiliary buffer to its sole refinement consumer (§8.2).
+    /// Keep the sorted number slot so lookup remains logarithmic and consumed
+    /// buffers cannot silently be reused or substituted with the page bitmap.
+    fn take_region(&mut self, segment_number: u32) -> Option<RegionBitmap> {
+        let index = self
+            .referred_segments
             .binary_search_by_key(&segment_number, |(num, _)| *num)
-            .ok()
-            .map(|idx| &self.referred_segments[idx].1)
+            .ok()?;
+        self.referred_segments[index].1.take()
     }
 
     /// Store a decoded pattern dictionary for later reference.

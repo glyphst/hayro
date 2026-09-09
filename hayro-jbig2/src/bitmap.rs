@@ -127,6 +127,31 @@ impl Bitmap {
         self.data[word_idx] |= (value as Word) << bit_pos;
     }
 
+    /// Copy a page rectangle into a local reference bitmap. Samples outside
+    /// the page, and outside this rectangle during refinement, are zero.
+    pub(crate) fn crop(&self, x: u32, y: u32, width: u32, height: u32) -> Result<Self> {
+        let mut cropped = Self::new_with(width, height, x, y, false)?;
+        if x < self.width && y < self.height {
+            // Bitmap dimensions are bounded by MAX_DIMENSION (u16::MAX), so
+            // intersecting origins and their negations fit i32.
+            cropped.combine(self, -(x as i32), -(y as i32), CombinationOperator::Replace);
+        }
+        Ok(cropped)
+    }
+
+    /// Composite a region whose page coordinates are unsigned. Coordinates
+    /// beyond the bounded page cannot wrap into a negative signed placement.
+    pub(crate) fn combine_region(&mut self, region: &Self, operator: CombinationOperator) {
+        if region.x_location < self.width && region.y_location < self.height {
+            self.combine(
+                region,
+                region.x_location as i32,
+                region.y_location as i32,
+                operator,
+            );
+        }
+    }
+
     /// Combine another bitmap into this one at a specific location.
     ///
     /// "These operators describe how the segment's bitmap is to be combined with

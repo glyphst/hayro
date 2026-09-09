@@ -84,7 +84,14 @@ impl<'a> ImageXObject<'a> {
 
         // Reject before handing the image to devices, including those that may
         // already hold decoded pixels in their own caches.
-        if stream.is_inline_image() && uses_jpx_decode(dict) {
+        if stream.is_inline_image()
+            && stream.filters().iter().any(|filter| {
+                matches!(
+                    filter,
+                    hayro_syntax::Filter::JpxDecode | hayro_syntax::Filter::Jbig2Decode
+                )
+            })
+        {
             (warning_sink)(crate::InterpreterWarning::ImageDecodeFailure);
             return None;
         }

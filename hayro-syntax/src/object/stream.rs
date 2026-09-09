@@ -299,6 +299,7 @@ impl<'a> Stream<'a> {
     ///
     /// `JPXDecode` requires an image `XObject`. Inline-image provenance is retained
     /// by the content parser, independently of any entries in its dictionary.
+    /// `JBIG2Decode` is also prohibited in inline images (PDF 1.7 §7.4.7).
     pub fn decoded_image(
         &self,
         image_params: &ImageDecodeParams,
@@ -312,6 +313,9 @@ impl<'a> Stream<'a> {
         image: bool,
     ) -> Result<FilterResult<'a>, DecodeFailure> {
         let filters_and_params = self.filters_and_params()?;
+        if self.is_inline_image() && filters_and_params.filters.contains(&Filter::Jbig2Decode) {
+            return Err(DecodeFailure::InvalidFilterPlacement);
+        }
         if filters_and_params.filters.contains(&Filter::JpxDecode)
             && (!image
                 || self.is_inline_image()
@@ -439,7 +443,7 @@ impl<'a> Readable<'a> for Stream<'a> {
 pub enum DecodeFailure {
     /// A filter name is unknown, malformed, or cannot be resolved.
     InvalidFilter,
-    /// `JPXDecode` was used outside an image `XObject`.
+    /// `JPXDecode` was used outside an image `XObject`, or `JBIG2Decode` inline.
     InvalidFilterPlacement,
     /// An image stream failed to decode.
     ImageDecode,
@@ -607,6 +611,10 @@ impl<'a> ObjectRefLike<'a> for Stream<'a> {
 #[cfg(test)]
 #[path = "stream_jpx_tests.rs"]
 mod jpx_tests;
+
+#[cfg(test)]
+#[path = "stream_jbig2_tests.rs"]
+mod jbig2_tests;
 
 #[cfg(test)]
 mod tests {

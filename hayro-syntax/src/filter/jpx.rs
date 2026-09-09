@@ -22,12 +22,17 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
     use crate::object::stream::ImageColorSpace;
 
     let settings = DecodeSettings {
-        resolve_palette_indices: params.num_components.is_none(),
+        resolve_palette_indices: !params.is_indexed,
         strict: false,
         target_resolution: params.target_dimension,
     };
 
-    let image = hayro_jpeg2000::Image::new(data, &settings).ok()?;
+    let image = if let Some(components) = params.num_components {
+        hayro_jpeg2000::Image::new_with_color_components(data, &settings, components)
+    } else {
+        hayro_jpeg2000::Image::new(data, &settings)
+    }
+    .ok()?;
 
     let width = image.width();
     let height = image.height();
@@ -40,7 +45,7 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
         return None;
     }
     if let Some(components) = params.num_components
-        && image.component_bit_depths().len()
+        && image.decoded_component_count()
             != usize::from(components) + usize::from(image.has_alpha())
     {
         return None;
@@ -65,7 +70,7 @@ pub(crate) fn decode(data: &[u8], params: &ImageDecodeParams) -> Option<FilterRe
         _ => None,
     };
     let has_alpha = image.has_alpha();
-    if params.jpx_alpha_mode.is_some() && !has_alpha {
+    if params.jpx_alpha_mode.is_some() && !image.has_declared_alpha() {
         return None;
     }
     let mut decoder_context = hayro_jpeg2000::DecoderContext::default();
@@ -211,6 +216,10 @@ mod fixtures;
 #[allow(dead_code)]
 #[path = "jpx_opacity_fixtures.rs"]
 mod opacity_fixtures;
+
+#[cfg(test)]
+#[path = "jpx_channels_tests.rs"]
+mod channels_tests;
 
 #[cfg(test)]
 mod tests {

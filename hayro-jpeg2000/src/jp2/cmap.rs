@@ -7,6 +7,9 @@ use crate::jp2::ImageBoxes;
 use crate::reader::BitReader;
 
 pub(crate) fn parse(boxes: &mut ImageBoxes, data: &[u8]) -> Result<()> {
+    if data.is_empty() || !data.len().is_multiple_of(4) {
+        bail!(FormatError::InvalidBox);
+    }
     let mut reader = BitReader::new(data);
     let mut entries = Vec::with_capacity(data.len() / 4);
 
@@ -16,7 +19,7 @@ pub(crate) fn parse(boxes: &mut ImageBoxes, data: &[u8]) -> Result<()> {
         let palette_column = reader.read_byte().ok_or(FormatError::InvalidBox)?;
 
         let mapping_type = match mapping_type {
-            0 => ComponentMappingType::Direct,
+            0 if palette_column == 0 => ComponentMappingType::Direct,
             1 => ComponentMappingType::Palette {
                 column: palette_column,
             },
@@ -39,7 +42,7 @@ pub(crate) struct ComponentMappingBox {
     pub(crate) entries: Vec<ComponentMappingEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ComponentMappingEntry {
     pub(crate) component_index: u16,
     pub(crate) mapping_type: ComponentMappingType,

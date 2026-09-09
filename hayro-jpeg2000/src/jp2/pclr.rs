@@ -23,7 +23,7 @@ pub(crate) fn parse(boxes: &mut ImageBoxes, data: &[u8]) -> Result<()> {
             .ok_or(FormatError::InvalidBox)?;
         let is_signed = (descriptor & 0x80) != 0;
 
-        if is_signed {
+        if is_signed || bit_depth > 64 {
             bail!(FormatError::InvalidBox);
         }
 
@@ -51,6 +51,9 @@ pub(crate) fn parse(boxes: &mut ImageBoxes, data: &[u8]) -> Result<()> {
         entries.push(row);
     }
 
+    if !reader.at_end() {
+        bail!(FormatError::InvalidBox);
+    }
     boxes.palette = Some(PaletteBox { entries, columns });
 
     Ok(())

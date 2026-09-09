@@ -18,7 +18,7 @@ use super::jp2::colr::{ColorSpace, ColorSpecificationBox, EnumeratedColorspace};
 use crate::error::{FormatError, MarkerError, Result, bail};
 use crate::j2c::codestream::markers;
 use crate::reader::BitReader;
-use crate::{DecodeSettings, Image, resolve_alpha_and_color_space};
+use crate::{DecodeSettings, Image};
 
 use crate::math::{SIMD_WIDTH, SimdBuffer};
 pub(crate) use codestream::Header;
@@ -54,7 +54,11 @@ impl ComponentData {
     }
 }
 
-pub(crate) fn parse<'a>(stream: &'a [u8], settings: &DecodeSettings) -> Result<Image<'a>> {
+pub(crate) fn parse<'a>(
+    stream: &'a [u8],
+    settings: &DecodeSettings,
+    color_components: Option<u8>,
+) -> Result<Image<'a>> {
     let parsed_codestream = parse_raw(stream, settings)?;
     let header = &parsed_codestream.header;
     let mut boxes = ImageBoxes::default();
@@ -67,18 +71,24 @@ pub(crate) fn parse<'a>(stream: &'a [u8], settings: &DecodeSettings) -> Result<I
         ColorSpace::Enumerated(EnumeratedColorspace::Srgb)
     };
 
-    boxes.color_specification = Some(ColorSpecificationBox { color_space: cs });
+    if color_components.is_none() {
+        boxes.color_specification = Some(ColorSpecificationBox { color_space: cs });
+    }
 
-    let (color_space, has_alpha) =
-        resolve_alpha_and_color_space(&boxes, &parsed_codestream.header, settings)?;
+    let layout = crate::jp2::channels::resolve(
+        &boxes,
+        &parsed_codestream.header,
+        settings,
+        color_components,
+    )?;
 
     Ok(Image {
         codestream: parsed_codestream.data,
         header: parsed_codestream.header,
         boxes,
-        settings: *settings,
-        color_space,
-        has_alpha,
+        color_space: layout.color_space,
+        has_alpha: layout.has_alpha,
+        channels: layout.mappings,
     })
 }
 

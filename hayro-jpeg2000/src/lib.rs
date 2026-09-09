@@ -76,8 +76,7 @@ use alloc::vec::Vec;
 use crate::error::{bail, err};
 use crate::j2c::Header;
 use crate::jp2::ImageBoxes;
-use crate::jp2::cdef::ChannelAssociation;
-use crate::jp2::cmap::ComponentMappingType;
+use crate::jp2::cmap::{ComponentMappingEntry, ComponentMappingType};
 use crate::jp2::colr::{CieLab, EnumeratedColorspace};
 use crate::jp2::icc::ICCMetadata;
 
@@ -148,21 +147,43 @@ pub struct Image<'a> {
     /// The JP2 boxes of the image. In the case of a raw codestream, we
     /// will synthesize the necessary boxes.
     pub(crate) boxes: ImageBoxes,
-    /// Settings that should be applied during decoding.
-    pub(crate) settings: DecodeSettings,
     /// Whether the image has an alpha channel.
     pub(crate) has_alpha: bool,
     /// The color space of the image.
     pub(crate) color_space: ColorSpace,
+    /// Selected mappings in colour order, followed by whole-image opacity.
+    pub(crate) channels: Vec<ComponentMappingEntry>,
 }
 
 impl<'a> Image<'a> {
     /// Try to create a new JPEG2000 image from the given data.
     pub fn new(data: &'a [u8], settings: &DecodeSettings) -> Result<Self> {
+        Self::new_inner(data, settings, None)
+    }
+
+    /// Parse using an enclosing format's colour space with this channel count.
+    /// Container colour specifications are ignored; the caller supplies colour
+    /// conversion. Palette mapping and channel definitions still apply.
+    pub fn new_with_color_components(
+        data: &'a [u8],
+        settings: &DecodeSettings,
+        components: u8,
+    ) -> Result<Self> {
+        if components == 0 {
+            bail!(ValidationError::InvalidComponentMetadata);
+        }
+        Self::new_inner(data, settings, Some(components))
+    }
+
+    fn new_inner(
+        data: &'a [u8],
+        settings: &DecodeSettings,
+        components: Option<u8>,
+    ) -> Result<Self> {
         if data.starts_with(JP2_MAGIC) {
-            jp2::parse(data, *settings)
+            jp2::parse(data, *settings, components)
         } else if data.starts_with(CODESTREAM_MAGIC) {
-            j2c::parse(data, settings)
+            j2c::parse(data, settings, components)
         } else {
             err!(FormatError::InvalidSignature)
         }
@@ -171,6 +192,18 @@ impl<'a> Image<'a> {
     /// Whether the image has an alpha channel.
     pub fn has_alpha(&self) -> bool {
         self.has_alpha
+    }
+
+    /// Whether whole-image opacity is established by channel definitions.
+    /// A legacy extra-component heuristic is not a declaration of opacity.
+    pub fn has_declared_alpha(&self) -> bool {
+        self.has_alpha && self.boxes.channel_definition.is_some()
+    }
+
+    /// Number of decoded components after mapping and auxiliary-channel removal.
+    /// Includes the final opacity component, if present.
+    pub fn decoded_component_count(&self) -> usize {
+        self.channels.len()
     }
 
     /// The color space of the image.
@@ -215,39 +248,15 @@ impl<'a> Image<'a> {
         &'a self,
         decoder_context: &'b mut DecoderContext<'a>,
     ) -> Result<DecodedImage<'b>> {
-        let settings = &self.settings;
         j2c::decode(self.codestream, &self.header, decoder_context)?;
         let decoded_image = DecodedImage {
             decoded_components: &mut decoder_context.channel_data,
             boxes: self.boxes.clone(),
         };
 
-        // Resolve palette indices.
-        if settings.resolve_palette_indices {
-            let components = core::mem::take(decoded_image.decoded_components);
-            *decoded_image.decoded_components =
-                resolve_palette_indices(components, &decoded_image.boxes)?;
-        }
-
-        if let Some(cdef) = &decoded_image.boxes.channel_definition {
-            // Sort by the channel association. Note that this will only work if
-            // each component is referenced only once.
-            let mut components = decoded_image
-                .decoded_components
-                .iter()
-                .cloned()
-                .zip(
-                    cdef.channel_definitions
-                        .iter()
-                        .map(|c| match c.association {
-                            ChannelAssociation::WholeImage => u16::MAX,
-                            ChannelAssociation::Colour(c) => c,
-                        }),
-                )
-                .collect::<Vec<_>>();
-            components.sort_by(|c1, c2| c1.1.cmp(&c2.1));
-            *decoded_image.decoded_components = components.into_iter().map(|c| c.0).collect();
-        }
+        let components = core::mem::take(decoded_image.decoded_components);
+        *decoded_image.decoded_components =
+            resolve_channels(components, &decoded_image.boxes, &self.channels)?;
 
         Ok(decoded_image)
     }
@@ -259,81 +268,6 @@ impl<'a> Image<'a> {
             .iter()
             .map(|info| info.size_info.precision)
     }
-}
-
-pub(crate) fn resolve_alpha_and_color_space(
-    boxes: &ImageBoxes,
-    header: &Header<'_>,
-    settings: &DecodeSettings,
-) -> Result<(ColorSpace, bool)> {
-    let mut num_components = header.component_infos.len();
-
-    // Override number of components with what is actually in the palette box
-    // in case we resolve them.
-    if settings.resolve_palette_indices
-        && let Some(palette_box) = &boxes.palette
-    {
-        num_components = palette_box.columns.len();
-    }
-
-    let mut has_alpha = false;
-
-    if let Some(cdef) = &boxes.channel_definition {
-        let mut opacity_channels = cdef
-            .channel_definitions
-            .iter()
-            .filter(|definition| definition.channel_type.is_opacity());
-        if let Some(opacity) = opacity_channels.next() {
-            if opacity.association != ChannelAssociation::WholeImage
-                || opacity_channels.next().is_some()
-            {
-                bail!(ValidationError::InvalidComponentMetadata);
-            }
-            has_alpha = true;
-        }
-    }
-
-    let mut color_space = get_color_space(boxes, num_components)?;
-
-    // If we didn't resolve palette indices, we need to assume grayscale image.
-    if !settings.resolve_palette_indices && boxes.palette.is_some() {
-        has_alpha = false;
-        color_space = ColorSpace::Gray;
-    }
-
-    let actual_num_components = header.component_infos.len();
-
-    // Validate the number of channels.
-    if boxes.palette.is_none()
-        && actual_num_components
-            != (color_space.num_channels() + if has_alpha { 1 } else { 0 }) as usize
-    {
-        if !settings.strict
-            && actual_num_components == color_space.num_channels() as usize + 1
-            && !has_alpha
-        {
-            // See OPENJPEG test case orb-blue10-lin-j2k. Assume that we have an
-            // alpha channel in this case.
-            has_alpha = true;
-        } else {
-            // Color space is invalid, attempt to repair.
-            if actual_num_components == 1 || (actual_num_components == 2 && has_alpha) {
-                color_space = ColorSpace::Gray;
-            } else if actual_num_components == 3 {
-                color_space = ColorSpace::RGB;
-            } else if actual_num_components == 4 {
-                if has_alpha {
-                    color_space = ColorSpace::RGB;
-                } else {
-                    color_space = ColorSpace::CMYK;
-                }
-            } else {
-                bail!(ValidationError::TooManyChannels);
-            }
-        }
-    }
-
-    Ok((color_space, has_alpha))
 }
 
 /// The color space of the image.
@@ -645,7 +579,8 @@ fn get_color_space(boxes: &ImageBoxes, num_components: usize) -> Result<ColorSpa
             3 => ColorSpace::RGB,
             4 => ColorSpace::CMYK,
             _ => ColorSpace::Unknown {
-                num_channels: num_components as u8,
+                num_channels: u8::try_from(num_components)
+                    .map_err(|_| ValidationError::TooManyChannels)?,
             },
         },
     };
@@ -653,36 +588,48 @@ fn get_color_space(boxes: &ImageBoxes, num_components: usize) -> Result<ColorSpa
     Ok(cs)
 }
 
-fn resolve_palette_indices(
+fn resolve_channels(
     components: Vec<ComponentData>,
     boxes: &ImageBoxes,
+    mappings: &[ComponentMappingEntry],
 ) -> Result<Vec<ComponentData>> {
-    let Some(palette) = boxes.palette.as_ref() else {
-        // Nothing to resolve.
-        return Ok(components);
-    };
-
-    let mapping = boxes.component_mapping.as_ref().unwrap();
-    let mut resolved = Vec::with_capacity(mapping.entries.len());
-
-    for entry in &mapping.entries {
-        let component_idx = entry.component_index as usize;
-        let component = components
-            .get(component_idx)
-            .ok_or(ColorError::PaletteResolutionFailed)?;
-
+    let mut uses = alloc::vec![0_usize; components.len()];
+    for entry in mappings {
+        *uses
+            .get_mut(usize::from(entry.component_index))
+            .ok_or(ValidationError::InvalidComponentMetadata)? += 1;
+    }
+    let mut components = components.into_iter().map(Some).collect::<Vec<_>>();
+    let mut resolved = Vec::with_capacity(mappings.len());
+    for entry in mappings {
+        let component_idx = usize::from(entry.component_index);
+        uses[component_idx] -= 1;
+        let component = components[component_idx]
+            .as_ref()
+            .ok_or(ValidationError::InvalidComponentMetadata)?;
         match entry.mapping_type {
-            ComponentMappingType::Direct => resolved.push(component.clone()),
+            ComponentMappingType::Direct => {
+                // Move a plane on its final use. Repeated channel associations
+                // copy only when they actually require another owned output.
+                let component = if uses[component_idx] == 0 {
+                    components[component_idx].take().unwrap()
+                } else {
+                    component.clone()
+                };
+                resolved.push(component);
+            }
             ComponentMappingType::Palette { column } => {
-                let column_idx = column as usize;
+                let palette = boxes
+                    .palette
+                    .as_ref()
+                    .ok_or(ColorError::PaletteResolutionFailed)?;
+                let column_idx = usize::from(column);
                 let column_info = palette
                     .columns
                     .get(column_idx)
                     .ok_or(ColorError::PaletteResolutionFailed)?;
-
                 let mut mapped =
                     Vec::with_capacity(component.container.truncated().len() + SIMD_WIDTH);
-
                 for &sample in component.container.truncated() {
                     let index = math::round_f32(sample) as i64;
                     let value = palette
@@ -690,7 +637,6 @@ fn resolve_palette_indices(
                         .ok_or(ColorError::PaletteResolutionFailed)?;
                     mapped.push(value as f32);
                 }
-
                 resolved.push(ComponentData {
                     container: math::SimdBuffer::new(mapped),
                     bit_depth: column_info.bit_depth,
@@ -698,7 +644,6 @@ fn resolve_palette_indices(
             }
         }
     }
-
     Ok(resolved)
 }
 

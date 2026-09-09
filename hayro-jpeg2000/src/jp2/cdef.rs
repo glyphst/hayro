@@ -11,7 +11,7 @@ pub(crate) fn parse(boxes: &mut ImageBoxes, data: &[u8]) -> Result<()> {
     let count = reader.read_u16().ok_or(FormatError::InvalidBox)? as usize;
     let mut definitions = Vec::with_capacity(count);
 
-    if count == 0 {
+    if count == 0 || data.len() != 2 + count * 6 {
         bail!(FormatError::InvalidBox);
     }
 
@@ -23,18 +23,8 @@ pub(crate) fn parse(boxes: &mut ImageBoxes, data: &[u8]) -> Result<()> {
         definitions.push(ChannelDefinition {
             channel_index,
             channel_type: ChannelType::from_raw(channel_type).ok_or(FormatError::InvalidBox)?,
-            association: ChannelAssociation::from_raw(association)
-                .ok_or(FormatError::InvalidBox)?,
+            association: ChannelAssociation::from_raw(association),
         });
-    }
-
-    definitions.sort_by(|a, b| a.channel_index.cmp(&b.channel_index));
-
-    // Ensure channel indices increases in steps of 1, starting from 0.
-    for (idx, def) in definitions.iter().enumerate() {
-        if def.channel_index as usize != idx {
-            bail!(FormatError::InvalidBox);
-        }
     }
 
     boxes.channel_definition = Some(ChannelDefinitionBox {
@@ -61,6 +51,7 @@ pub(crate) enum ChannelType {
     Colour,
     Opacity,
     PremultipliedOpacity,
+    Unspecified,
 }
 
 impl ChannelType {
@@ -69,6 +60,7 @@ impl ChannelType {
             0 => Some(Self::Colour),
             1 => Some(Self::Opacity),
             2 => Some(Self::PremultipliedOpacity),
+            u16::MAX => Some(Self::Unspecified),
             _ => None,
         }
     }
@@ -82,15 +74,15 @@ impl ChannelType {
 pub(crate) enum ChannelAssociation {
     WholeImage,
     Colour(u16),
+    Unspecified,
 }
 
 impl ChannelAssociation {
-    fn from_raw(value: u16) -> Option<Self> {
+    fn from_raw(value: u16) -> Self {
         match value {
-            0 => Some(Self::WholeImage),
-            // Unspecified.
-            u16::MAX => None,
-            v => Some(Self::Colour(v)),
+            0 => Self::WholeImage,
+            u16::MAX => Self::Unspecified,
+            v => Self::Colour(v),
         }
     }
 }

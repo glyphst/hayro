@@ -86,6 +86,7 @@ impl Filter {
         data: &[u8],
         params: &Dict<'_>,
         #[cfg_attr(not(feature = "images"), allow(unused))] image_params: &ImageDecodeParams,
+        inline_suffix: bool,
     ) -> Result<FilterResult<'static>, DecodeFailure> {
         let res = match self {
             Self::AsciiHexDecode => ascii_hex::decode(data)
@@ -100,9 +101,13 @@ impl Filter {
             Self::LzwDecode => lzw_flate::lzw::decode(data, params)
                 .map(FilterResult::from_data)
                 .ok_or(DecodeFailure::StreamDecode),
-            Self::FlateDecode => lzw_flate::flate::decode(data, params)
-                .map(FilterResult::from_data)
-                .ok_or(DecodeFailure::StreamDecode),
+            Self::FlateDecode => if inline_suffix {
+                lzw_flate::flate::decode_inline(data, params)
+            } else {
+                lzw_flate::flate::decode(data, params)
+            }
+            .map(FilterResult::from_data)
+            .ok_or(DecodeFailure::StreamDecode),
             #[cfg(feature = "images")]
             Self::DctDecode => {
                 dct::decode(data, params, image_params).ok_or(DecodeFailure::ImageDecode)

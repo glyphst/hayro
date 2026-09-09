@@ -7,7 +7,7 @@ use crate::object::Dict;
 use crate::object::Name;
 use crate::object::dict::keys::{
     BITS_PER_COMPONENT, BPC, DECODE_PARMS, DP, F, FILTER, FLATE_DECODE, FLATE_DECODE_ABBREVIATION,
-    JPX_DECODE, LENGTH, SMASK_IN_DATA, TYPE,
+    JPX_DECODE, LENGTH, SMASK_IN_DATA, SUBTYPE, TYPE,
 };
 use crate::object::{Array, ObjectIdentifier};
 use crate::object::{Object, ObjectLike, ObjectRefLike};
@@ -185,6 +185,15 @@ impl<'a> Stream<'a> {
         &self.dict
     }
 
+    /// Whether the stream originated between inline-image `ID` and `EI` operators.
+    /// This records parser provenance, not the dictionary's optional subtype.
+    pub fn is_inline_image(&self) -> bool {
+        // The dictionary parser retains its consumed delimiter: normal
+        // dictionaries end with >>, while inline dictionaries end with ID.
+        // This also keeps provenance in existing dictionary/cache identities.
+        self.dict.data().ends_with(b"ID")
+    }
+
     /// Return the object identifier of the stream.
     pub fn obj_id(&self) -> ObjectIdentifier {
         self.dict.obj_id().unwrap_or_else(|| {
@@ -204,12 +213,17 @@ impl<'a> Stream<'a> {
             .unwrap_or_default()
     }
 
-    /// Return the decoded data of the stream.
+    /// Return decoded bytes for a non-image stream.
+    ///
+    /// `JPXDecode` is restricted to image `XObjects` by PDF 1.7 §7.4.9. Call
+    /// [`Self::decoded_image`] when consuming an image `XObject`, even if only
+    /// its sample bytes are needed. A dictionary's subtype cannot authorize
+    /// image decoding when its caller consumes the bytes in another context.
     ///
     /// Note that the result of this method will not be cached, so calling it multiple
     /// times is expensive.
     pub fn decoded(&self) -> Result<Cow<'a, [u8]>, DecodeFailure> {
-        self.decoded_image(&ImageDecodeParams::default())
+        self.decode(&ImageDecodeParams::default(), false)
             .map(|r| r.data)
     }
 
@@ -282,11 +296,32 @@ impl<'a> Stream<'a> {
 
     /// Return the decoded data of the stream, and return image metadata
     /// if available.
+    ///
+    /// `JPXDecode` requires an image `XObject`. Inline-image provenance is retained
+    /// by the content parser, independently of any entries in its dictionary.
     pub fn decoded_image(
         &self,
         image_params: &ImageDecodeParams,
     ) -> Result<FilterResult<'a>, DecodeFailure> {
+        self.decode(image_params, true)
+    }
+
+    fn decode(
+        &self,
+        image_params: &ImageDecodeParams,
+        image: bool,
+    ) -> Result<FilterResult<'a>, DecodeFailure> {
         let filters_and_params = self.filters_and_params()?;
+        if filters_and_params.filters.contains(&Filter::JpxDecode)
+            && (!image
+                || self.is_inline_image()
+                || self
+                    .dict
+                    .get::<Name<'_>>(SUBTYPE)
+                    .is_none_or(|name| name.as_ref() != b"Image"))
+        {
+            return Err(DecodeFailure::InvalidFilterPlacement);
+        }
         embedded_image_alpha_mode(&self.dict)?;
         let data = self.raw_data();
 
@@ -328,6 +363,7 @@ impl<'a> Stream<'a> {
                 current.as_ref().map(|c| c.data.as_ref()).unwrap_or(&data),
                 params,
                 image_params,
+                self.is_inline_image() && current.is_none(),
             )?;
             current = Some(new);
         }
@@ -403,6 +439,8 @@ impl<'a> Readable<'a> for Stream<'a> {
 pub enum DecodeFailure {
     /// A filter name is unknown, malformed, or cannot be resolved.
     InvalidFilter,
+    /// `JPXDecode` was used outside an image `XObject`.
+    InvalidFilterPlacement,
     /// An image stream failed to decode.
     ImageDecode,
     /// A data stream failed to decode.
@@ -565,6 +603,10 @@ impl<'a> ObjectRefLike<'a> for Stream<'a> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "stream_jpx_tests.rs"]
+mod jpx_tests;
 
 #[cfg(test)]
 mod tests {

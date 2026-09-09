@@ -82,6 +82,13 @@ impl<'a> ImageXObject<'a> {
     ) -> Option<Self> {
         let dict = stream.dict();
 
+        // Reject before handing the image to devices, including those that may
+        // already hold decoded pixels in their own caches.
+        if stream.is_inline_image() && uses_jpx_decode(dict) {
+            (warning_sink)(crate::InterpreterWarning::ImageDecodeFailure);
+            return None;
+        }
+
         let is_stencil_mask = dict
             .get::<bool>(IM)
             .or_else(|| dict.get::<bool>(IMAGE_MASK))

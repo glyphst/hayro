@@ -23,10 +23,30 @@ pub(crate) mod flate {
         apply_predictor(decoded, &params)
     }
 
+    // An inline image ends at EI rather than a stream Length. Preserve all
+    // compressed bytes, including whitespace-valued checksums, and accept only
+    // PDF whitespace after the decoder reports the end of the compressed data.
+    pub(crate) fn decode_inline(data: &[u8], params: &Dict<'_>) -> Option<Vec<u8>> {
+        #[cfg(feature = "unsafe")]
+        let decoded = decode_with_limit_inner(data, usize::MAX, true).ok()?;
+        #[cfg(not(feature = "unsafe"))]
+        let decoded = fallback::decode(data)?;
+        apply_predictor(decoded, &PredictorParams::from_params(params))
+    }
+
     #[cfg(feature = "unsafe")]
     pub(crate) fn decode_with_limit(
         data: &[u8],
         max_output_bytes: usize,
+    ) -> Result<Vec<u8>, LimitedDecodeFailure> {
+        decode_with_limit_inner(data, max_output_bytes, false)
+    }
+
+    #[cfg(feature = "unsafe")]
+    fn decode_with_limit_inner(
+        data: &[u8],
+        max_output_bytes: usize,
+        inline_suffix: bool,
     ) -> Result<Vec<u8>, LimitedDecodeFailure> {
         use flate2::{Decompress, FlushDecompress, Status};
 
@@ -68,7 +88,15 @@ pub(crate) mod flate {
             result.extend_from_slice(&buffer[..produced]);
 
             match status {
-                Status::StreamEnd if input_offset == data.len() => return Ok(result),
+                Status::StreamEnd
+                    if input_offset == data.len()
+                        || inline_suffix
+                            && data[input_offset..]
+                                .iter()
+                                .all(|byte| crate::trivia::is_white_space_character(*byte)) =>
+                {
+                    return Ok(result);
+                }
                 Status::StreamEnd => return Err(LimitedDecodeFailure::Decode),
                 Status::Ok | Status::BufError if consumed != 0 || produced != 0 => {}
                 Status::Ok | Status::BufError => return Err(LimitedDecodeFailure::Decode),

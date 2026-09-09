@@ -20,6 +20,11 @@ use alloc::vec::Vec;
 use core::fmt::{Debug, Display, Formatter};
 use smallvec::SmallVec;
 
+#[path = "stream_jbig2.rs"]
+mod jbig2;
+pub(crate) use jbig2::optional_entry;
+pub use jbig2::validate_jbig2_image_dictionary;
+
 struct FiltersAndParams<'a> {
     filters: SmallVec<[Filter; 2]>,
     params: SmallVec<[Dict<'a>; 2]>,
@@ -327,6 +332,15 @@ impl<'a> Stream<'a> {
             return Err(DecodeFailure::InvalidFilterPlacement);
         }
         embedded_image_alpha_mode(&self.dict)?;
+        if filters_and_params.filters.contains(&Filter::Jbig2Decode)
+            && (image
+                || self
+                    .dict
+                    .get::<Name<'_>>(SUBTYPE)
+                    .is_some_and(|name| name.as_ref() == b"Image"))
+        {
+            validate_jbig2_image_dictionary(&self.dict)?;
+        }
         let data = self.raw_data();
 
         let mut current: Option<FilterResult<'a>> = None;
@@ -369,6 +383,27 @@ impl<'a> Stream<'a> {
                 image_params,
                 self.is_inline_image() && current.is_none(),
             )?;
+            if *filter == Filter::Jbig2Decode
+                && (image
+                    || self
+                        .dict
+                        .get::<Name<'_>>(SUBTYPE)
+                        .is_some_and(|name| name.as_ref() == b"Image"))
+            {
+                let metadata = new.image_data.as_ref().ok_or(DecodeFailure::StreamDecode)?;
+                use crate::object::dict::keys::{H, HEIGHT, W, WIDTH};
+                let width = self
+                    .dict
+                    .get::<u32>(W)
+                    .or_else(|| self.dict.get::<u32>(WIDTH));
+                let height = self
+                    .dict
+                    .get::<u32>(H)
+                    .or_else(|| self.dict.get::<u32>(HEIGHT));
+                if width != Some(metadata.width) || height != Some(metadata.height) {
+                    return Err(DecodeFailure::StreamDecode);
+                }
+            }
             current = Some(new);
         }
 

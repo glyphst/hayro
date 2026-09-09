@@ -45,6 +45,8 @@ pub enum FormatError {
     UnknownPageHeight,
     /// Page has zero width or height.
     EmptyPage,
+    /// Segment organization violates PDF's embedded JBIG2 contract.
+    InvalidPdfEmbedding,
 }
 
 /// Errors related to segment processing.
@@ -182,6 +184,7 @@ impl fmt::Display for FormatError {
             Self::MissingPageInfo => write!(f, "missing page information segment"),
             Self::UnknownPageHeight => write!(f, "page height unknown with no stripe segments"),
             Self::EmptyPage => write!(f, "page has zero width or height"),
+            Self::InvalidPdfEmbedding => write!(f, "invalid PDF JBIG2 embedding"),
         }
     }
 }

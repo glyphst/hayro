@@ -64,6 +64,9 @@ mod huffman_table;
 mod integer_decoder;
 mod lazy;
 mod page_info;
+mod pdf;
+#[cfg(test)]
+mod pdf_tests;
 mod reader;
 mod segment;
 mod simd;
@@ -131,6 +134,15 @@ impl<'a> Image<'a> {
         segments.sort_by_key(|seg| seg.header.segment_number);
 
         Self::from_segments(segments)
+    }
+
+    /// Parse the embedded organization required by PDF 1.7 §7.4.7.
+    ///
+    /// Globals must contain only page-zero segments; data must describe one
+    /// nonzero page. File framing, duplicate segments, and invalid references
+    /// are rejected. Physical segment order need not match segment numbers.
+    pub fn new_embedded_pdf(data: &'a [u8], globals: Option<&'a [u8]>) -> Result<Self> {
+        Self::from_segments(pdf::parse(data, globals)?)
     }
 
     fn from_segments(segments: Vec<segment::Segment<'a>>) -> Result<Self> {

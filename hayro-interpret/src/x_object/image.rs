@@ -82,6 +82,15 @@ impl<'a> ImageXObject<'a> {
     ) -> Option<Self> {
         let dict = stream.dict();
 
+        if stream
+            .filters()
+            .contains(&hayro_syntax::Filter::Jbig2Decode)
+            && hayro_syntax::object::stream::validate_jbig2_image_dictionary(dict).is_err()
+        {
+            (warning_sink)(crate::InterpreterWarning::ImageDecodeFailure);
+            return None;
+        }
+
         // Reject before handing the image to devices, including those that may
         // already hold decoded pixels in their own caches.
         if stream.is_inline_image()

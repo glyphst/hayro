@@ -42,6 +42,10 @@ fn decode_context<'a>(
     let dict_bpc = dict
         .get::<u8>(BPC)
         .or_else(|| dict.get::<u8>(BITS_PER_COMPONENT));
+    if dict_bpc != Some(8) && crate::x_object::image::uses_dct_decode(dict) {
+        (obj.warning_sink)(InterpreterWarning::ImageDecodeFailure);
+        return None;
+    }
     let color_space = obj.color_space.clone();
     let is_indexed = obj.color_space.as_ref().is_some_and(|cs| cs.is_indexed());
 

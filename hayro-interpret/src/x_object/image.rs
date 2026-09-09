@@ -345,16 +345,24 @@ fn embedded_alpha_mode(dict: &Dict<'_>) -> Option<EmbeddedImageAlphaMode> {
 }
 
 pub(crate) fn uses_jpx_decode(dict: &Dict<'_>) -> bool {
-    let is_jpx = |name: &Name<'_>| name.as_ref() == JPX_DECODE;
+    uses_filter(dict, &[JPX_DECODE])
+}
+
+pub(crate) fn uses_dct_decode(dict: &Dict<'_>) -> bool {
+    uses_filter(dict, &[DCT_DECODE, DCT_DECODE_ABBREVIATION])
+}
+
+fn uses_filter(dict: &Dict<'_>, names: &[&[u8]]) -> bool {
+    let matches = |name: &Name<'_>| names.contains(&name.as_ref());
 
     dict.get::<Name<'_>>(F)
         .or_else(|| dict.get::<Name<'_>>(FILTER))
         .as_ref()
-        .is_some_and(is_jpx)
+        .is_some_and(matches)
         || dict
             .get::<Array<'_>>(F)
             .or_else(|| dict.get::<Array<'_>>(FILTER))
-            .is_some_and(|filters| filters.iter::<Name<'_>>().any(|name| is_jpx(&name)))
+            .is_some_and(|filters| filters.iter::<Name<'_>>().any(|name| matches(&name)))
 }
 
 impl CacheKey for ImageXObject<'_> {

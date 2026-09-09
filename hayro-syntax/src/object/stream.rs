@@ -6,7 +6,8 @@ use crate::object;
 use crate::object::Dict;
 use crate::object::Name;
 use crate::object::dict::keys::{
-    DECODE_PARMS, DP, F, FILTER, FLATE_DECODE, FLATE_DECODE_ABBREVIATION, LENGTH, TYPE,
+    BITS_PER_COMPONENT, BPC, DECODE_PARMS, DP, F, FILTER, FLATE_DECODE, FLATE_DECODE_ABBREVIATION,
+    LENGTH, TYPE,
 };
 use crate::object::{Array, ObjectIdentifier};
 use crate::object::{Object, ObjectLike, ObjectRefLike};
@@ -257,6 +258,24 @@ impl<'a> Stream<'a> {
             .iter()
             .zip(filters_and_params.params.iter())
         {
+            // DCT always delivers eight-bit samples. Inspect the original
+            // Number so a real dictionary value cannot be truncated to eight.
+            if *filter == Filter::DctDecode {
+                let key = if self.dict.contains_key(BPC) {
+                    BPC
+                } else {
+                    BITS_PER_COMPONENT
+                };
+                if self.dict.contains_key(key)
+                    && self
+                        .dict
+                        .get::<object::Number>(key)
+                        .and_then(|number| number.as_i64_exact())
+                        != Some(8)
+                {
+                    return Err(DecodeFailure::StreamDecode);
+                }
+            }
             let new = filter.apply(
                 current.as_ref().map(|c| c.data.as_ref()).unwrap_or(&data),
                 params,

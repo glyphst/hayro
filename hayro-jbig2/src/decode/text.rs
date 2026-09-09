@@ -12,7 +12,9 @@ use super::{RegionBitmap, generic_refinement};
 use crate::ScratchBuffers;
 use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use crate::bitmap::Bitmap;
-use crate::error::{HuffmanError, OverflowError, ParseError, Result, SymbolError, bail};
+use crate::error::{
+    FormatError, HuffmanError, OverflowError, ParseError, Result, SymbolError, bail,
+};
 use crate::huffman_table::{HuffmanTable, StandardHuffmanTables, TableLine};
 use crate::integer_decoder::IntegerDecoder;
 use crate::reader::Reader;
@@ -584,11 +586,14 @@ fn select_huffman_tables<'a>(
 ) -> Result<TextRegionHuffmanTables<'a>> {
     let mut custom_table_idx = 0;
 
-    let mut get_custom = || -> Result<&'a HuffmanTable> {
+    let mut get_custom = |requires_oob: bool| -> Result<&'a HuffmanTable> {
         let table = custom_tables
             .get(custom_table_idx)
             .ok_or(HuffmanError::MissingTables)?;
         custom_table_idx += 1;
+        if table.has_out_of_band() != requires_oob {
+            bail!(HuffmanError::InvalidSelection);
+        }
         Ok(table)
     };
 
@@ -596,7 +601,7 @@ fn select_huffman_tables<'a>(
     let first_s = match flags.first_s_table {
         0 => standard_tables.table_f(),
         1 => standard_tables.table_g(),
-        3 => get_custom()?,
+        3 => get_custom(false)?,
         _ => bail!(HuffmanError::InvalidSelection),
     };
 
@@ -605,7 +610,7 @@ fn select_huffman_tables<'a>(
         0 => standard_tables.table_h(),
         1 => standard_tables.table_i(),
         2 => standard_tables.table_j(),
-        3 => get_custom()?,
+        3 => get_custom(true)?,
         _ => bail!(HuffmanError::InvalidSelection),
     };
 
@@ -614,7 +619,7 @@ fn select_huffman_tables<'a>(
         0 => standard_tables.table_k(),
         1 => standard_tables.table_l(),
         2 => standard_tables.table_m(),
-        3 => get_custom()?,
+        3 => get_custom(false)?,
         _ => bail!(HuffmanError::InvalidSelection),
     };
 
@@ -622,7 +627,7 @@ fn select_huffman_tables<'a>(
     let refinement_width = match flags.refinement_width_table {
         0 => standard_tables.table_n(),
         1 => standard_tables.table_o(),
-        3 => get_custom()?,
+        3 => get_custom(false)?,
         _ => bail!(HuffmanError::InvalidSelection),
     };
 
@@ -630,32 +635,37 @@ fn select_huffman_tables<'a>(
     let refinement_height = match flags.refinement_height_table {
         0 => standard_tables.table_n(),
         1 => standard_tables.table_o(),
-        3 => get_custom()?,
+        3 => get_custom(false)?,
         _ => bail!(HuffmanError::InvalidSelection),
     };
 
-    // "6) SBHUFFRDY"
-    let refinement_y = match flags.refinement_y_table {
-        0 => standard_tables.table_n(),
-        1 => standard_tables.table_o(),
-        3 => get_custom()?,
-        _ => bail!(HuffmanError::InvalidSelection),
-    };
-
-    // "7) SBHUFFRDX"
+    // "6) SBHUFFRDX"
     let refinement_x = match flags.refinement_x_table {
         0 => standard_tables.table_n(),
         1 => standard_tables.table_o(),
-        3 => get_custom()?,
+        3 => get_custom(false)?,
+        _ => bail!(HuffmanError::InvalidSelection),
+    };
+
+    // "7) SBHUFFRDY"
+    let refinement_y = match flags.refinement_y_table {
+        0 => standard_tables.table_n(),
+        1 => standard_tables.table_o(),
+        3 => get_custom(false)?,
         _ => bail!(HuffmanError::InvalidSelection),
     };
 
     // "8) SBHUFFRSIZE"
     let refinement_size = match flags.refinement_size_table {
         0 => standard_tables.table_a(),
-        1 => get_custom()?,
+        1 => get_custom(false)?,
         _ => bail!(HuffmanError::InvalidSelection),
     };
+
+    // Every referred table must be consumed by exactly one custom selector.
+    if custom_table_idx != custom_tables.len() {
+        bail!(HuffmanError::InvalidSelection);
+    }
 
     Ok(TextRegionHuffmanTables {
         first_s,
@@ -826,6 +836,9 @@ fn parse_text_region_flags(reader: &mut Reader<'_>) -> Result<TextRegionFlags> {
         delta_s_offset_raw as i8
     };
 
+    if !use_refinement && flags_word & 0x8000 != 0 {
+        bail!(FormatError::ReservedBits);
+    }
     let refinement_template = RefinementTemplate::from_byte((flags_word >> 15) as u8);
 
     Ok(TextRegionFlags {
@@ -842,15 +855,24 @@ fn parse_text_region_flags(reader: &mut Reader<'_>) -> Result<TextRegionFlags> {
 }
 
 /// Parse text region Huffman flags (7.4.3.1.2).
-fn parse_text_region_huffman_flags(reader: &mut Reader<'_>) -> Result<TextRegionHuffmanFlags> {
+fn parse_text_region_huffman_flags(
+    reader: &mut Reader<'_>,
+    use_refinement: bool,
+) -> Result<TextRegionHuffmanFlags> {
     let flags_word = reader.read_u16().ok_or(ParseError::UnexpectedEof)?;
+    if flags_word & 0x8000 != 0 {
+        bail!(FormatError::ReservedBits);
+    }
+    if !use_refinement && flags_word & 0x7fc0 != 0 {
+        bail!(HuffmanError::InvalidSelection);
+    }
     let first_s_table = (flags_word & 0x03) as u8;
     let delta_s_table = ((flags_word >> 2) & 0x03) as u8;
     let delta_t_table = ((flags_word >> 4) & 0x03) as u8;
     let refinement_width_table = ((flags_word >> 6) & 0x03) as u8;
     let refinement_height_table = ((flags_word >> 8) & 0x03) as u8;
-    let refinement_y_table = ((flags_word >> 10) & 0x03) as u8;
-    let refinement_x_table = ((flags_word >> 12) & 0x03) as u8;
+    let refinement_x_table = ((flags_word >> 10) & 0x03) as u8;
+    let refinement_y_table = ((flags_word >> 12) & 0x03) as u8;
     let refinement_size_table = ((flags_word >> 14) & 0x01) as u8;
 
     Ok(TextRegionHuffmanFlags {
@@ -871,7 +893,10 @@ pub(crate) fn parse<'a>(reader: &mut Reader<'a>, num_symbols: u32) -> Result<Tex
     let region_info = parse_region_segment_info(reader)?;
     let flags = parse_text_region_flags(reader)?;
     let huffman_flags = if flags.use_huffman {
-        Some(parse_text_region_huffman_flags(reader)?)
+        Some(parse_text_region_huffman_flags(
+            reader,
+            flags.use_refinement,
+        )?)
     } else {
         None
     };

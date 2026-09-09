@@ -5,7 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
-use crate::error::{HuffmanError, ParseError, Result, bail};
+use crate::error::{FormatError, HuffmanError, ParseError, Result, bail};
 use crate::lazy::Lazy;
 use crate::reader::Reader;
 
@@ -40,6 +40,23 @@ impl HuffmanTable {
         };
 
         HuffmanNode::decode_from(nodes, 0, reader)
+    }
+
+    /// Whether this table can produce an end-of-strip marker (7.4.3.1.6).
+    pub(crate) fn has_out_of_band(&self) -> bool {
+        let nodes: &[HuffmanNode] = match self.0.as_ref() {
+            InnerHuffmanTable::Inline { nodes } => nodes,
+            InnerHuffmanTable::Dynamic { nodes } => nodes,
+        };
+        nodes.iter().any(|node| {
+            matches!(
+                node,
+                HuffmanNode::Leaf(LeafData {
+                    is_out_of_band: true,
+                    ..
+                })
+            )
+        })
     }
 
     /// Decode a value using the huffman table, erroring out in case an OOB
@@ -193,6 +210,9 @@ impl HuffmanTable {
         // 1) "Decode the code table flags field as described in B.2.1. This sets the values
         //    HTOOB, HTPS and HTRS."
         let flags = reader.read_byte().ok_or(ParseError::UnexpectedEof)?;
+        if flags & 0x80 != 0 {
+            bail!(FormatError::ReservedBits);
+        }
 
         // `HTOOB`
         let has_out_of_band = (flags & 1) != 0;

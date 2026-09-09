@@ -60,6 +60,10 @@ mod decode;
 mod error;
 mod file;
 mod gray_scale;
+#[cfg(test)]
+mod huffman_refinement_samples;
+#[cfg(test)]
+mod huffman_refinement_tests;
 mod huffman_table;
 mod integer_decoder;
 mod lazy;

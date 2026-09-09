@@ -57,7 +57,7 @@ fn native_opacity_and_color_precede_calgray_gamma() {
         assert_eq!(decoded.alpha.unwrap().data, [128]);
     }
     // A single native opacity step must survive before an amplifying gamma.
-    // 60-digit oracle: sRGB((32768/32769)^1000) * 255 = 251.60086...
+    // 60-digit oracle: sRGB((32768/32769)^1000) * 255 = 251.6008789219817...
     let decoded = image(
         fixtures::ALPHA16_BOUNDARY,
         "/ColorSpace[/CalGray<</WhitePoint[.95047 1 1.08883]/Gamma 1000>>]",

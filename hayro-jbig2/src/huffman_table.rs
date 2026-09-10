@@ -15,6 +15,10 @@ include!("huffman_tables_generated.rs");
 #[path = "huffman_integer_table_tests.rs"]
 mod integer_tests;
 
+#[cfg(test)]
+#[path = "huffman_range_table_tests.rs"]
+mod range_tests;
+
 /// Maximum number of nodes in an inline Huffman table.
 const INLINE_TABLE_SIZE: usize = 43;
 
@@ -241,6 +245,9 @@ impl HuffmanTable {
         //    the value decoded."
         // `HTHIGH`
         let maximum_value = reader.read_i32().ok_or(ParseError::UnexpectedEof)?;
+        if minimum_value >= maximum_value {
+            bail!(HuffmanError::InvalidCode);
+        }
 
         // 4) "Set: CURRANGELOW = HTLOW, NTEMP = 0"
         let mut lines = Vec::new();
@@ -268,12 +275,16 @@ impl HuffmanTable {
                 range_length,
             ));
 
-            let range_size = 1_i64
-                .checked_shl(range_length as u32)
-                .ok_or(HuffmanError::InvalidCode)?;
-            let next_range_low = (current_range_low as i64)
-                .checked_add(range_size)
-                .ok_or(HuffmanError::InvalidCode)?;
+            // Any range of at least 2^32 spans the remaining signed domain.
+            // B.2 ends the normal lines on reaching *or passing* HTHIGH;
+            // the terminal boundary need not itself fit in an i32.
+            if range_length >= 32 {
+                break;
+            }
+            let next_range_low = i64::from(current_range_low) + (1_i64 << range_length);
+            if next_range_low >= i64::from(maximum_value) {
+                break;
+            }
             current_range_low =
                 i32::try_from(next_range_low).map_err(|_| HuffmanError::InvalidCode)?;
         }
@@ -295,7 +306,7 @@ impl HuffmanTable {
         //         RANGELOW[NTEMP] = HTHIGH, NTEMP = NTEMP + 1
         //    This is the upper range table line for this table."
         lines.push(TableLine::upper(
-            current_range_low,
+            maximum_value,
             reader
                 .read_bits(prefix_length_bits)
                 .ok_or(HuffmanError::InvalidCode)? as u8,
@@ -478,8 +489,20 @@ impl HuffmanNode {
 
                     // 2) "Read RANGELEN[I] bits. Let HTOFFSET be the value read."
                     // `HTOFFSET`
+                    // The field can declare up to 255 suffix bits. A nonzero
+                    // bit above the low 32 cannot yield a signed-domain value
+                    // with any representable base. Consume zero extension in
+                    // bounded chunks without constructing a larger integer.
+                    let mut excess = leaf.range_length.saturating_sub(32);
+                    while excess > 0 {
+                        let count = excess.min(32);
+                        if reader.read_bits(count).ok_or(HuffmanError::InvalidCode)? != 0 {
+                            bail!(HuffmanError::InvalidCode);
+                        }
+                        excess -= count;
+                    }
                     let range_offset = reader
-                        .read_bits(leaf.range_length)
+                        .read_bits(leaf.range_length.min(32))
                         .ok_or(HuffmanError::InvalidCode)?;
 
                     // 4) "Otherwise, if table line I is the lower range table line for this

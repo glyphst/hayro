@@ -64,6 +64,11 @@ mod gray_scale;
 mod huffman_integer_samples;
 #[cfg(test)]
 mod huffman_integer_tests;
+
+#[cfg(test)]
+mod huffman_range_samples;
+#[cfg(test)]
+mod huffman_range_tests;
 #[cfg(test)]
 mod huffman_refinement_samples;
 #[cfg(test)]

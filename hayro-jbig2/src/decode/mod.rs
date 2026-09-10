@@ -177,7 +177,7 @@ pub(crate) fn parse_region_segment_info(reader: &mut Reader<'_>) -> Result<Regio
 }
 
 /// Adaptive template pixel position for generic and refinement regions (6.2.5.4, Figure 7).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct AdaptiveTemplatePixel {
     pub(crate) x: i8,
     pub(crate) y: i8,

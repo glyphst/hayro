@@ -147,6 +147,7 @@ pub(crate) fn decode(
 
     let retained_contexts = if ctx.header.flags.bitmap_context_retained {
         Some(RetainedContexts {
+            parameters: ContextParameters::new(ctx.header),
             generic_region: ctx.a_ctx.generic_region_contexts,
             refinement_region: ctx.a_ctx.refinement_region_contexts,
         })
@@ -162,8 +163,43 @@ pub(crate) fn decode(
 
 #[derive(Debug, Clone)]
 pub(crate) struct RetainedContexts {
+    parameters: ContextParameters,
     pub(crate) generic_region: Vec<ArithmeticDecoderContext>,
     pub(crate) refinement_region: Vec<ArithmeticDecoderContext>,
+}
+
+/// Only bitmap coding parameters constrain reuse (7.4.2.2 step 3).
+/// Huffman table selections and the used/retained bits may change.
+#[derive(Debug, Clone)]
+struct ContextParameters {
+    use_huffman: bool,
+    use_refagg: bool,
+    template: Template,
+    refinement_template: RefinementTemplate,
+    adaptive_template_pixels: [AdaptiveTemplatePixel; 4],
+    refinement_at_pixels: Vec<AdaptiveTemplatePixel>,
+}
+
+impl ContextParameters {
+    fn new(header: &SymbolDictionaryHeader<'_>) -> Self {
+        Self {
+            use_huffman: header.flags.use_huffman,
+            use_refagg: header.flags.use_refagg,
+            template: header.flags.template,
+            refinement_template: header.flags.refinement_template,
+            adaptive_template_pixels: header.adaptive_template_pixels,
+            refinement_at_pixels: header.refinement_at_pixels.clone(),
+        }
+    }
+
+    fn matches(&self, header: &SymbolDictionaryHeader<'_>) -> bool {
+        self.use_huffman == header.flags.use_huffman
+            && self.use_refagg == header.flags.use_refagg
+            && self.template == header.flags.template
+            && self.refinement_template == header.flags.refinement_template
+            && self.adaptive_template_pixels == header.adaptive_template_pixels
+            && self.refinement_at_pixels == header.refinement_at_pixels
+    }
 }
 
 /// A decoded symbol dictionary segment.
@@ -474,6 +510,9 @@ impl<'a> ArithmeticContext<'a> {
         let (generic_region_contexts, refinement_region_contexts) =
             if header.flags.bitmap_context_used {
                 let ctx = input_contexts.ok_or(SymbolError::Invalid)?;
+                if !ctx.parameters.matches(header) {
+                    bail!(SymbolError::Invalid);
+                }
                 (ctx.generic_region.clone(), ctx.refinement_region.clone())
             } else {
                 let template = header.flags.template;

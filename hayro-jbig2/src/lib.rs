@@ -74,6 +74,7 @@ mod huffman_range_tests;
 mod huffman_prefix_samples;
 #[cfg(test)]
 mod huffman_prefix_tests;
+
 #[cfg(test)]
 mod huffman_refinement_samples;
 #[cfg(test)]
@@ -90,6 +91,10 @@ mod reader;
 mod refinement_test_samples;
 #[cfg(test)]
 mod refinement_tests;
+#[cfg(test)]
+mod retained_context_samples;
+#[cfg(test)]
+mod retained_context_tests;
 mod segment;
 mod simd;
 mod symbol_id_decoder;
@@ -376,8 +381,9 @@ fn decode_segments(
                 let retained_contexts = seg
                     .header
                     .referred_to_segments
-                    .last()
-                    .and_then(|&num| page_state.get_symbol_dictionary(num))
+                    .iter()
+                    .rev()
+                    .find_map(|&num| page_state.get_symbol_dictionary(num))
                     .and_then(|dict| dict.retained_contexts.as_ref());
 
                 let header = symbol::parse(&mut reader)?;

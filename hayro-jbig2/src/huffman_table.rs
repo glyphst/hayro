@@ -11,6 +11,10 @@ use crate::reader::Reader;
 
 include!("huffman_tables_generated.rs");
 
+#[cfg(test)]
+#[path = "huffman_integer_table_tests.rs"]
+mod integer_tests;
+
 /// Maximum number of nodes in an inline Huffman table.
 const INLINE_TABLE_SIZE: usize = 43;
 
@@ -82,7 +86,7 @@ impl HuffmanTable {
         }
 
         // `LENCOUNT` - Histogram of prefix lengths.
-        let mut length_counts = vec![0_u32; max_prefix_length + 1];
+        let mut length_counts = vec![0_u64; max_prefix_length + 1];
         for line in lines {
             length_counts[line.prefix_length as usize] += 1;
         }
@@ -90,7 +94,8 @@ impl HuffmanTable {
         // Step 2: "Let LENMAX be the largest value for which LENCOUNT[LENMAX] > 0. Set:
         // CURLEN = 1, FIRSTCODE[0] = 0, LENCOUNT[0] = 0"
         // `FIRSTCODE` - First code value for each length.
-        let mut first_code_per_length = vec![0_u32; max_prefix_length + 1];
+        // The exclusive end of a complete 32-bit code space is 2^32.
+        let mut first_code_per_length = vec![0_u64; max_prefix_length + 1];
         // `CODES` - Assigned prefix codes for each line.
         let mut assigned_codes = vec![0_u32; line_count];
         length_counts[0] = 0;
@@ -101,12 +106,18 @@ impl HuffmanTable {
             // a) "Set: FIRSTCODE[CURLEN] = (FIRSTCODE[CURLEN − 1] + LENCOUNT[CURLEN − 1]) × 2
             //         CURCODE = FIRSTCODE[CURLEN]
             //         CURTEMP = 0"
-            first_code_per_length[current_length] = (first_code_per_length[current_length - 1]
-                + length_counts[current_length - 1])
-                .checked_mul(2)
+            first_code_per_length[current_length] = first_code_per_length[current_length - 1]
+                .checked_add(length_counts[current_length - 1])
+                .and_then(|value| value.checked_mul(2))
                 .ok_or(HuffmanError::InvalidCode)?;
             // `CURCODE` - Current code value being assigned.
             let mut current_code = first_code_per_length[current_length];
+            let end = current_code
+                .checked_add(length_counts[current_length])
+                .ok_or(HuffmanError::InvalidCode)?;
+            if end > (1_u64 << current_length) {
+                bail!(HuffmanError::ConflictingCodes);
+            }
 
             // b) "While CURTEMP < NTEMP, perform the following operations:"
             // `CURTEMP` - Current line index.
@@ -115,10 +126,10 @@ impl HuffmanTable {
                 //        CODES[CURTEMP] = CURCODE
                 //        CURCODE = CURCODE + 1"
                 if lines[line_index].prefix_length as usize == current_length {
-                    assigned_codes[line_index] = current_code;
-                    current_code = current_code
-                        .checked_add(1)
-                        .ok_or(HuffmanError::InvalidCode)?;
+                    // The capacity check bounds every assigned code to u32;
+                    // only the exclusive end may reach 2^32.
+                    assigned_codes[line_index] = current_code as u32;
+                    current_code += 1;
                 }
                 // ii) "Set CURTEMP = CURTEMP + 1" (implicit in for loop)
             }
@@ -167,7 +178,7 @@ impl HuffmanTable {
         node_index: u32,
         code: u32,
         prefix_length: u8,
-        range_low: i32,
+        range_low: i64,
         range_length: u8,
         is_lower: bool,
         is_out_of_band: bool,
@@ -272,9 +283,7 @@ impl HuffmanTable {
         //         RANGELOW[NTEMP] = HTLOW − 1, NTEMP = NTEMP + 1
         //    This is the lower range table line for this table."
         lines.push(TableLine::lower(
-            minimum_value
-                .checked_sub(1)
-                .ok_or(HuffmanError::InvalidCode)?,
+            i64::from(minimum_value) - 1,
             reader
                 .read_bits(prefix_length_bits)
                 .ok_or(HuffmanError::InvalidCode)? as u8,
@@ -315,7 +324,9 @@ pub(crate) struct TableLine {
     /// `RANGELOW` - The base value for computing the decoded value.
     /// For normal/upper lines: value = `range_low` + offset
     /// For lower lines: value = `range_low` - offset
-    pub(crate) range_low: i32,
+    // The lower open range may start at i32::MIN - 1. Keep that table
+    // definition without excluding the table's valid normal/upper codes.
+    pub(crate) range_low: i64,
     /// `PREFLEN` - Prefix code length.
     pub(crate) prefix_length: u8,
     /// `RANGELEN` - Number of additional bits.
@@ -330,7 +341,7 @@ impl TableLine {
     /// Create a normal table line.
     pub(crate) const fn new(range_low: i32, prefix_length: u8, range_length: u8) -> Self {
         Self {
-            range_low,
+            range_low: range_low as i64,
             prefix_length,
             range_length,
             is_lower: false,
@@ -339,7 +350,7 @@ impl TableLine {
     }
 
     /// Create a lower range line (-∞...`range_high`).
-    const fn lower(range_high: i32, prefix_length: u8, range_length: u8) -> Self {
+    const fn lower(range_high: i64, prefix_length: u8, range_length: u8) -> Self {
         Self {
             range_low: range_high,
             prefix_length,
@@ -352,7 +363,7 @@ impl TableLine {
     /// Create an upper range line (`range_low`...+∞).
     const fn upper(range_low: i32, prefix_length: u8, range_length: u8) -> Self {
         Self {
-            range_low,
+            range_low: range_low as i64,
             prefix_length,
             range_length,
             is_lower: false,
@@ -382,6 +393,8 @@ enum HuffmanNode {
     },
     /// Leaf node.
     Leaf(LeafData),
+    /// The lower range starts below `i32::MIN` and has no encodable value.
+    OutOfRange,
     /// Empty node (padding to fill fixed-size arrays in inline tables).
     Empty,
 }
@@ -394,7 +407,12 @@ impl HuffmanNode {
         }
     }
 
-    fn new_leaf(range_low: i32, range_length: u8, is_lower: bool, is_out_of_band: bool) -> Self {
+    fn new_leaf(range_low: i64, range_length: u8, is_lower: bool, is_out_of_band: bool) -> Self {
+        // Only the HTLOW - 1 lower base can lie outside i32. Subtracting
+        // any unsigned offset from it stays outside the encoded domain.
+        let Ok(range_low) = i32::try_from(range_low) else {
+            return Self::OutOfRange;
+        };
         Self::Leaf(LeafData {
             range_low,
             range_length,
@@ -462,22 +480,21 @@ impl HuffmanNode {
                     // `HTOFFSET`
                     let range_offset = reader
                         .read_bits(leaf.range_length)
-                        .ok_or(HuffmanError::InvalidCode)?
-                        as i32;
+                        .ok_or(HuffmanError::InvalidCode)?;
 
                     // 4) "Otherwise, if table line I is the lower range table line for this
                     //    table, then set: HTVAL = RANGELOW[I] − HTOFFSET"
                     // 5) "Otherwise, set: HTVAL = RANGELOW[I] + HTOFFSET"
                     // `HTVAL`
                     let value = if leaf.is_lower {
-                        leaf.range_low - range_offset
+                        i64::from(leaf.range_low) - i64::from(range_offset)
                     } else {
-                        leaf.range_low + range_offset
+                        i64::from(leaf.range_low) + i64::from(range_offset)
                     };
-
+                    let value = i32::try_from(value).map_err(|_| HuffmanError::InvalidCode)?;
                     return Ok(Some(value));
                 }
-                Self::Empty => {
+                Self::Empty | Self::OutOfRange => {
                     bail!(HuffmanError::InvalidCode);
                 }
             }

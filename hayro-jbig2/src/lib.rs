@@ -61,6 +61,10 @@ mod error;
 mod file;
 mod gray_scale;
 #[cfg(test)]
+mod huffman_integer_samples;
+#[cfg(test)]
+mod huffman_integer_tests;
+#[cfg(test)]
 mod huffman_refinement_samples;
 #[cfg(test)]
 mod huffman_refinement_tests;

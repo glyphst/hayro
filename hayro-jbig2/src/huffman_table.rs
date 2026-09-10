@@ -19,6 +19,10 @@ mod integer_tests;
 #[path = "huffman_range_table_tests.rs"]
 mod range_tests;
 
+#[cfg(test)]
+#[path = "huffman_prefix_table_tests.rs"]
+mod prefix_tests;
+
 /// Maximum number of nodes in an inline Huffman table.
 const INLINE_TABLE_SIZE: usize = 43;
 
@@ -76,89 +80,54 @@ impl HuffmanTable {
     /// Build a Huffman table from table line definitions (B.3 "Assigning
     /// the prefix codes").
     pub(crate) fn build(lines: &[TableLine]) -> Result<Self> {
-        // `NTEMP` - Number of table lines.
-        let line_count = lines.len();
-
-        // Step 1: "Build a histogram in the array LENCOUNT counting the number of times
-        // each prefix length value occurs in PREFLEN: LENCOUNT[I] is the number of times
-        // that the value I occurs in the array PREFLEN."
-        // `LENMAX` - Maximum prefix length.
         let max_prefix_length = lines.iter().map(|l| l.prefix_length).max().unwrap_or(0) as usize;
-
-        if max_prefix_length > 32 {
-            bail!(HuffmanError::PrefixLengthTooLarge);
-        }
-
-        // `LENCOUNT` - Histogram of prefix lengths.
-        let mut length_counts = vec![0_u64; max_prefix_length + 1];
+        let mut length_counts = vec![0_usize; max_prefix_length + 1];
         for line in lines {
             length_counts[line.prefix_length as usize] += 1;
         }
-
-        // Step 2: "Let LENMAX be the largest value for which LENCOUNT[LENMAX] > 0. Set:
-        // CURLEN = 1, FIRSTCODE[0] = 0, LENCOUNT[0] = 0"
-        // `FIRSTCODE` - First code value for each length.
-        // The exclusive end of a complete 32-bit code space is 2^32.
-        let mut first_code_per_length = vec![0_u64; max_prefix_length + 1];
-        // `CODES` - Assigned prefix codes for each line.
-        let mut assigned_codes = vec![0_u32; line_count];
-        length_counts[0] = 0;
-
-        // Step 3: "While CURLEN ≤ LENMAX, perform the following operations:"
-        // `CURLEN` - Current length being processed.
-        for current_length in 1..=max_prefix_length {
-            // a) "Set: FIRSTCODE[CURLEN] = (FIRSTCODE[CURLEN − 1] + LENCOUNT[CURLEN − 1]) × 2
-            //         CURCODE = FIRSTCODE[CURLEN]
-            //         CURTEMP = 0"
-            first_code_per_length[current_length] = first_code_per_length[current_length - 1]
-                .checked_add(length_counts[current_length - 1])
-                .and_then(|value| value.checked_mul(2))
-                .ok_or(HuffmanError::InvalidCode)?;
-            // `CURCODE` - Current code value being assigned.
-            let mut current_code = first_code_per_length[current_length];
-            let end = current_code
-                .checked_add(length_counts[current_length])
-                .ok_or(HuffmanError::InvalidCode)?;
-            if end > (1_u64 << current_length) {
+        // Reject overfilled spaces before allocating tree nodes. Once the
+        // available slots exceed the number of table lines, no remaining
+        // assignments can exhaust them; cap that count to avoid overflow at
+        // deep levels. Prefix length zero never consumes a slot.
+        let mut available = 1_usize;
+        for &count in &length_counts[1..] {
+            available = available.saturating_mul(2).min(lines.len());
+            if count > available {
                 bail!(HuffmanError::ConflictingCodes);
             }
-
-            // b) "While CURTEMP < NTEMP, perform the following operations:"
-            // `CURTEMP` - Current line index.
-            for line_index in 0..line_count {
-                // i) "If PREFLEN[CURTEMP] = CURLEN, then set:
-                //        CODES[CURTEMP] = CURCODE
-                //        CURCODE = CURCODE + 1"
-                if lines[line_index].prefix_length as usize == current_length {
-                    // The capacity check bounds every assigned code to u32;
-                    // only the exclusive end may reach 2^32.
-                    assigned_codes[line_index] = current_code as u32;
-                    current_code += 1;
-                }
-                // ii) "Set CURTEMP = CURTEMP + 1" (implicit in for loop)
-            }
-            // c) "Set CURLEN = CURLEN + 1" (implicit in for loop)
+            available -= count;
         }
-
-        // Build tree from assigned codes.
+        // B.2.1 permits 255-bit prefixes. Keep the next canonical code as
+        // MSB-first bits instead of narrowing it to a machine integer. B.3
+        // orders codes by length, then by their original table-line order.
+        let mut code = [false; u8::MAX as usize];
+        let mut exhausted = false;
         let mut nodes = vec![HuffmanNode::new_intermediate()];
+        for current_length in 1..=max_prefix_length {
+            // Increasing the length appends a zero bit, equivalent to B.3's
+            // left shift. Prefix length zero is omitted from this traversal.
+            for line in lines
+                .iter()
+                .filter(|line| line.prefix_length as usize == current_length)
+            {
+                if exhausted {
+                    bail!(HuffmanError::ConflictingCodes);
+                }
+                Self::insert_code(&mut nodes, &code[..current_length], line)?;
 
-        for (i, line) in lines.iter().enumerate() {
-            // "Note that the PREFLEN value 0 indicates that the table line is never used."
-            if line.prefix_length == 0 {
-                continue;
+                // Increment within the current width. Carry out means the
+                // complete code space is used, including its final all-ones
+                // code; any further line would conflict at this or a deeper
+                // level. No extra bit or arbitrarily large integer is needed.
+                exhausted = true;
+                for bit in code[..current_length].iter_mut().rev() {
+                    *bit = !*bit;
+                    if *bit {
+                        exhausted = false;
+                        break;
+                    }
+                }
             }
-
-            Self::insert_code(
-                &mut nodes,
-                0, // root index
-                assigned_codes[i],
-                line.prefix_length,
-                line.range_low,
-                line.range_length,
-                line.is_lower,
-                line.is_out_of_band,
-            )?;
         }
 
         Ok(Self::from_dynamic(nodes))
@@ -170,54 +139,49 @@ impl HuffmanTable {
     /// 0 to SDNUMINSYMS + NSYMSDECODED – 1, set SBSYMCODES[i] to the binary
     /// representation of i using a SBSYMCODELEN-bit string."
     pub(crate) fn build_uniform(num_symbols: u32, code_length: u32) -> Result<Self> {
+        let code_length =
+            u8::try_from(code_length).map_err(|_| HuffmanError::PrefixLengthTooLarge)?;
         let lines: Vec<TableLine> = (0..num_symbols)
-            .map(|i| TableLine::new(i as i32, code_length as u8, 0))
+            .map(|i| TableLine::new(i as i32, code_length, 0))
             .collect();
         Self::build(&lines)
     }
 
     /// Insert a code into the Huffman tree.
-    fn insert_code(
-        nodes: &mut Vec<HuffmanNode>,
-        node_index: u32,
-        code: u32,
-        prefix_length: u8,
-        range_low: i64,
-        range_length: u8,
-        is_lower: bool,
-        is_out_of_band: bool,
-    ) -> Result<()> {
-        if prefix_length == 0 {
-            // We've consumed all bits, this should be a leaf.
-            nodes[node_index as usize] =
-                HuffmanNode::new_leaf(range_low, range_length, is_lower, is_out_of_band);
-            return Ok(());
+    fn insert_code(nodes: &mut Vec<HuffmanNode>, code: &[bool], line: &TableLine) -> Result<()> {
+        let mut node_index = 0;
+        // Walk the prefix iteratively so its length does not consume stack.
+        for &bit in code {
+            let child_index = match nodes[node_index].get_child(!bit) {
+                Some(index) => index,
+                None => {
+                    let index = u32::try_from(nodes.len())
+                        .ok()
+                        .and_then(NonZeroU32::new)
+                        .ok_or(HuffmanError::InvalidCode)?;
+                    nodes.push(HuffmanNode::new_intermediate());
+                    nodes[node_index].set_child(!bit, index)?;
+                    index
+                }
+            };
+            node_index = child_index.get() as usize;
         }
-
-        // Get the next bit (MSB first).
-        let bit = (code >> (prefix_length - 1)) & 1;
-        let remaining_code = code & ((1 << (prefix_length - 1)) - 1);
-
-        let child_index = match nodes[node_index as usize].get_child(bit == 0) {
-            Some(idx) => idx,
-            None => {
-                let new_idx = NonZeroU32::new(nodes.len() as u32).unwrap();
-                nodes.push(HuffmanNode::new_intermediate());
-                nodes[node_index as usize].set_child(bit == 0, new_idx)?;
-                new_idx
+        if !matches!(
+            nodes[node_index],
+            HuffmanNode::Intermediate {
+                zero: None,
+                one: None
             }
-        };
-
-        Self::insert_code(
-            nodes,
-            child_index.get(),
-            remaining_code,
-            prefix_length - 1,
-            range_low,
-            range_length,
-            is_lower,
-            is_out_of_band,
-        )
+        ) {
+            bail!(HuffmanError::ConflictingCodes);
+        }
+        nodes[node_index] = HuffmanNode::new_leaf(
+            line.range_low,
+            line.range_length,
+            line.is_lower,
+            line.is_out_of_band,
+        );
+        Ok(())
     }
 
     /// Read a custom Huffman table from the bitstream (B.2 "Decoding a code table").

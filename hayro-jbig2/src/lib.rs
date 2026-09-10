@@ -69,6 +69,11 @@ mod huffman_integer_tests;
 mod huffman_range_samples;
 #[cfg(test)]
 mod huffman_range_tests;
+
+#[cfg(test)]
+mod huffman_prefix_samples;
+#[cfg(test)]
+mod huffman_prefix_tests;
 #[cfg(test)]
 mod huffman_refinement_samples;
 #[cfg(test)]

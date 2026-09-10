@@ -91,7 +91,7 @@ impl SegmentType {
 
 /// A parsed segment header (7.2.1).
 #[derive(Debug, Clone)]
-pub(crate) struct SegmentHeader {
+pub(crate) struct SegmentHeader<'a> {
     /// "This four-byte field contains the segment's segment number. The valid
     /// range of segment numbers is 0 through 4294967295 (0xFFFFFFFF) inclusive."
     /// (7.2.2)
@@ -100,7 +100,9 @@ pub(crate) struct SegmentHeader {
     pub(crate) segment_type: SegmentType,
     /// "Bit 7: Deferred non-retain. If this bit is 1, this segment is flagged
     /// as retained only by itself and its attached extension segments." (7.2.3)
-    pub(crate) _retain_flag: bool,
+    pub(crate) deferred_non_retain: bool,
+    /// Validated short or long retention bits, borrowed from the source header.
+    retention_flags: &'a [u8],
     /// "This field encodes the number of the page to which this segment belongs.
     /// The first page must be numbered '1'. This field may contain a value of
     /// zero; this value indicates that this segment is not associated with any
@@ -117,17 +119,25 @@ pub(crate) struct SegmentHeader {
     pub(crate) data_length: Option<u32>,
 }
 
+impl SegmentHeader<'_> {
+    /// Bit zero retains this segment; bit K retains the Kth referred segment.
+    /// Callers use only indices through `referred_to_segments.len()`.
+    pub(crate) fn retains(&self, bit: usize) -> bool {
+        self.retention_flags[bit / 8] & (1 << (bit % 8)) != 0
+    }
+}
+
 /// A parsed segment with its header and data.
 #[derive(Debug)]
 pub(crate) struct Segment<'a> {
     /// The segment header.
-    pub(crate) header: SegmentHeader,
+    pub(crate) header: SegmentHeader<'a>,
     /// The segment data (borrowed slice).
     pub(crate) data: &'a [u8],
 }
 
 /// Parse a segment header (7.2).
-pub(crate) fn parse_segment_header(reader: &mut Reader<'_>) -> Result<SegmentHeader> {
+pub(crate) fn parse_segment_header<'a>(reader: &mut Reader<'a>) -> Result<SegmentHeader<'a>> {
     // 7.2.2: Segment number
     // "This four-byte field contains the segment's segment number. The valid
     // range of segment numbers is 0 through 4294967295 (0xFFFFFFFF) inclusive.
@@ -147,7 +157,7 @@ pub(crate) fn parse_segment_header(reader: &mut Reader<'_>) -> Result<SegmentHea
 
     // "Bit 7: Deferred non-retain. If this bit is 1, this segment is flagged as
     // retained only by itself and its attached extension segments."
-    let retain_flag = flags & 0x80 == 0;
+    let deferred_non_retain = flags & 0x80 != 0;
 
     // 7.2.4: Referred-to segment count and retention flags
     // "This field contains one or more bytes indicating how many other segments
@@ -159,7 +169,8 @@ pub(crate) fn parse_segment_header(reader: &mut Reader<'_>) -> Result<SegmentHea
     // 0 and 4, then the field is one byte long. If the value of this three-bit
     // subfield is 7, then the field is at least five bytes long. This three-bit
     // subfield must not contain values of 5 and 6."
-    let count_and_retention = reader.read_byte().ok_or(ParseError::UnexpectedEof)?;
+    let mut retention_flags = reader.read_bytes(1).ok_or(ParseError::UnexpectedEof)?;
+    let count_and_retention = retention_flags[0];
     let short_count = (count_and_retention >> 5) & 0x07;
 
     if short_count == 5 || short_count == 6 {
@@ -187,11 +198,11 @@ pub(crate) fn parse_segment_header(reader: &mut Reader<'_>) -> Result<SegmentHea
     // final byte can have padding; every preceding byte contains eight flags.
     if short_count == 7 {
         let retention_bytes = (referred_to_count as usize + 1).div_ceil(8);
-        let flags = reader
+        retention_flags = reader
             .read_bytes(retention_bytes)
             .ok_or(ParseError::UnexpectedEof)?;
         let used_bits = (referred_to_count + 1) % 8;
-        if used_bits != 0 && flags[retention_bytes - 1] >> used_bits != 0 {
+        if used_bits != 0 && retention_flags[retention_bytes - 1] >> used_bits != 0 {
             bail!(FormatError::ReservedBits);
         }
     } else if (count_and_retention & 0x1F) >> (short_count + 1) != 0 {
@@ -250,7 +261,8 @@ pub(crate) fn parse_segment_header(reader: &mut Reader<'_>) -> Result<SegmentHea
     Ok(SegmentHeader {
         segment_number,
         segment_type,
-        _retain_flag: retain_flag,
+        deferred_non_retain,
+        retention_flags,
         page_association,
         referred_to_segments,
         data_length,
@@ -271,7 +283,7 @@ pub(crate) fn parse_segment<'a>(reader: &mut Reader<'a>) -> Result<Segment<'a>> 
 /// header is written." (7.2.7)
 pub(crate) fn parse_segment_data<'a>(
     reader: &mut Reader<'a>,
-    header: SegmentHeader,
+    header: SegmentHeader<'a>,
 ) -> Result<Segment<'a>> {
     let data = if let Some(len) = header.data_length {
         reader
@@ -351,7 +363,11 @@ mod tests {
         // "0x86: This segment's type is 6. Its page association field is one byte
         // long. It is retained by only its attached extension segments."
         assert_eq!(header.segment_type, SegmentType::ImmediateTextRegion);
-        assert!(!header._retain_flag);
+        assert!(header.deferred_non_retain);
+        assert_eq!(
+            (0..=3).map(|bit| header.retains(bit)).collect::<Vec<_>>(),
+            vec![true, true, false, true]
+        );
 
         // "0x6B: This segment refers to three other segments. It is referred to by
         // some other segment. This is the last reference to the second of the three
@@ -411,7 +427,11 @@ mod tests {
 
         // "40: This segment's type is 0. Its page association field is four bytes long."
         assert_eq!(header.segment_type, SegmentType::SymbolDictionary);
-        assert!(header._retain_flag);
+        assert!(!header.deferred_non_retain);
+        assert_eq!(
+            (0..=9).map(|bit| header.retains(bit)).collect::<Vec<_>>(),
+            vec![true, false, true, true, true, true, true, true, false, true]
+        );
 
         // "E0 00 00 09: This segment's referred-to segment count field is in the long
         // format. This segment refers to nine other segments."

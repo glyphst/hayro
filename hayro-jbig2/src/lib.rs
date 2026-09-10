@@ -88,6 +88,10 @@ mod pdf;
 mod pdf_tests;
 mod reader;
 #[cfg(test)]
+mod reference_lifetime_samples;
+#[cfg(test)]
+mod reference_lifetime_tests;
+#[cfg(test)]
 mod refinement_test_samples;
 #[cfg(test)]
 mod refinement_tests;

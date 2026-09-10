@@ -2,7 +2,9 @@ use super::{Image, SegmentType};
 use alloc::{vec, vec::Vec};
 
 fn segment(number: u8, kind: u8, page: u8, payload: &[u8], refs: &[u8]) -> Vec<u8> {
-    let mut bytes = vec![0, 0, 0, number, kind, (refs.len() as u8) << 5];
+    assert!(refs.len() < 5);
+    let retain = ((1_u16 << (refs.len() + 1)) - 1) as u8;
+    let mut bytes = vec![0, 0, 0, number, kind, ((refs.len() as u8) << 5) | retain];
     bytes.extend(refs);
     bytes.push(page);
     bytes.extend((payload.len() as u32).to_be_bytes());

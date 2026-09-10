@@ -1,4 +1,4 @@
-//! PDF 1.7 §7.4.7 and T.88 §§7.2.5–7.3.2, 7.4.8, D.3.
+//! PDF 1.7 §7.4.7 and T.88 §§7.2.3–7.3.2, 7.4.8, D.3.
 use crate::decode::{CombinationOperator, parse_region_segment_info};
 use crate::error::{FormatError, Result, bail};
 use crate::file::parse_segments_sequential;
@@ -7,6 +7,9 @@ use crate::reader::Reader;
 use crate::segment::{Segment, SegmentType};
 use alloc::vec;
 use alloc::vec::Vec;
+
+const DISCARDED: u8 = 1;
+const CONSUMED: u8 = 2;
 
 pub(crate) fn parse<'a>(data: &'a [u8], globals: Option<&'a [u8]>) -> Result<Vec<Segment<'a>>> {
     let mut segments = Vec::new();
@@ -55,12 +58,34 @@ pub(crate) fn parse<'a>(data: &'a [u8], globals: Option<&'a [u8]>) -> Result<Vec
     }
 
     segments.sort_by_key(|segment| segment.header.segment_number);
-    let mut consumed = vec![false; segments.len()];
+    // One byte per segment tracks both reference lifetime and auxiliary use.
+    // State is local to this image, even when another image shares its globals.
+    let mut states = vec![0_u8; segments.len()];
+    let mut attachment: Option<(u32, bool)> = None;
     for (index, segment) in segments.iter().enumerate() {
         if index > 0 && segments[index - 1].header.segment_number == segment.header.segment_number {
             bail!(FormatError::InvalidPdfEmbedding);
         }
         let count = segment.header.referred_to_segments.len();
+        let attached_to =
+            if segment.header.segment_type == SegmentType::Extension && count == 1 && index > 0 {
+                let owner = segment.header.referred_to_segments[0];
+                (segments[index - 1].header.segment_number == owner
+                    || attachment.is_some_and(|(previous, _)| previous == owner))
+                .then_some(owner)
+            } else {
+                None
+            };
+        if let Some((owner, true)) = attachment
+            && attached_to != Some(owner)
+            && segments[index - 1].header.retains(1)
+        {
+            bail!(FormatError::InvalidPdfEmbedding);
+        }
+        if !segment.header.retains(0) {
+            states[index] |= DISCARDED;
+        }
+        let mut must_release_owner = false;
         let valid_count = match segment.header.segment_type {
             SegmentType::SymbolDictionary
             | SegmentType::IntermediateTextRegion
@@ -86,11 +111,23 @@ pub(crate) fn parse<'a>(data: &'a [u8], globals: Option<&'a [u8]>) -> Result<Vec
             else {
                 bail!(FormatError::InvalidPdfEmbedding);
             };
-            let referred_page = segments[referred_index].header.page_association;
+            let referred_header = &segments[referred_index].header;
+            if states[referred_index] & DISCARDED != 0
+                || (referred_header.deferred_non_retain && attached_to != Some(*referred))
+            {
+                bail!(FormatError::InvalidPdfEmbedding);
+            }
+            let referred_page = referred_header.page_association;
             if referred_page != 0 && referred_page != segment.header.page_association {
                 bail!(FormatError::InvalidPdfEmbedding);
             }
-            let kind = segments[referred_index].header.segment_type;
+            // A global owner's chain can continue in a different PDF image.
+            // This image has every segment of its own page, but cannot prove
+            // that an observed global chain contains its final extension.
+            if attached_to == Some(*referred) {
+                must_release_owner = referred_header.deferred_non_retain && referred_page != 0;
+            }
+            let kind = referred_header.segment_type;
             tables += usize::from(kind == SegmentType::Tables);
             let valid_type = match segment.header.segment_type {
                 SegmentType::SymbolDictionary
@@ -114,10 +151,10 @@ pub(crate) fn parse<'a>(data: &'a [u8], globals: Option<&'a [u8]>) -> Result<Vec
                 bail!(FormatError::InvalidPdfEmbedding);
             }
             if is_intermediate(kind) && segment.header.segment_type != SegmentType::Extension {
-                if consumed[referred_index] {
+                if states[referred_index] & CONSUMED != 0 {
                     bail!(FormatError::InvalidPdfEmbedding);
                 }
-                consumed[referred_index] = true;
+                states[referred_index] |= CONSUMED;
             }
         }
         let max_tables = if segment.header.segment_type == SegmentType::SymbolDictionary {
@@ -128,6 +165,27 @@ pub(crate) fn parse<'a>(data: &'a [u8], globals: Option<&'a [u8]>) -> Result<Vec
         if segment.header.segment_type != SegmentType::Extension && tables > max_tables {
             bail!(FormatError::InvalidPdfEmbedding);
         }
+        // Zero retention bits prohibit references in later segments. Apply
+        // them after checking all current references, including duplicate
+        // numbers; a later keep bit cannot resurrect a discarded segment.
+        for (bit, referred) in segment.header.referred_to_segments.iter().enumerate() {
+            if !segment.header.retains(bit + 1) {
+                let Ok(referred_index) = segments[..index]
+                    .binary_search_by_key(referred, |segment| segment.header.segment_number)
+                else {
+                    bail!(FormatError::InvalidPdfEmbedding);
+                };
+                states[referred_index] |= DISCARDED;
+            }
+        }
+        attachment = attached_to.map(|owner| (owner, must_release_owner));
+    }
+    if attachment.is_some_and(|(_, must_release)| must_release)
+        && segments
+            .last()
+            .is_some_and(|segment| segment.header.retains(1))
+    {
+        bail!(FormatError::InvalidPdfEmbedding);
     }
     let page_info_segment = segments
         .iter()
@@ -161,7 +219,7 @@ pub(crate) fn parse<'a>(data: &'a [u8], globals: Option<&'a [u8]>) -> Result<Vec
         }
         if (refinement && !page_info.flags.might_contain_refinements)
             || (is_intermediate(kind)
-                && (!page_info.flags.requires_auxiliary_buffers || !consumed[index]))
+                && (!page_info.flags.requires_auxiliary_buffers || states[index] & CONSUMED == 0))
         {
             bail!(FormatError::InvalidPdfEmbedding);
         }

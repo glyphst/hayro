@@ -7,10 +7,14 @@ use alloc::{vec, vec::Vec};
 fn segment(number: u8, kind: u8, payload: &[u8], refs: &[u8]) -> Vec<u8> {
     let mut data = vec![0, 0, 0, number, kind];
     if refs.len() < 5 {
-        data.push((refs.len() as u8) << 5);
+        let retain = ((1_u16 << (refs.len() + 1)) - 1) as u8;
+        data.push(((refs.len() as u8) << 5) | retain);
     } else {
         data.extend((0xe000_0000 | refs.len() as u32).to_be_bytes());
-        data.resize(data.len() + (refs.len() + 1).div_ceil(8), 0);
+        for start in (0..=refs.len()).step_by(8) {
+            let bits = (refs.len() + 1 - start).min(8);
+            data.push(((1_u16 << bits) - 1) as u8);
+        }
     }
     data.extend(refs);
     data.push(1);

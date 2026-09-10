@@ -54,7 +54,7 @@ impl HuffmanTable {
         HuffmanNode::decode_from(nodes, 0, reader)
     }
 
-    /// Whether this table can produce an end-of-strip marker (7.4.3.1.6).
+    /// Whether any code produces an OOB marker (7.4.2.1.6, 7.4.3.1.6).
     pub(crate) fn has_out_of_band(&self) -> bool {
         let nodes: &[HuffmanNode] = match self.0.as_ref() {
             InnerHuffmanTable::Inline { nodes } => nodes,

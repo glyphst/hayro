@@ -97,6 +97,10 @@ mod retained_context_samples;
 mod retained_context_tests;
 mod segment;
 mod simd;
+#[cfg(test)]
+mod symbol_contract_samples;
+#[cfg(test)]
+mod symbol_contract_tests;
 mod symbol_id_decoder;
 #[cfg(test)]
 mod symbol_refinement_samples;

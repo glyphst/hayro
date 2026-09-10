@@ -16,7 +16,7 @@ use crate::decode::{
 };
 use crate::decode::{generic, generic_refinement};
 use crate::error::{
-    DecodeError, HuffmanError, OverflowError, ParseError, Result, SymbolError, bail,
+    DecodeError, FormatError, HuffmanError, OverflowError, ParseError, Result, SymbolError, bail,
 };
 use crate::huffman_table::{HuffmanTable, StandardHuffmanTables};
 use crate::integer_decoder::IntegerDecoder;
@@ -573,31 +573,42 @@ impl<'a> HuffmanContext<'a> {
         if referred_tables.len() < custom_count {
             bail!(HuffmanError::MissingTables);
         }
+        if referred_tables.len() > custom_count {
+            bail!(HuffmanError::InvalidSelection);
+        }
 
         let mut custom_table_idx = 0;
-        let mut get_custom = || -> &HuffmanTable {
+        let mut get_custom = |requires_oob: bool| -> Result<&HuffmanTable> {
             let table = &referred_tables[custom_table_idx];
             custom_table_idx += 1;
-            table
+            // 7.4.2.1.6 constrains the selected table's capabilities even
+            // when no symbols consume it (or refinement ignores BMSIZE).
+            if table.has_out_of_band() != requires_oob {
+                bail!(HuffmanError::InvalidSelection);
+            }
+            Ok(table)
         };
 
         // Select Huffman tables based on flags (7.4.2.1.6).
-        let mut get_table = |selection: HuffmanTableSelection| -> &HuffmanTable {
-            match selection {
-                HuffmanTableSelection::TableB1 => standard_tables.table_a(),
-                HuffmanTableSelection::TableB2 => standard_tables.table_b(),
-                HuffmanTableSelection::TableB3 => standard_tables.table_c(),
-                HuffmanTableSelection::TableB4 => standard_tables.table_d(),
-                HuffmanTableSelection::TableB5 => standard_tables.table_e(),
-                HuffmanTableSelection::UserSupplied => get_custom(),
-            }
-        };
+        let mut get_table =
+            |selection: HuffmanTableSelection, requires_oob: bool| -> Result<&HuffmanTable> {
+                Ok(match selection {
+                    HuffmanTableSelection::TableB1 => standard_tables.table_a(),
+                    HuffmanTableSelection::TableB2 => standard_tables.table_b(),
+                    HuffmanTableSelection::TableB3 => standard_tables.table_c(),
+                    HuffmanTableSelection::TableB4 => standard_tables.table_d(),
+                    HuffmanTableSelection::TableB5 => standard_tables.table_e(),
+                    HuffmanTableSelection::UserSupplied => get_custom(requires_oob)?,
+                })
+            };
 
-        let height_class_delta_table = get_table(header.flags.delta_height_table);
-        let symbol_width_delta_table = get_table(header.flags.delta_width_table);
-        let collective_bitmap_size_table = get_table(header.flags.collective_bitmap_size_table);
-        let aggregation_instance_count_table = get_table(header.flags.aggregate_instance_table);
-        let export_run_length_table = get_table(HuffmanTableSelection::TableB1);
+        let height_class_delta_table = get_table(header.flags.delta_height_table, false)?;
+        let symbol_width_delta_table = get_table(header.flags.delta_width_table, true)?;
+        let collective_bitmap_size_table =
+            get_table(header.flags.collective_bitmap_size_table, false)?;
+        let aggregation_instance_count_table =
+            get_table(header.flags.aggregate_instance_table, false)?;
+        let export_run_length_table = standard_tables.table_a();
 
         Ok(Self {
             reader,
@@ -791,6 +802,20 @@ pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<SymbolDictionaryHeade
     let flags_word = reader.read_u16().ok_or(ParseError::UnexpectedEof)?;
     let use_huffman = flags_word & 0x0001 != 0;
     let use_refagg = flags_word & 0x0002 != 0;
+
+    // 7.4.2.1.1: reserved bits and fields required to be zero by the mode.
+    if flags_word & 0xe000 != 0
+        || (use_huffman && flags_word & 0x0c00 != 0)
+        || (!use_refagg && flags_word & 0x1000 != 0)
+        || (use_huffman && !use_refagg && flags_word & 0x0300 != 0)
+    {
+        bail!(FormatError::ReservedBits);
+    }
+    // Arithmetic dictionaries cannot select Huffman tables. AGGINST selection
+    // also requires refinement/aggregation, including in Huffman mode.
+    if (!use_huffman && flags_word & 0x00fc != 0) || (!use_refagg && flags_word & 0x0080 != 0) {
+        bail!(HuffmanError::InvalidSelection);
+    }
 
     let delta_height_table = match (flags_word >> 2) & 0x03 {
         0 => HuffmanTableSelection::TableB4,

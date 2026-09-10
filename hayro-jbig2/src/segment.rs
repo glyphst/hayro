@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::error::{ParseError, Result, SegmentError, bail, err};
+use crate::error::{FormatError, ParseError, Result, SegmentError, bail, err};
 use crate::reader::Reader;
 
 /// "The segment type is a number between 0 and 63, inclusive. Not all values
@@ -183,16 +183,19 @@ pub(crate) fn parse_segment_header(reader: &mut Reader<'_>) -> Result<SegmentHea
         u32::from_be_bytes([count_and_retention & 0x1F, rest[0], rest[1], rest[2]])
     };
 
-    // Skip retention flag bytes in long form.
-    // "The first one-byte field following the initial four-byte field is formatted
-    // as follows: Bit 0: Retain bit for this segment. Bit 1-7: Retain bits for
-    // referred-to segments."
+    // 7.2.4: Retention bits beyond the reference count must be zero. Only the
+    // final byte can have padding; every preceding byte contains eight flags.
     if short_count == 7 {
-        // Number of retention bytes: ceil((referred_to_count + 1) / 8)
         let retention_bytes = (referred_to_count as usize + 1).div_ceil(8);
-        reader
-            .skip_bytes(retention_bytes)
+        let flags = reader
+            .read_bytes(retention_bytes)
             .ok_or(ParseError::UnexpectedEof)?;
+        let used_bits = (referred_to_count + 1) % 8;
+        if used_bits != 0 && flags[retention_bytes - 1] >> used_bits != 0 {
+            bail!(FormatError::ReservedBits);
+        }
+    } else if (count_and_retention & 0x1F) >> (short_count + 1) != 0 {
+        bail!(FormatError::ReservedBits);
     }
 
     // 7.2.5: Referred-to segment numbers
@@ -390,7 +393,17 @@ mod tests {
             0x00, 0x00, 0x00, 0x20, // Data length = 32 (added for complete header)
         ];
 
-        let mut reader = Reader::new(&data);
+        // The 2000 example's 02 FD contradicts 7.2.4: FD sets unused bits.
+        // Keep that literal as a rejection control, then use FD 02, which
+        // follows the defined bit positions and the example's prose (retain
+        // self and all references except the first and eighth).
+        assert_eq!(
+            parse_segment_header(&mut Reader::new(&data)).unwrap_err(),
+            crate::error::DecodeError::Format(FormatError::ReservedBits)
+        );
+        let mut corrected = data;
+        corrected.swap(9, 10);
+        let mut reader = Reader::new(&corrected);
         let header = parse_segment_header(&mut reader).unwrap();
 
         // "00 00 02 34: This segment's number is 0x00000234, or 564 decimal."

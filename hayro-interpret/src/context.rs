@@ -10,7 +10,7 @@ use crate::{ClipPath, Device, DrawProps, FillRule, InterpreterSettings, Paint, S
 use hayro_syntax::content::ops::Transform;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::Name;
-use hayro_syntax::object::dict::keys::{SUBTYPE, TYPE0, TYPE3};
+use hayro_syntax::object::dict::keys::{SUBTYPE, TYPE3};
 use hayro_syntax::page::Resources;
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, BezPath, PathEl, Point, Rect, Shape};
@@ -702,13 +702,7 @@ impl<'a> Context<'a> {
         if let Some(resolved) = resolved {
             Some(TextStateFont::Font(resolved))
         } else {
-            if is_type3
-                || font_dict
-                    .get::<Name<'_>>(SUBTYPE)
-                    .is_some_and(|s| s.as_ref() == TYPE0)
-            {
-                (self.settings.warning_sink)(crate::InterpreterWarning::UnsupportedFont);
-            }
+            (self.settings.warning_sink)(crate::InterpreterWarning::UnsupportedFont);
             Font::new_standard(StandardFont::Helvetica, &self.settings.font_resolver)
                 .map(TextStateFont::Fallback)
         }

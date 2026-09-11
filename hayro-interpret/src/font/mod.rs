@@ -520,6 +520,12 @@ impl<'a> Font<'a> {
         font_resolver: &FontResolverFn,
         cmap_resolver: &CMapResolverFn,
     ) -> Option<OutlineFont> {
+        if matches!(
+            dict.get::<Name<'_>>(SUBTYPE)?.as_ref(),
+            TYPE1 | MM_TYPE1 | TRUE_TYPE | OPEN_TYPE
+        ) {
+            true_type::validate_simple_metrics(dict)?;
+        }
         match dict.get::<Name<'_>>(SUBTYPE)?.deref() {
             TYPE1 | MM_TYPE1 => Some(OutlineFont::Type1(Arc::new(Type1Font::new(
                 dict,

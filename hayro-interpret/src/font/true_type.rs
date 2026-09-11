@@ -1,6 +1,6 @@
 use crate::font::blob::{CffFontBlob, OpenTypeFontBlob};
 use crate::font::generated::{glyph_names, mac_os_roman, mac_roman, standard};
-use crate::font::standard_font::StandardKind;
+use crate::font::standard_font::{StandardKind, select_standard_font};
 use crate::font::{
     Encoding, FallbackFontQuery, FontFlags, glyph_name_to_bf_string, read_to_unicode,
     resolve_font_text_metrics, strip_subset_prefix, unicode_from_name,
@@ -11,6 +11,7 @@ use hayro_cmap::{BfString, CMap};
 use hayro_syntax::object::Array;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::Name;
+use hayro_syntax::object::Number;
 use hayro_syntax::object::Object;
 use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
@@ -489,30 +490,56 @@ pub(crate) enum Width {
     Missing,
 }
 
-pub(crate) fn read_widths(dict: &Dict<'_>, descriptor: &Dict<'_>) -> Option<(Vec<Width>, f32)> {
-    let mut widths = Vec::new();
-
-    let first_char = dict.get::<usize>(FIRST_CHAR);
-    let last_char = dict.get::<usize>(LAST_CHAR);
-    let widths_arr = dict.get::<Array<'_>>(WIDTHS);
-    let missing_width = descriptor.get::<f32>(MISSING_WIDTH).unwrap_or(0.0);
-
-    if let (Some(fc), Some(lc), Some(w)) = (first_char, last_char, widths_arr) {
-        let iter = w.iter::<f32>().take(lc.checked_sub(fc)?.checked_add(1)?);
-
-        for _ in 0..fc {
-            widths.push(Width::Missing);
-        }
-
-        for w in iter {
-            widths.push(Width::Value(w));
-        }
-
-        while widths.len() <= (u8::MAX as usize) + 1 {
-            widths.push(Width::Missing);
-        }
+// Table 111 requires all four declarations, except for a standard-14 Type 1
+// font where all four may be absent. Substituting a similar font must not grant
+// that exception to an arbitrary font name or an incomplete declaration.
+pub(crate) fn validate_simple_metrics(dict: &Dict<'_>) -> Option<()> {
+    let present =
+        [FIRST_CHAR, LAST_CHAR, WIDTHS, FONT_DESC].map(|key| !dict.is_null_or_absent(key));
+    if present.into_iter().all(|value| value) {
+        dict.get::<Dict<'_>>(FONT_DESC)?;
+        return Some(());
     }
+    if present.into_iter().any(|value| value) || dict.get::<Name<'_>>(SUBTYPE)?.as_ref() != TYPE1 {
+        return None;
+    }
+    let base = dict.get::<Name<'_>>(BASE_FONT)?;
+    let (font, _) = select_standard_font(dict, &Dict::default())?;
+    (base.as_str() == font.postscript_name()).then_some(())
+}
 
+pub(crate) fn read_widths(dict: &Dict<'_>, descriptor: &Dict<'_>) -> Option<(Vec<Width>, f32)> {
+    let missing_width = if descriptor.is_null_or_absent(MISSING_WIDTH) {
+        0.0
+    } else {
+        let value = descriptor.get::<f32>(MISSING_WIDTH)?;
+        value.is_finite().then_some(value)?
+    };
+    // An empty table selects standard metrics, including the internal diagnostic
+    // fallback font. External dictionaries first pass validate_simple_metrics.
+    if [FIRST_CHAR, LAST_CHAR, WIDTHS]
+        .into_iter()
+        .all(|key| dict.is_null_or_absent(key))
+    {
+        return Some((Vec::new(), missing_width));
+    }
+    let first = usize::from(u8::try_from(dict.get::<Number>(FIRST_CHAR)?.as_i64_exact()?).ok()?);
+    let last = usize::from(u8::try_from(dict.get::<Number>(LAST_CHAR)?.as_i64_exact()?).ok()?);
+    let count = last.checked_sub(first)?.checked_add(1)?;
+    let array = dict.get::<Array<'_>>(WIDTHS)?;
+    // Bound work and storage before reading values, retaining malformed slots
+    // and rejecting both missing entries and tails after a valid prefix.
+    if array.raw_iter().take(count + 1).count() != count {
+        return None;
+    }
+    let values = Vec::<f32>::try_from(array).ok()?;
+    if values.len() != count || !values.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let mut widths = vec![Width::Missing; 256];
+    for (slot, value) in widths[first..=last].iter_mut().zip(values) {
+        *slot = Width::Value(value);
+    }
     Some((widths, missing_width))
 }
 
@@ -581,6 +608,119 @@ pub(crate) fn read_encoding(dict: &Dict<'_>) -> (Encoding, FxHashMap<u8, String>
             get_encoding_base(dict, Name::new_unescaped(ENCODING)),
             FxHashMap::default(),
         )
+    }
+}
+
+#[cfg(test)]
+mod simple_metrics_tests {
+    use super::{Width, read_widths, validate_simple_metrics};
+    use hayro_syntax::object::{Dict, FromBytes};
+
+    #[test]
+    fn simple_metrics_complete_ranges_and_missing_width() {
+        let dict = Dict::from_bytes(b"<< /FirstChar 65 /LastChar 67 /Widths [600.25 -800.5 0] >>")
+            .unwrap();
+        for entry in ["", "/MissingWidth null", "/MissingWidth 123.5"] {
+            let bytes = format!("<< {entry} >>");
+            let descriptor = Dict::from_bytes(bytes.as_bytes()).unwrap();
+            let (widths, missing) = read_widths(&dict, &descriptor).unwrap();
+            assert_eq!(widths.len(), 256);
+            for (code, expected) in [(65, 600.25), (66, -800.5), (67, 0.0)] {
+                assert!(matches!(widths[code], Width::Value(value) if value == expected));
+            }
+            assert!(matches!(widths[64], Width::Missing));
+            assert!(matches!(widths[255], Width::Missing));
+            assert_eq!(missing, if entry.ends_with("123.5") { 123.5 } else { 0.0 });
+        }
+        for code in [0, 255] {
+            let bytes = format!("<< /FirstChar {code} /LastChar {code} /Widths [500] >>");
+            assert!(
+                read_widths(
+                    &Dict::from_bytes(bytes.as_bytes()).unwrap(),
+                    &Dict::default()
+                )
+                .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn simple_metrics_reject_partial_wrong_typed_and_unbounded_declarations() {
+        for entry in [
+            "/FirstChar 65 /LastChar 66 /Widths [600]",
+            "/FirstChar 65 /LastChar 65 /Widths [600 /Bad]",
+            "/FirstChar 65 /LastChar 66 /Widths [600 null]",
+            "/FirstChar 65 /LastChar 66 /Widths [600 /Bad]",
+            "/FirstChar 65 /LastChar 66 /Widths [600 999 0 R]",
+            "/FirstChar 65 /LastChar 65 /Widths /Bad",
+            "/FirstChar 65 /LastChar 65",
+            "/FirstChar 65.0 /LastChar 65 /Widths [600]",
+            "/FirstChar 65 /LastChar 65.5 /Widths [600]",
+            "/FirstChar -1 /LastChar 0 /Widths [600 700]",
+            "/FirstChar 66 /LastChar 65 /Widths []",
+            "/FirstChar 256 /LastChar 256 /Widths [600]",
+            "/FirstChar 4294967295 /LastChar 4294967295 /Widths [600]",
+            "/FirstChar 0 /LastChar 4294967295 /Widths [600]",
+        ] {
+            let bytes = format!("<< {entry} >>");
+            assert!(
+                read_widths(
+                    &Dict::from_bytes(bytes.as_bytes()).unwrap(),
+                    &Dict::default()
+                )
+                .is_none(),
+                "{entry}"
+            );
+        }
+        for value in [
+            "/Bad",
+            "[500]",
+            "99999999999999999999999999999999999999999999999999",
+        ] {
+            let bytes = format!("<< /MissingWidth {value} >>");
+            assert!(
+                read_widths(
+                    &Dict::default(),
+                    &Dict::from_bytes(bytes.as_bytes()).unwrap()
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn simple_metrics_standard_exception_requires_all_four_absent() {
+        let entries = [
+            "/FirstChar 65",
+            "/LastChar 65",
+            "/Widths [667]",
+            "/FontDescriptor << >>",
+        ];
+        for mask in 0..16 {
+            let mut input = String::from("<< /Subtype /Type1 /BaseFont /Helvetica ");
+            for (bit, entry) in entries.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    input.push_str(entry);
+                    input.push(' ');
+                }
+            }
+            input.push_str(">>");
+            let valid =
+                validate_simple_metrics(&Dict::from_bytes(input.as_bytes()).unwrap()).is_some();
+            assert_eq!(valid, mask == 0 || mask == 15, "{input}");
+        }
+        for name in ["Arial", "HelveticaNeue", "ABCDEF+Helvetica"] {
+            let input = format!("<< /Subtype /Type1 /BaseFont /{name} >>");
+            assert!(
+                validate_simple_metrics(&Dict::from_bytes(input.as_bytes()).unwrap()).is_none()
+            );
+        }
+        for subtype in ["TrueType", "MMType1", "OpenType"] {
+            let input = format!("<< /Subtype /{subtype} /BaseFont /Helvetica >>");
+            assert!(
+                validate_simple_metrics(&Dict::from_bytes(input.as_bytes()).unwrap()).is_none()
+            );
+        }
     }
 }
 

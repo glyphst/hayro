@@ -682,6 +682,9 @@ mod tests {
     fn malformed_flate_blocks_do_not_return_partial_decoded_content() {
         for data in [
             &b"not-a-zlib-stream"[..],
+            &[1, 1, 0, 254, 255, b'A'][..], // Raw DEFLATE lacks the zlib wrapper.
+            &[0x73, 0x04, 0][..],
+            &[1, 0, 0, 255, 255][..],
             &[7][..],                       // Reserved block type.
             &[1, 2, 0, 253, 255, b'A'][..], // Truncated stored block.
             &[1, 1, 0, 0, 0, b'A'][..],     // Invalid length complement.
@@ -698,9 +701,15 @@ mod tests {
             assert!(stream.decoded().is_err(), "accepted {data:?}");
         }
         for (data, expected) in [
-            (&[1, 1, 0, 254, 255, b'A'][..], &b"A"[..]),
-            (&[0x73, 0x04, 0][..], &b"A"[..]),
-            (&[1, 0, 0, 255, 255][..], &b""[..]),
+            (
+                &[0x78, 0x9c, 1, 1, 0, 254, 255, b'A', 0, 0x42, 0, 0x42][..],
+                &b"A"[..],
+            ),
+            (
+                &[0x78, 0x9c, 0x73, 0x04, 0, 0, 0x42, 0, 0x42][..],
+                &b"A"[..],
+            ),
+            (&[0x78, 0x9c, 1, 0, 0, 255, 255, 0, 0, 0, 1][..], &b""[..]),
         ] {
             let mut bytes =
                 format!("<< /Length {} /Filter /FlateDecode >> stream\n", data.len()).into_bytes();
@@ -805,7 +814,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "unsafe")]
     #[test]
     fn bounded_flate_rejects_a_bad_zlib_checksum() {
         let data = b"<< /Length 12 /Filter /FlateDecode >> stream\n\x78\x9c\xb3\xa9\xd0\xb7\x03\x00\x02\xf8\x01\x23\nendstream";

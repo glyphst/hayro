@@ -6,6 +6,7 @@ pub(crate) mod ascii_hex;
 mod ccitt;
 #[cfg(feature = "images")]
 mod dct;
+mod flate_portable;
 #[cfg(feature = "images")]
 mod jbig2;
 #[cfg(feature = "images")]
@@ -30,7 +31,7 @@ pub enum Filter {
     Ascii85Decode,
     /// Lempel-Ziv-Welch (LZW) compression.
     LzwDecode,
-    /// DEFLATE compression (zlib/gzip).
+    /// DEFLATE compression with a zlib wrapper.
     FlateDecode,
     /// Run-length encoding compression.
     RunLengthDecode,
@@ -144,3 +145,6 @@ mod byte_filters_tests;
 
 #[cfg(test)]
 mod lzw_predictor_tests;
+
+#[cfg(test)]
+mod flate_tests;

@@ -1,6 +1,7 @@
 //! Region and dictionary segment parsing and decoding.
 
 pub(crate) mod generic;
+mod generic_extended;
 pub(crate) mod generic_refinement;
 pub(crate) mod halftone;
 pub(crate) mod pattern;

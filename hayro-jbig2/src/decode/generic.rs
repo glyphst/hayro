@@ -6,7 +6,7 @@ use super::{
 use crate::ScratchBuffers;
 use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use crate::bitmap::{Bitmap, WORD_BITS, WORD_BYTES, WORD_SHIFT, Word};
-use crate::error::{ParseError, RegionError, Result, TemplateError, bail};
+use crate::error::{FormatError, ParseError, RegionError, Result, TemplateError, bail};
 use crate::reader::Reader;
 
 /// Generic region decoding procedure (6.2).
@@ -49,14 +49,23 @@ pub(crate) fn decode_into(
         );
 
         // "6.2.5 Decoding using a template and arithmetic coding"
-        decode_bitmap_arithmetic_coding(
-            bitmap,
-            &mut decoder,
-            &mut ctx.contexts,
-            header.template,
-            header.tpgdon,
-            &header.adaptive_template_pixels,
-        )?;
+        match &header.adaptive_template_pixels {
+            GenericAdaptiveTemplatePixels::Standard(pixels) => decode_bitmap_arithmetic_coding(
+                bitmap,
+                &mut decoder,
+                &mut ctx.contexts,
+                header.template,
+                header.tpgdon,
+                pixels,
+            )?,
+            GenericAdaptiveTemplatePixels::Extended(pixels) => super::generic_extended::decode(
+                bitmap,
+                &mut decoder,
+                &mut ctx.contexts,
+                header.tpgdon,
+                pixels,
+            ),
+        }
     }
 
     Ok(())
@@ -69,8 +78,15 @@ pub(crate) struct GenericRegionHeader<'a> {
     pub(crate) mmr: bool,
     pub(crate) template: Template,
     pub(crate) tpgdon: bool,
-    pub(crate) adaptive_template_pixels: [AdaptiveTemplatePixel; 4],
+    pub(crate) adaptive_template_pixels: GenericAdaptiveTemplatePixels,
     pub(crate) data: &'a [u8],
+}
+
+/// Amendment 2 extends only template 0 of generic region segments.
+#[derive(Debug, Clone)]
+pub(crate) enum GenericAdaptiveTemplatePixels {
+    Standard([AdaptiveTemplatePixel; 4]),
+    Extended([AdaptiveTemplatePixel; 12]),
 }
 
 /// Parse a generic region segment header (7.4.6.1).
@@ -84,10 +100,22 @@ pub(crate) fn parse<'a>(
     let template = Template::from_byte(flags >> 1);
     let tpgdon = flags & 0x08 != 0;
     let ext_template = flags & 0x10 != 0;
+    // 7.4.6.2 (including Amendment 2): bits 5-7 are reserved, and
+    // GBTEMPLATE must be zero for MMR. TPGDON and EXTTEMPLATE are unused
+    // for MMR; EXTTEMPLATE is also unused for templates 1-3.
+    if flags & 0xe0 != 0 || (mmr && flags & 0x06 != 0) {
+        bail!(FormatError::ReservedBits);
+    }
     let adaptive_template_pixels = if mmr {
-        [AdaptiveTemplatePixel::default(); 4]
+        GenericAdaptiveTemplatePixels::Standard([AdaptiveTemplatePixel::default(); 4])
+    } else if template == Template::Template0 && ext_template {
+        let mut pixels = [AdaptiveTemplatePixel::default(); 12];
+        for pixel in &mut pixels {
+            *pixel = parse_adaptive_template_pixel(reader)?;
+        }
+        GenericAdaptiveTemplatePixels::Extended(pixels)
     } else {
-        parse_adaptive_template_pixels(reader, template, ext_template)?
+        GenericAdaptiveTemplatePixels::Standard(parse_adaptive_template_pixels(reader, template)?)
     };
     let mut data = reader.tail().ok_or(ParseError::UnexpectedEof)?;
 
@@ -98,7 +126,8 @@ pub(crate) fn parse<'a>(
     // in the segment's region segment information field." (7.4.6.4)
     if had_unknown_length {
         // Length has already been validated during segment parsing.
-        let (head, tail) = data.split_at(data.len() - 4);
+        let end = data.len().checked_sub(4).ok_or(ParseError::UnexpectedEof)?;
+        let (head, tail) = data.split_at(end);
         let row_count = u32::from_be_bytes(tail.try_into().unwrap());
 
         if row_count > region_info.height {
@@ -123,29 +152,26 @@ pub(crate) fn parse<'a>(
 pub(crate) fn parse_adaptive_template_pixels(
     reader: &mut Reader<'_>,
     template: Template,
-    // TODO: Find a test with this flag.
-    _ext_template: bool,
 ) -> Result<[AdaptiveTemplatePixel; 4]> {
     let num_pixels = template.adaptive_template_pixels() as usize;
 
     let mut pixels = [AdaptiveTemplatePixel::default(); 4];
 
     for pixel in pixels.iter_mut().take(num_pixels) {
-        let x = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
-        let y = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
-
-        // Validate AT pixel location (6.2.5.4, Figure 7).
-        // AT pixels must reference already-decoded pixels:
-        // - y must be <= 0 (current row or above)
-        // - if y == 0, x must be < 0 (strictly to the left of current pixel)
-        if y > 0 || (y == 0 && x >= 0) {
-            bail!(TemplateError::InvalidAtPixel);
-        }
-
-        *pixel = AdaptiveTemplatePixel { x, y };
+        *pixel = parse_adaptive_template_pixel(reader)?;
     }
 
     Ok(pixels)
+}
+
+fn parse_adaptive_template_pixel(reader: &mut Reader<'_>) -> Result<AdaptiveTemplatePixel> {
+    let x = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
+    let y = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
+    // 6.2.5.4, Figure 7: signed-byte coordinates in the causal field.
+    if y > 0 || (y == 0 && x >= 0) {
+        bail!(TemplateError::InvalidAtPixel);
+    }
+    Ok(AdaptiveTemplatePixel { x, y })
 }
 
 /// Whether the adaptive template pixels correspond to the default ones.

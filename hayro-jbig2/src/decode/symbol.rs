@@ -862,7 +862,7 @@ pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<SymbolDictionaryHeade
     };
 
     let at_pixels = if !use_huffman {
-        parse_adaptive_template_pixels(reader, template, false)?
+        parse_adaptive_template_pixels(reader, template)?
     } else {
         // Unused.
         [AdaptiveTemplatePixel::default(); 4]

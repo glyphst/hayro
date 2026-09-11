@@ -743,3 +743,8 @@ fn init_page(
 mod halftone_samples;
 #[cfg(test)]
 mod halftone_tests;
+
+#[cfg(test)]
+mod generic_templates_samples;
+#[cfg(test)]
+mod generic_templates_tests;

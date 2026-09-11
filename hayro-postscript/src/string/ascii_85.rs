@@ -1,4 +1,5 @@
-// Keep in sync with `hayro-syntax/src/filter/ascii_85.rs`.
+// Keep group arithmetic and z placement in sync with the PDF stream filter.
+// The PostScript string parser has already consumed the surrounding <~ and ~>.
 
 use crate::reader::{Reader, is_whitespace};
 use alloc::vec::Vec;
@@ -54,12 +55,12 @@ pub(crate) fn decode_into(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
         Some(())
     };
 
-    out.reserve(data.len() * 4 / 5);
+    out.reserve(data.len() / 5 * 4);
     let mut group = Vec::with_capacity(5);
 
     loop {
         let Some(b) = read_byte() else {
-            // Be lenient and accept what we have (see PDFBOX-5910).
+            // The string parser has already consumed the EOD marker.
             flush_group(&mut group, out)?;
 
             return Some(());
@@ -74,7 +75,9 @@ pub(crate) fn decode_into(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
                 }
             }
             b'z' => {
-                flush_group(&mut group, out)?;
+                if !group.is_empty() {
+                    return None;
+                }
                 out.extend_from_slice(&[0, 0, 0, 0]);
             }
             b'~' => {

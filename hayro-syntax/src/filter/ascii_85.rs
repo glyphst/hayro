@@ -1,4 +1,5 @@
-// Keep in sync with `hayro-postscript/src/string/ascii_85.rs`.
+// Keep group arithmetic and z placement in sync with PostScript strings.
+// Unlike their already-delimited bodies, PDF streams require the ~> marker.
 
 use crate::reader::Reader;
 use crate::trivia::is_white_space_character;
@@ -9,12 +10,12 @@ pub(crate) fn decode(data: &[u8]) -> Option<Vec<u8>> {
 
     let mut reader = Reader::new(data);
 
-    let mut read_byte = || -> Option<u8> {
+    let mut read_byte = |skip_whitespace: bool| -> Option<u8> {
         loop {
             let b = reader.read_byte()?;
 
             // White space characters should be ignored.
-            if !is_white_space_character(b) {
+            if !skip_whitespace || !is_white_space_character(b) {
                 return Some(b);
             }
         }
@@ -55,16 +56,12 @@ pub(crate) fn decode(data: &[u8]) -> Option<Vec<u8>> {
         Some(())
     };
 
-    let mut decoded = Vec::with_capacity(data.len() * 4 / 5);
+    let mut decoded = Vec::with_capacity(data.len() / 5 * 4);
     let mut group = Vec::with_capacity(5);
 
     loop {
-        let Some(b) = read_byte() else {
-            // Be lenient and accept what we have (see PDFBOX-5910).
-            flush_group(&mut group, &mut decoded)?;
-
-            return Some(decoded);
-        };
+        // EOF without an EOD marker is a decoding failure, not a usable prefix.
+        let b = read_byte(true)?;
 
         match b {
             b'!'..=b'u' => {
@@ -75,12 +72,16 @@ pub(crate) fn decode(data: &[u8]) -> Option<Vec<u8>> {
                 }
             }
             b'z' => {
-                flush_group(&mut group, &mut decoded)?;
+                if !group.is_empty() {
+                    return None;
+                }
                 decoded.extend_from_slice(&[0, 0, 0, 0]);
             }
             b'~' => {
-                // Technically requires a '>', but there is a PDF where it isn't
-                // appended and decodes fine in other viewers.
+                // The two-byte EOD marker is contiguous (PDF 7.4.3).
+                if read_byte(false)? != b'>' {
+                    return None;
+                }
                 flush_group(&mut group, &mut decoded)?;
 
                 return Some(decoded);

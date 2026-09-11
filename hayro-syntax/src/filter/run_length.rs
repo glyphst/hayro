@@ -12,10 +12,9 @@ pub(crate) fn decode(data: &[u8]) -> Option<Vec<u8>> {
         match length {
             128 => break,
             0..=127 => {
-                // PDFBOX-3990, just abort early if stream is invalid.
-                let Some(bytes) = reader.read_bytes(length as usize + 1) else {
-                    break;
-                };
+                // A truncated run invalidates the complete stream, including
+                // any otherwise valid prefix (PDF 7.4.5).
+                let bytes = reader.read_bytes(length as usize + 1)?;
 
                 decoded.extend(bytes);
             }

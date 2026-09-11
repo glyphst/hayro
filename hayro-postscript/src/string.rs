@@ -282,6 +282,17 @@ mod tests {
     }
 
     #[test]
+    fn ascii85_z_cannot_interrupt_a_partial_group() {
+        for count in 1..=4 {
+            let mut input = b"<~z".to_vec();
+            input.extend(core::iter::repeat_n(b'!', count));
+            input.extend_from_slice(b"z~>");
+            assert!(decode_a85(&input).is_err(), "{count}");
+        }
+        assert_eq!(decode_a85(b"<~z!!~>").unwrap().as_slice(), &[0; 5]);
+    }
+
+    #[test]
     fn ascii85_with_whitespace() {
         assert_eq!(decode_a85(b"<~87cU RDZ~>").unwrap(), b"Hello");
     }

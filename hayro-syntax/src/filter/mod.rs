@@ -137,3 +137,6 @@ impl Filter {
         res
     }
 }
+
+#[cfg(test)]
+mod byte_filters_tests;

@@ -1,10 +1,16 @@
-// Keep in sync with `hayro-postscript/src/string/ascii_hex.rs`.
+// Hexadecimal digit decoding is shared with PDF strings and mirrored in
+// `hayro-postscript/src/string/ascii_hex.rs`; only stream filters own an EOD marker.
 
 use crate::trivia::is_white_space_character;
 use crate::util::ByteBuf;
 use alloc::vec::Vec;
 
 pub(crate) fn decode(data: &[u8]) -> Option<Vec<u8>> {
+    // PDF 7.4.2: an encoded stream includes its > end marker. PDF strings
+    // instead pass their already-delimited body directly to decode_into.
+    if !data.contains(&b'>') {
+        return None;
+    }
     decode_into(data)
 }
 
@@ -97,7 +103,11 @@ mod tests {
     // but used by PDF hex strings as well.
     fn decode_without_gt() {
         let input = b"AF3E2901";
-        assert_eq!(decode(input).unwrap(), vec![0xaf, 0x3e, 0x29, 0x01]);
+        assert!(decode(input).is_none());
+        assert_eq!(
+            super::decode_into::<Vec<u8>>(input).unwrap(),
+            vec![0xaf, 0x3e, 0x29, 0x01]
+        );
     }
 
     #[test]

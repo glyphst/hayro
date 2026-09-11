@@ -12,6 +12,7 @@ mod jbig2;
 mod jpx;
 pub(crate) mod lzw_flate;
 mod png;
+mod predictor;
 mod run_length;
 
 use crate::object::Dict;
@@ -140,3 +141,6 @@ impl Filter {
 
 #[cfg(test)]
 mod byte_filters_tests;
+
+#[cfg(test)]
+mod lzw_predictor_tests;

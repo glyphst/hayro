@@ -149,6 +149,7 @@ impl<'a> Stream<'a> {
 
             for filter in filters.raw_iter() {
                 let name = filter
+                    .map_err(|_| DecodeFailure::InvalidFilter)?
                     .resolve(self.dict.ctx())
                     .and_then(Object::into_name)
                     .ok_or(DecodeFailure::InvalidFilter)?;
@@ -156,7 +157,10 @@ impl<'a> Stream<'a> {
                 let params = match params.as_mut() {
                     None => Dict::default(),
                     Some(params) => {
-                        let raw = params.next().ok_or(DecodeFailure::StreamDecode)?;
+                        let raw = params
+                            .next()
+                            .ok_or(DecodeFailure::StreamDecode)?
+                            .map_err(|_| DecodeFailure::StreamDecode)?;
                         if raw.as_obj_ref().is_some_and(|reference| {
                             !self.dict.ctx().xref().contains_object(reference.into())
                         }) {

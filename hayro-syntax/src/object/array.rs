@@ -2,7 +2,7 @@
 
 use crate::object::macros::object;
 use crate::object::r#ref::MaybeRef;
-use crate::object::{FromBytes, Object, ObjectLike};
+use crate::object::{FromBytes, Object, ObjectLike, ObjectReadError};
 use crate::reader::Reader;
 use crate::reader::{Readable, ReaderContext, ReaderExt, Skippable};
 use alloc::vec::Vec;
@@ -27,6 +27,9 @@ impl PartialEq for Array<'_> {
 
 impl<'a> Array<'a> {
     /// Returns an iterator over the objects of the array.
+    ///
+    /// Unreadable values yield errors and retain their positions. Iteration
+    /// continues with the following value; nested containers remain lazy.
     pub fn raw_iter(&self) -> ArrayIter<'a> {
         ArrayIter::new(self.data, &self.ctx)
     }
@@ -59,7 +62,10 @@ impl Debug for Array<'_> {
         let mut debug_list = f.debug_list();
 
         self.raw_iter().for_each(|i| {
-            debug_list.entry(&i);
+            match i {
+                Ok(value) => debug_list.entry(&value),
+                Err(error) => debug_list.entry(&error),
+            };
         });
 
         debug_list.finish()
@@ -73,7 +79,10 @@ impl Display for Array<'_> {
             if index > 0 {
                 f.write_str(" ")?;
             }
-            Display::fmt(&item, f)?;
+            match item {
+                Ok(value) => Display::fmt(&value, f)?,
+                Err(error) => write!(f, "<{error}>")?,
+            }
         }
         f.write_str("]")
     }
@@ -132,23 +141,36 @@ impl<'a> ArrayIter<'a> {
 }
 
 impl<'a> Iterator for ArrayIter<'a> {
-    type Item = MaybeRef<Object<'a>>;
+    type Item = Result<MaybeRef<Object<'a>>, ObjectReadError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.reader.skip_white_spaces_and_comments();
 
         if !self.reader.at_end() {
-            // Objects are already guaranteed to be valid.
-            let item = self
+            let offset = self.reader.offset();
+            if let Some(item) = self
                 .reader
                 .read_with_context::<MaybeRef<Object<'_>>>(&self.ctx)
-                .unwrap();
-            return Some(item);
+            {
+                return Some(Ok(item));
+            }
+            // The failed read restores the cursor. Skip the indexed lexical
+            // object without decoding it so the error cannot hide the tail.
+            if self
+                .reader
+                .skip::<MaybeRef<Object<'_>>>(self.ctx.in_content_stream())
+                .is_none()
+            {
+                self.reader.jump_to_end();
+            }
+            return Some(Err(ObjectReadError { offset }));
         }
 
         None
     }
 }
+
+impl core::iter::FusedIterator for ArrayIter<'_> {}
 
 /// An iterator over the array that resolves objects of a specific type.
 pub struct ResolvedArrayIter<'a, T> {
@@ -190,6 +212,15 @@ impl<'a> FlexArrayIter<'a> {
         }
     }
 
+    fn next_checked<T: ObjectLike<'a>>(&mut self) -> Option<Result<T, ()>> {
+        self.reader.skip_white_spaces_and_comments();
+        if self.reader.at_end() {
+            None
+        } else {
+            Some(self.next::<T>().ok_or(()))
+        }
+    }
+
     #[allow(
         private_bounds,
         reason = "users shouldn't be able to implement `ObjectLike` for custom objects."
@@ -214,15 +245,15 @@ impl<'a, T: ObjectLike<'a> + Copy + Default, const C: usize> TryFrom<Array<'a>> 
     type Error = ();
 
     fn try_from(value: Array<'a>) -> Result<Self, Self::Error> {
-        let mut iter = value.iter::<T>();
+        let mut iter = value.flex_iter();
 
         let mut val = [T::default(); C];
 
         for i in 0..C {
-            val[i] = iter.next().ok_or(())?;
+            val[i] = iter.next_checked::<T>().ok_or(())??;
         }
 
-        if iter.next().is_some() {
+        if iter.next_checked::<T>().is_some() {
             warn!("found excess elements in array");
 
             return Err(());
@@ -259,7 +290,8 @@ impl<'a, T: ObjectLike<'a>> TryFrom<Array<'a>> for Vec<T> {
     type Error = ();
 
     fn try_from(value: Array<'a>) -> Result<Self, Self::Error> {
-        Ok(value.iter::<T>().collect())
+        let mut iter = value.flex_iter();
+        core::iter::from_fn(|| iter.next_checked::<T>()).collect()
     }
 }
 
@@ -289,7 +321,8 @@ impl<'a, U: ObjectLike<'a>, T: ObjectLike<'a> + smallvec::Array<Item = U>> TryFr
     type Error = ();
 
     fn try_from(value: Array<'a>) -> Result<Self, Self::Error> {
-        Ok(value.iter::<U>().collect())
+        let mut iter = value.flex_iter();
+        core::iter::from_fn(|| iter.next_checked::<U>()).collect()
     }
 }
 
@@ -341,7 +374,7 @@ mod tests {
     fn array_ref_impl(data: &[u8]) -> Option<Vec<MaybeRef<Object<'_>>>> {
         Reader::new(data)
             .read_with_context::<Array<'_>>(&ReaderContext::new(XRef::dummy(), false))
-            .map(|a| a.raw_iter().collect::<Vec<_>>())
+            .and_then(|a| a.raw_iter().collect::<Result<Vec<_>, _>>().ok())
     }
 
     #[test]
@@ -440,5 +473,42 @@ mod tests {
         let array = Array::from_bytes(b"[  34 % comment\n /Test  [1   2] ]").unwrap();
 
         assert_eq!(format!("{array}"), "[34 /Test [1 2]]");
+    }
+    #[test]
+    fn lazy_syntax_errors_retain_positions_and_fuse_at_end() {
+        let array = Array::from_bytes(b"[1 + 2 + ]").unwrap();
+        let mut iter = array.raw_iter();
+        assert!(iter.next().unwrap().is_ok());
+        assert_eq!(iter.next().unwrap().unwrap_err().offset(), 2);
+        assert!(iter.next().unwrap().is_ok());
+        assert_eq!(iter.next().unwrap().unwrap_err().offset(), 6);
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+        assert_eq!(
+            format!("{array}"),
+            "[1 <unreadable object at byte 2> 2 <unreadable object at byte 6>]"
+        );
+    }
+
+    #[test]
+    fn typed_container_conversion_rejects_wrong_types_failed_reads_and_references() {
+        for bytes in [
+            b"[1 + ]".as_slice(),
+            b"[1 /Wrong]",
+            b"[1 50 0 R]",
+            b"[1 + 2]",
+            b"[+ 1]",
+        ] {
+            let array = Array::from_bytes(bytes).unwrap();
+            assert!(Vec::<i32>::try_from(array.clone()).is_err(), "{bytes:?}");
+            assert!(
+                smallvec::SmallVec::<[i32; 4]>::try_from(array.clone()).is_err(),
+                "{bytes:?}"
+            );
+            assert!(<[i32; 1]>::try_from(array).is_err(), "{bytes:?}");
+        }
+        let array = Array::from_bytes(b"[1 % trailing comment\n ]").unwrap();
+        assert_eq!(Vec::<i32>::try_from(array.clone()), Ok(vec![1]));
+        assert_eq!(<[i32; 1]>::try_from(array), Ok([1]));
     }
 }

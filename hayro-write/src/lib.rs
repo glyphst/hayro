@@ -60,7 +60,7 @@ pub fn extract<'a>(
 
     // Now we have shallowly extracted all pages, now go through all dependencies until there aren't
     // any anymore.
-    write_dependencies(pdf, &mut ctx);
+    write_dependencies(pdf, &mut ctx)?;
 
     let mut global_chunk = Chunk::with_settings(chunk_settings);
 
@@ -115,6 +115,14 @@ impl ExtractionQuery {
 pub enum ExtractionError {
     /// An invalid page index was given.
     InvalidPageIndex(usize),
+    /// A container value needed for extraction could not be decoded.
+    UnreadableObject(hayro_syntax::object::ObjectReadError),
+}
+
+impl From<hayro_syntax::object::ObjectReadError> for ExtractionError {
+    fn from(error: hayro_syntax::object::ObjectReadError) -> Self {
+        Self::UnreadableObject(error)
+    }
 }
 
 /// The result of an extraction.
@@ -179,7 +187,7 @@ impl<'a> ExtractionContext<'a> {
     }
 }
 
-fn write_dependencies(pdf: &Pdf, ctx: &mut ExtractionContext<'_>) {
+fn write_dependencies(pdf: &Pdf, ctx: &mut ExtractionContext<'_>) -> Result<(), ExtractionError> {
     while let Some(ref_) = ctx.to_visit_refs.pop() {
         // Don't visit objects twice!
         if ctx.visited_objects.contains(&ref_) {
@@ -189,7 +197,7 @@ fn write_dependencies(pdf: &Pdf, ctx: &mut ExtractionContext<'_>) {
         let mut chunk = Chunk::with_settings(ctx.chunk_settings);
         if let Some(object) = pdf.xref().get::<Object<'_>>(ref_.into()) {
             let new_ref = ctx.map_ref(ref_);
-            object.write_indirect(&mut chunk, new_ref, ctx);
+            object.write_indirect(&mut chunk, new_ref, ctx)?;
             ctx.chunks.push(chunk);
 
             ctx.visited_objects.insert(ref_);
@@ -197,6 +205,7 @@ fn write_dependencies(pdf: &Pdf, ctx: &mut ExtractionContext<'_>) {
             warn!("failed to extract object with ref: {ref_:?}");
         }
     }
+    Ok(())
 }
 
 /// Extract the given pages from the PDF and resave them as a new PDF. This function shouldn't be
@@ -345,10 +354,10 @@ fn write_page(
     let raw_dict = page.raw();
 
     if let Some(group) = raw_dict.get_raw::<Object<'_>>(GROUP) {
-        group.write_direct(pdf_page.insert(Name(GROUP)), ctx);
+        group.write_direct(pdf_page.insert(Name(GROUP)), ctx)?;
     }
 
-    serialize_resources(page.resources(), ctx, &mut pdf_page);
+    serialize_resources(page.resources(), ctx, &mut pdf_page)?;
 
     pdf_page.finish();
 
@@ -387,12 +396,12 @@ fn write_xobject(
         i[5] as f32,
     ]);
 
-    serialize_resources(page.resources(), ctx, &mut x_object);
+    serialize_resources(page.resources(), ctx, &mut x_object)?;
 
     let raw_dict = page.raw();
 
     if let Some(group) = raw_dict.get_raw::<Object<'_>>(GROUP) {
-        group.write_direct(x_object.insert(Name(GROUP)), ctx);
+        group.write_direct(x_object.insert(Name(GROUP)), ctx)?;
     }
 
     x_object.finish();
@@ -405,14 +414,14 @@ fn serialize_resources(
     resources: &Resources<'_>,
     ctx: &mut ExtractionContext<'_>,
     writer: &mut impl ResourcesExt,
-) {
-    let ext_g_states = collect_resources(resources, |r| r.ext_g_states.clone());
-    let shadings = collect_resources(resources, |r| r.shadings.clone());
-    let patterns = collect_resources(resources, |r| r.patterns.clone());
-    let x_objects = collect_resources(resources, |r| r.x_objects.clone());
-    let color_spaces = collect_resources(resources, |r| r.color_spaces.clone());
-    let fonts = collect_resources(resources, |r| r.fonts.clone());
-    let properties = collect_resources(resources, |r| r.properties.clone());
+) -> Result<(), ExtractionError> {
+    let ext_g_states = collect_resources(resources, |r| r.ext_g_states.clone())?;
+    let shadings = collect_resources(resources, |r| r.shadings.clone())?;
+    let patterns = collect_resources(resources, |r| r.patterns.clone())?;
+    let x_objects = collect_resources(resources, |r| r.x_objects.clone())?;
+    let color_spaces = collect_resources(resources, |r| r.color_spaces.clone())?;
+    let fonts = collect_resources(resources, |r| r.fonts.clone())?;
+    let properties = collect_resources(resources, |r| r.properties.clone())?;
 
     // Resource dictionary is always required (unless it can be inherited), so
     // let's just be safe and always write it.
@@ -424,7 +433,7 @@ fn serialize_resources(
                 let mut dict = resources.insert(Name($key)).dict();
 
                 for (name, obj) in $name {
-                    obj.write_direct(dict.insert(Name(name.deref())), ctx);
+                    obj.write_direct(dict.insert(Name(name.deref())), ctx)?;
                 }
             }
         };
@@ -437,34 +446,36 @@ fn serialize_resources(
     write!(color_spaces, COLORSPACE);
     write!(fonts, FONT);
     write!(properties, PROPERTIES);
+    Ok(())
 }
 
 fn collect_resources<'a>(
     resources: &Resources<'a>,
     get_dict: impl FnMut(&Resources<'a>) -> Dict<'a> + Clone,
-) -> BTreeMap<hayro_syntax::object::Name<'a>, MaybeRef<Object<'a>>> {
+) -> Result<BTreeMap<hayro_syntax::object::Name<'a>, MaybeRef<Object<'a>>>, ExtractionError> {
     let mut map = BTreeMap::new();
-    collect_resources_inner(resources, get_dict, &mut map);
-    map
+    collect_resources_inner(resources, get_dict, &mut map)?;
+    Ok(map)
 }
 
 fn collect_resources_inner<'a>(
     resources: &Resources<'a>,
     mut get_dict: impl FnMut(&Resources<'a>) -> Dict<'a> + Clone,
     map: &mut BTreeMap<hayro_syntax::object::Name<'a>, MaybeRef<Object<'a>>>,
-) {
+) -> Result<(), ExtractionError> {
     // Process parents first, so that duplicates get overridden by the current dictionary.
     // Since for inheritance, the current dictionary always has priority over entries in the
     // parent dictionary.
     if let Some(parent) = resources.parent() {
-        collect_resources_inner(parent, get_dict.clone(), map);
+        collect_resources_inner(parent, get_dict.clone(), map)?;
     }
 
     let dict = get_dict(resources);
 
     for (name, object) in dict.entries() {
-        map.insert(name, object);
+        map.insert(name, object?);
     }
+    Ok(())
 }
 
 pub(crate) fn deflate_encode(data: &[u8]) -> Vec<u8> {
@@ -498,5 +509,73 @@ impl ResourcesExt for pdf_writer::writers::Page<'_> {
 impl ResourcesExt for pdf_writer::writers::FormXObject<'_> {
     fn resources(&mut self) -> pdf_writer::writers::Resources<'_> {
         Self::resources(self)
+    }
+}
+
+#[cfg(test)]
+mod lazy_tests {
+    use super::*;
+
+    fn document(resource: &str, object: &str) -> Pdf {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 16 16] /Resources << /Properties << /P {resource} >> >> >>"
+            ),
+            object.to_owned(),
+        ];
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let mut offsets = vec![0];
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+        for offset in &offsets[1..] {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!("trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        Pdf::new(bytes).unwrap()
+    }
+
+    #[test]
+    fn unreadable_direct_resources_and_dependencies_fail_extraction() {
+        for (resource, object) in [
+            ("+ ", "null"),
+            ("[1 + 2]", "null"),
+            ("<< /A + /B 2 >>", "null"),
+            ("4 0 R", "[1 + 2]"),
+        ] {
+            let pdf = document(resource, object);
+            let mut next = Ref::new(1);
+            let result = extract(
+                &pdf,
+                Box::new(|| next.bump()),
+                ChunkSettings::default(),
+                &[ExtractionQuery::new_page(0)],
+            );
+            match result {
+                Err(ExtractionError::UnreadableObject(_)) => {}
+                Ok(result) => assert!(matches!(
+                    result.root_refs.as_slice(),
+                    [Err(ExtractionError::UnreadableObject(_))]
+                )),
+                _ => panic!("unexpected extraction result"),
+            }
+        }
+        let pdf = document("[1 2]", "null");
+        let mut next = Ref::new(1);
+        let result = extract(
+            &pdf,
+            Box::new(|| next.bump()),
+            ChunkSettings::default(),
+            &[ExtractionQuery::new_page(0)],
+        )
+        .unwrap();
+        assert!(result.root_refs[0].is_ok());
     }
 }

@@ -224,7 +224,11 @@ impl Resolver<'_> {
         };
         if let Some(array) = dict.get::<Array<'_>>(OCGS) {
             for item in array.raw_iter() {
-                add(item.as_obj_ref().ok_or(Error::InvalidMembership)?.into())?;
+                add(item
+                    .map_err(|_| Error::InvalidMembership)?
+                    .as_obj_ref()
+                    .ok_or(Error::InvalidMembership)?
+                    .into())?;
             }
         } else if let Some(id) = dict.get_ref(OCGS) {
             add(id.into())?;
@@ -244,7 +248,7 @@ impl Resolver<'_> {
         self.charge(depth)?;
         let mut items = array.raw_iter();
         let operator = match items.next() {
-            Some(MaybeRef::NotRef(Object::Name(name))) => name,
+            Some(Ok(MaybeRef::NotRef(Object::Name(name)))) => name,
             _ => return Err(Error::InvalidExpression),
         };
         if !matches!(operator.as_ref(), b"And" | b"Or" | b"Not") {
@@ -255,7 +259,7 @@ impl Resolver<'_> {
             if operator.as_ref() == b"Not" && !operands.is_empty() {
                 return Err(Error::InvalidExpression);
             }
-            let operand = self.operand(item, depth + 1)?;
+            let operand = self.operand(item.map_err(|_| Error::InvalidExpression)?, depth + 1)?;
             Self::append(&mut operands, operand)?;
         }
         if operands.is_empty() {

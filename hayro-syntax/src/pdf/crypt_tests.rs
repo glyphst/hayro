@@ -14,6 +14,9 @@ use fixtures as crypt_filters;
 #[path = "string_exemptions.rs"]
 mod string_exemptions;
 
+#[path = "crypt_lazy_tests.rs"]
+mod lazy;
+
 #[path = "crypt_string_tests.rs"]
 mod strings;
 

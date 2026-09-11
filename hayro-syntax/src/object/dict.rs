@@ -2,7 +2,7 @@
 
 use crate::object::macros::object;
 use crate::object::r#ref::{MaybeRef, ObjRef};
-use crate::object::{Name, ObjectIdentifier};
+use crate::object::{Name, ObjectIdentifier, ObjectReadError};
 use crate::object::{Object, ObjectLike};
 use crate::reader::Reader;
 use crate::reader::{Readable, ReaderContext, ReaderExt, Skippable};
@@ -96,12 +96,23 @@ impl<'a> Dict<'a> {
     }
 
     /// An iterator over all entries in the dictionary, sorted by key.
-    pub fn entries(&self) -> impl Iterator<Item = (Name<'a>, MaybeRef<Object<'a>>)> + '_ {
-        let mut sorted_keys = self.keys().collect::<Vec<_>>();
-        sorted_keys.sort_by(|n1, n2| n1.as_ref().cmp(n2.as_ref()));
-        sorted_keys.into_iter().map(|k| {
-            let obj = self.get_raw(k.deref()).unwrap();
-            (k, obj)
+    ///
+    /// An unreadable value yields an error alongside its key. Nested containers
+    /// remain lazy; errors do not remove keys or prevent later entries being read.
+    pub fn entries(
+        &self,
+    ) -> impl Iterator<Item = (Name<'a>, Result<MaybeRef<Object<'a>>, ObjectReadError>)> + '_ {
+        let mut sorted = self
+            .offsets()
+            .into_iter()
+            .flat_map(|offsets| offsets.iter())
+            .collect::<Vec<_>>();
+        sorted.sort_by(|(a, _), (b, _)| a.as_ref().cmp(b.as_ref()));
+        sorted.into_iter().map(|(key, &offset)| {
+            (
+                key.clone(),
+                self.get_raw(key.deref()).ok_or(ObjectReadError { offset }),
+            )
         })
     }
 
@@ -145,11 +156,13 @@ impl Debug for Dict<'_> {
 
             for (key, val) in offsets {
                 r.jump(*val);
-                debug_struct.field(
-                    &format!("{:?}", key.as_str()),
-                    &r.read_with_context::<MaybeRef<Object<'_>>>(&ReaderContext::dummy())
-                        .unwrap(),
-                );
+                let name = format!("{:?}", key.as_str());
+                // Preserve Debug's raw-syntax context, without assuming a
+                // successful syntax scan proves every value can be decoded.
+                match r.read_with_context::<MaybeRef<Object<'_>>>(&ReaderContext::dummy()) {
+                    Some(value) => debug_struct.field(&name, &value),
+                    None => debug_struct.field(&name, &ObjectReadError { offset: *val }),
+                };
             }
         }
 
@@ -164,7 +177,10 @@ impl Display for Dict<'_> {
             f.write_str(" ")?;
             Display::fmt(&key, f)?;
             f.write_str(" ")?;
-            Display::fmt(&value, f)?;
+            match value {
+                Ok(value) => Display::fmt(&value, f)?,
+                Err(error) => write!(f, "<{error}>")?,
+            }
         }
         if !self.is_empty() {
             f.write_str(" ")?;

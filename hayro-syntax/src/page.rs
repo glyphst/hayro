@@ -370,7 +370,10 @@ impl<'a> Page<'a> {
                 if let Object::Array(array) = contents {
                     let mut collected = vec![];
                     for member in array.raw_iter() {
-                        let object = resolve_content_object(member, self.inner.ctx())?;
+                        let object = resolve_content_object(
+                            member.map_err(|_| PageStreamError::InvalidContents)?,
+                            self.inner.ctx(),
+                        )?;
                         let stream = content_stream(object)?;
                         let data = stream.decoded().map_err(PageStreamError::Decode)?;
                         collected.extend_from_slice(&data);

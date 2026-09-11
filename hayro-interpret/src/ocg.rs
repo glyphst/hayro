@@ -49,7 +49,7 @@ impl OcgState {
             && let Some(ocgs) = oc_properties.get::<Array<'_>>(OCGS)
         {
             for item in ocgs.raw_iter() {
-                if let Some(ref_) = item.as_obj_ref() {
+                if let Some(ref_) = item.ok().and_then(|item| item.as_obj_ref()) {
                     let id: ObjectIdentifier = ref_.into();
                     inactive.insert(id);
                 }
@@ -59,7 +59,7 @@ impl OcgState {
         let mut read_ocg_array = |key, insert_active: bool| {
             if let Some(arr) = config.get::<Array<'_>>(key) {
                 for item in arr.raw_iter() {
-                    if let Some(ref_) = item.as_obj_ref() {
+                    if let Some(ref_) = item.ok().and_then(|item| item.as_obj_ref()) {
                         let id: ObjectIdentifier = ref_.into();
                         if insert_active {
                             inactive.remove(&id);

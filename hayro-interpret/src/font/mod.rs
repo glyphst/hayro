@@ -16,7 +16,7 @@ use bitflags::bitflags;
 use hayro_syntax::object::Name;
 use hayro_syntax::object::dict::keys::SUBTYPE;
 use hayro_syntax::object::dict::keys::*;
-use hayro_syntax::object::{Dict, Rect, Stream};
+use hayro_syntax::object::{Array, Dict, Object, Rect, Stream};
 use hayro_syntax::page::Resources;
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, BezPath, Vec2};
@@ -39,6 +39,20 @@ mod type1;
 pub(crate) mod type3;
 
 pub(crate) const UNITS_PER_EM: f32 = 1000.0;
+
+/// Decode an exact `ExtGState` Font pair without accepting a valid prefix.
+///
+/// The caller handles null or absent dictionary entries before calling this.
+/// This checks the pair and size; font-specific interpretation checks the dictionary.
+pub fn read_ext_g_state_font(array: Array<'_>) -> Option<(Dict<'_>, f32)> {
+    if array.raw_iter().take(3).count() != 2 {
+        return None;
+    }
+    let mut entries = array.iter::<Object<'_>>();
+    let font = entries.next()?.into_dict()?;
+    let size = entries.next()?.into_number()?.as_f32();
+    size.is_finite().then_some((font, size))
+}
 
 /// Resolve nominal vertical text metrics in PDF's 1,000-unit glyph space.
 ///

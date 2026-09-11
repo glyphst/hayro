@@ -702,6 +702,9 @@ impl<'a> Context<'a> {
         if let Some(resolved) = resolved {
             Some(TextStateFont::Font(resolved))
         } else {
+            if is_type3 {
+                (self.settings.warning_sink)(crate::InterpreterWarning::UnsupportedFont);
+            }
             Font::new_standard(StandardFont::Helvetica, &self.settings.font_resolver)
                 .map(TextStateFont::Fallback)
         }

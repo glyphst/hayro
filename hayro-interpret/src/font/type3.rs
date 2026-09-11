@@ -2,12 +2,11 @@ use crate::CMapResolverFn;
 use crate::context::Context;
 use crate::device::Device;
 use crate::font::glyph_simulator::GlyphSimulator;
-use crate::font::true_type::{Width, read_encoding, read_widths};
+use crate::font::true_type::read_encoding;
 use crate::font::{
     Encoding, GlyphRun, Type3Glyph, UNITS_PER_EM, glyph_name_to_bf_string, read_to_unicode,
 };
 use crate::interpret::state::TextState;
-use crate::util::RectExt;
 use crate::x_object::soft_mask::SoftMask;
 use crate::{BlendMode, interpret};
 use crate::{CacheKey, ClipPath, DrawMode, DrawProps, ImageDrawProps};
@@ -15,9 +14,11 @@ use crate::{Image, Paint};
 use hayro_cmap::{BfString, CMap};
 use hayro_syntax::content::TypedIter;
 use hayro_syntax::content::ops::TypedInstruction;
-use hayro_syntax::object::Dict;
 use hayro_syntax::object::Stream;
-use hayro_syntax::object::dict::keys::{CHAR_PROCS, FONT_BBOX, FONT_MATRIX, RESOURCES};
+use hayro_syntax::object::dict::keys::{
+    CHAR_PROCS, FIRST_CHAR, FONT_BBOX, FONT_MATRIX, LAST_CHAR, RESOURCES, WIDTHS,
+};
+use hayro_syntax::object::{Array, Dict, Number};
 use hayro_syntax::page::Resources;
 use kurbo::{Affine, BezPath, Point, Rect};
 use rustc_hash::FxHashMap;
@@ -25,8 +26,7 @@ use skrifa::GlyphId;
 
 #[derive(Debug)]
 pub(crate) struct Type3<'a> {
-    widths: Vec<Width>,
-    missing_width: f32,
+    widths: [f32; 256],
     encoding: Encoding,
     encodings: FxHashMap<u8, String>,
     dict: Dict<'a>,
@@ -40,16 +40,23 @@ pub(crate) struct Type3<'a> {
 impl<'a> Type3<'a> {
     pub(crate) fn new(dict: &Dict<'a>, cmap_resolver: &CMapResolverFn) -> Option<Self> {
         let (encoding, encodings) = read_encoding(dict);
-        let (widths, missing_width) = read_widths(dict, dict)?;
-        let font_bbox = dict
-            .get::<hayro_syntax::object::Rect>(FONT_BBOX)
-            .unwrap_or(hayro_syntax::object::Rect::ZERO)
-            .to_kurbo();
-
-        let matrix = Affine::new(
-            dict.get::<[f64; 6]>(FONT_MATRIX)
-                .unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]),
+        let widths = read_type3_widths(dict)?;
+        let bbox = dict.get::<[f64; 4]>(FONT_BBOX)?;
+        let coefficients = dict.get::<[f64; 6]>(FONT_MATRIX)?;
+        if !bbox
+            .iter()
+            .chain(coefficients.iter())
+            .all(|value| value.is_finite())
+        {
+            return None;
+        }
+        let font_bbox = Rect::new(
+            bbox[0].min(bbox[2]),
+            bbox[1].min(bbox[3]),
+            bbox[0].max(bbox[2]),
+            bbox[1].max(bbox[3]),
         );
+        let matrix = Affine::new(coefficients);
 
         let char_procs = {
             let mut procs = FxHashMap::default();
@@ -72,7 +79,6 @@ impl<'a> Type3<'a> {
             font_bbox,
             char_procs,
             widths,
-            missing_width,
             encodings,
             matrix,
             dict: dict.clone(),
@@ -87,15 +93,14 @@ impl<'a> Type3<'a> {
     }
 
     pub(crate) fn glyph_width(&self, code: u8) -> f32 {
-        let w = match self.widths.get(code as usize).copied() {
-            Some(Width::Value(w)) => w,
-            _ => self.missing_width,
-        };
+        let w = self.widths[code as usize];
+        // Table 112 projects a Type 3 width onto the text-space x axis even
+        // when FontMatrix rotates or skews the glyph. Translation is excluded.
         (w * self.matrix.as_coeffs()[0] as f32) * UNITS_PER_EM
     }
 
     pub(crate) fn glyph_nominal_quad(&self) -> [Point; 4] {
-        let transform = self.matrix * Affine::scale(UNITS_PER_EM as f64);
+        let transform = Affine::scale(UNITS_PER_EM as f64) * self.matrix;
         [
             transform * Point::new(self.font_bbox.x0, self.font_bbox.y0),
             transform * Point::new(self.font_bbox.x1, self.font_bbox.y0),
@@ -127,7 +132,7 @@ impl<'a> Type3<'a> {
     ) -> Option<()> {
         let mut state = glyph.state.clone();
         let root_transform =
-            transform * glyph_transform * self.matrix * Affine::scale(UNITS_PER_EM as f64);
+            transform * glyph_transform * Affine::scale(UNITS_PER_EM as f64) * self.matrix;
         state.ctm = root_transform;
 
         // Not sure if this is mentioned anywhere, but I do think we need to reset the text state
@@ -194,6 +199,27 @@ impl<'a> Type3<'a> {
 
         Some(())
     }
+}
+
+fn read_type3_widths(dict: &Dict<'_>) -> Option<[f32; 256]> {
+    let first = usize::from(u8::try_from(dict.get::<Number>(FIRST_CHAR)?.as_i64_exact()?).ok()?);
+    let last = usize::from(u8::try_from(dict.get::<Number>(LAST_CHAR)?.as_i64_exact()?).ok()?);
+    let count = last.checked_sub(first)?.checked_add(1)?;
+    let array = dict.get::<Array<'_>>(WIDTHS)?;
+    // Bound work and storage before decoding; a valid prefix never supplies
+    // defaults for missing, unreadable, or trailing entries.
+    if array.raw_iter().take(count + 1).count() != count {
+        return None;
+    }
+    let values = Vec::<f32>::try_from(array).ok()?;
+    if values.len() != count || !values.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    // Table 112 defines zero outside FirstChar..=LastChar. MissingWidth is a
+    // metric for other simple fonts and does not override this Type 3 rule.
+    let mut widths = [0.0; 256];
+    widths[first..=last].copy_from_slice(&values);
+    Some(widths)
 }
 
 fn encoded_glyph_name<'a>(
@@ -292,9 +318,100 @@ impl<'a, T: Device<'a>> Device<'a> for Type3ShapeGlyphDevice<'a, '_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::encoded_glyph_name;
+    use super::{Type3, encoded_glyph_name, read_type3_widths};
+    use crate::CMapResolverFn;
     use crate::font::Encoding;
+    use hayro_syntax::object::{Array, Dict, FromBytes};
     use rustc_hash::FxHashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn graphics_state_font_pairs_require_complete_reads() {
+        for bytes in [b"[<< >> 12]".as_slice(), b"[<< >> -1.5]", b"[<< >> 0]"] {
+            assert!(
+                crate::font::read_ext_g_state_font(Array::from_bytes(bytes).unwrap()).is_some()
+            );
+        }
+        for bytes in [
+            b"[<< >> 12 /Extra]".as_slice(),
+            b"[<< >> 12 null]",
+            b"[<< >>]",
+            b"[null 12]",
+            b"[999 0 R 12]",
+            b"[<< >> null]",
+            b"[<< >> 999 0 R]",
+            b"[<< >> /Bad]",
+            b"[<< >> 1000000000000000000000000000000000000000]",
+        ] {
+            assert!(
+                crate::font::read_ext_g_state_font(Array::from_bytes(bytes).unwrap()).is_none(),
+                "{bytes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn type3_widths_are_complete_bounded_and_zero_outside_the_range() {
+        let dict = Dict::from_bytes(
+            b"<< /FirstChar 65 /LastChar 66 /Widths [600.25 -900.5] /MissingWidth 1234 >>",
+        )
+        .unwrap();
+        let widths = read_type3_widths(&dict).unwrap();
+        assert_eq!(widths[65..=66], [600.25, -900.5]);
+        assert_eq!(widths[64], 0.0);
+        assert_eq!(widths[67], 0.0);
+        for bytes in [
+            b"<< /FirstChar 65 /LastChar 66 /Widths [600] >>".as_slice(),
+            b"<< /FirstChar 65 /LastChar 66 /Widths [600 900 /Bad] >>",
+            b"<< /FirstChar 65 /LastChar 66 /Widths [600 /Bad] >>",
+            b"<< /FirstChar 65 /LastChar 66 /Widths [600 null] >>",
+            b"<< /FirstChar 65 /LastChar 66 /Widths [600 999 0 R] >>",
+            b"<< /FirstChar 256 /LastChar 256 /Widths [600] >>",
+            b"<< /FirstChar 4294967295 /LastChar 4294967295 /Widths [600] >>",
+            b"<< /FirstChar -1 /LastChar 0 /Widths [600 900] >>",
+            b"<< /FirstChar 66 /LastChar 65 /Widths [] >>",
+            b"<< /FirstChar 65.5 /LastChar 65 /Widths [600] >>",
+            b"<< /FirstChar 65 /LastChar 66 >>",
+        ] {
+            assert!(
+                read_type3_widths(&Dict::from_bytes(bytes).unwrap()).is_none(),
+                "{bytes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn affine_type3_geometry_keeps_horizontal_projected_advances() {
+        let resolver: CMapResolverFn = Arc::new(|_| None);
+        let dict = Dict::from_bytes(b"<< /FirstChar 65 /LastChar 65 /Widths [600] /FontBBox [600 700 0 0] /FontMatrix [.0006 .0008 -.0008 .0006 .1 -.2] >>").unwrap();
+        let font = Type3::new(&dict, &resolver).unwrap();
+        assert!((font.glyph_width(65) - 360.0).abs() < 0.0001);
+        assert_eq!(font.glyph_width(66), 0.0);
+        for (actual, expected) in font.glyph_nominal_quad().iter().zip([
+            (100.0, -200.0),
+            (460.0, 280.0),
+            (-100.0, 700.0),
+            (-460.0, 220.0),
+        ]) {
+            assert!((actual.x - expected.0).abs() < 1e-9);
+            assert!((actual.y - expected.1).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn type3_geometry_never_defaults_after_failed_required_reads() {
+        let resolver: CMapResolverFn = Arc::new(|_| None);
+        for geometry in [
+            "/FontBBox [0 0 600 700]",
+            "/FontMatrix [.001 0 0 .001 0 0]",
+            "/FontBBox [0 0 600 700 /Bad] /FontMatrix [.001 0 0 .001 0 0]",
+            "/FontBBox [0 0 600 700] /FontMatrix [.001 0 0 .001 0 0 /Bad]",
+            "/FontBBox [0 0 600 700] /FontMatrix null",
+        ] {
+            let bytes = format!("<< /FirstChar 65 /LastChar 65 /Widths [600] {geometry} >>");
+            assert!(Type3::new(&Dict::from_bytes(bytes.as_bytes()).unwrap(), &resolver).is_none());
+        }
+    }
 
     #[test]
     fn differences_override_the_base_encoding() {

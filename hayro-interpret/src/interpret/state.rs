@@ -460,14 +460,19 @@ pub(crate) fn handle_gs_single<'a>(
             context.get_mut().graphics_state.blend_mode = BlendMode::Normal;
         }
         "Font" => {
-            let arr = dict.get::<Array<'_>>(FONT)?;
-            let mut iter = arr.iter::<Object<'_>>();
-            let font_dict = iter.next()?.into_dict()?;
-            let size = iter.next()?.into_number()?.as_f32();
-
-            let font = context.resolve_font(&font_dict);
-            context.get_mut().text_state.font_size = size;
-            context.get_mut().text_state.font = font;
+            if dict.is_null_or_absent(FONT) {
+                return Some(());
+            }
+            if let Some((font_dict, size)) = dict
+                .get::<Array<'_>>(FONT)
+                .and_then(crate::font::read_ext_g_state_font)
+            {
+                let font = context.resolve_font(&font_dict);
+                context.get_mut().text_state.font_size = size;
+                context.get_mut().text_state.font = font;
+            } else {
+                (context.settings.warning_sink)(crate::InterpreterWarning::UnsupportedFont);
+            }
         }
         "D" => {
             // Null dictionary values have the same meaning as absent entries.

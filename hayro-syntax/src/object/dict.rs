@@ -88,6 +88,18 @@ impl<'a> Dict<'a> {
         Reader::new(&self.data()[offset..]).read_with_context::<ObjRef>(self.ctx())
     }
 
+    /// Whether an entry has PDF's absent-value semantics: a missing key, null,
+    /// or a reference to an undefined object. A defined but unreadable value
+    /// is not null and must still be diagnosed by the consuming operation.
+    pub fn is_null_or_absent(&self, key: impl AsRef<[u8]>) -> bool {
+        let key = key.as_ref();
+        !self.contains_key(key)
+            || self
+                .get_ref(key)
+                .is_some_and(|reference| !self.ctx().xref().contains_object(reference.into()))
+            || matches!(self.get::<Object<'_>>(key), Some(Object::Null(_)))
+    }
+
     /// Returns an iterator over all keys in the dictionary.
     pub fn keys(&self) -> impl Iterator<Item = Name<'a>> + '_ {
         self.offsets()
@@ -1217,5 +1229,21 @@ mod tests {
 
         assert_eq!(format!("{dict}"), "<< /A << /X true >> /B [1 2] >>");
         assert_eq!(format!("{}", Dict::empty()), "<<>>");
+    }
+
+    #[test]
+    fn null_dictionary_entries_include_undefined_references() {
+        let dict = Dict::from_bytes(
+            b"<< /Null null /Undefined 99 0 R /Number 3 /Array [null] /Name /Null >>",
+        )
+        .unwrap();
+        for key in ["Missing", "Null", "Undefined"] {
+            assert!(dict.is_null_or_absent(key));
+        }
+        for key in ["Number", "Array", "Name"] {
+            assert!(!dict.is_null_or_absent(key));
+        }
+        assert!(dict.contains_key("Null"));
+        assert!(dict.contains_key("Undefined"));
     }
 }

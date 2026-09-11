@@ -470,17 +470,20 @@ pub(crate) fn handle_gs_single<'a>(
             context.get_mut().text_state.font = font;
         }
         "D" => {
-            let arr = dict.get::<Array<'_>>(key)?;
-            let mut iter = arr.iter::<Object<'_>>();
-            let dash_array = iter.next()?.into_array()?;
-            let dash_phase = iter.next()?.into_number()?.as_f32();
-
-            context.get_mut().graphics_state.stroke_props.dash_offset = dash_phase;
-            context.get_mut().graphics_state.stroke_props.dash_array = dash_array
-                .iter::<f32>()
-                // kurbo apparently cannot properly deal with offsets that are exactly 0.
-                .map(|n| if n == 0.0 { 0.01 } else { n })
-                .collect();
+            // Null dictionary values have the same meaning as absent entries.
+            if dict.is_null_or_absent(&key) {
+                return Some(());
+            }
+            if let Some(pattern) = dict
+                .get::<Array<'_>>(key)
+                .and_then(super::DashPattern::from_ext_g_state)
+            {
+                let stroke = &mut context.get_mut().graphics_state.stroke_props;
+                stroke.dash_offset = pattern.phase;
+                stroke.dash_array = pattern.array;
+            } else {
+                (context.settings.warning_sink)(crate::InterpreterWarning::DashPatternFailure);
+            }
         }
         "Type" => {}
         _ => {}

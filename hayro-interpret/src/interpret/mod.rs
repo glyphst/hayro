@@ -35,10 +35,12 @@ use smallvec::smallvec;
 use std::mem::size_of;
 use std::sync::Arc;
 
+mod dash;
 pub(crate) mod path;
 pub(crate) mod state;
 pub(crate) mod text;
 
+pub use dash::DashPattern;
 pub use state::ActiveTransferFunction;
 
 const KNOWN_MARKED_CONTENT_KEYS: [&[u8]; 11] = [
@@ -407,6 +409,8 @@ pub enum InterpreterWarning {
     ImageDecodeFailure,
     /// A selected transfer definition or evaluated component was invalid.
     TransferFunctionFailure,
+    /// A selected line dash declaration could not be decoded completely.
+    DashPatternFailure,
     /// An image color-space declaration or selected default could not be resolved.
     ImageColorSpace(crate::color::ImageColorSpaceError),
     /// A selected paint or shading color space could not be resolved exactly.
@@ -819,12 +823,13 @@ pub fn interpret<'a>(
                 context.get_mut().graphics_state.none_stroke_cs = cs;
             }
             TypedInstruction::DashPattern(p) => {
-                context.get_mut().graphics_state.stroke_props.dash_offset = p.1.as_f32();
-                // kurbo apparently cannot properly deal with offsets that are exactly 0.
-                context.get_mut().graphics_state.stroke_props.dash_array =
-                    p.0.iter::<f32>()
-                        .map(|n| if n == 0.0 { 0.01 } else { n })
-                        .collect();
+                if let Some(pattern) = DashPattern::new(p.0, p.1) {
+                    let stroke = &mut context.get_mut().graphics_state.stroke_props;
+                    stroke.dash_offset = pattern.phase;
+                    stroke.dash_array = pattern.array;
+                } else {
+                    (context.settings.warning_sink)(InterpreterWarning::DashPatternFailure);
+                }
             }
             TypedInstruction::RenderingIntent(value) => {
                 let (intent, unknown) = crate::color::RenderingIntent::from_name(value.0);

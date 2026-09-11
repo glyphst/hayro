@@ -738,3 +738,8 @@ fn init_page(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod halftone_samples;
+#[cfg(test)]
+mod halftone_tests;

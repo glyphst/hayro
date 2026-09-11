@@ -4,7 +4,7 @@ use super::{AdaptiveTemplatePixel, Template, generic};
 use crate::ScratchBuffers;
 use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use crate::bitmap::{Bitmap, WORD_BITS, Word};
-use crate::error::{OverflowError, ParseError, Result};
+use crate::error::{FormatError, OverflowError, ParseError, Result, TemplateError, bail};
 use crate::reader::Reader;
 use alloc::vec::Vec;
 
@@ -15,6 +15,14 @@ pub(crate) fn decode(
 ) -> Result<PatternDictionary> {
     let pattern_width = header.pattern_width as u32;
     let pattern_height = header.pattern_height as u32;
+    // Table 27 derives -HDPW in the Figure 7 adaptive field. Negate before
+    // narrowing so width 128 yields -128; wider arithmetic patterns are invalid.
+    // MMR has no adaptive pixel and permits the full pattern-width byte range.
+    let adaptive_x = if header.mmr {
+        0
+    } else {
+        i8::try_from(-i16::from(header.pattern_width)).map_err(|_| TemplateError::InvalidAtPixel)?
+    };
     let num_patterns = header
         .num_patterns
         .checked_add(1)
@@ -37,7 +45,7 @@ pub(crate) fn decode(
         let at_pixels = match header.template {
             Template::Template0 => [
                 AdaptiveTemplatePixel {
-                    x: -(pattern_width as i8),
+                    x: adaptive_x,
                     y: 0,
                 },
                 AdaptiveTemplatePixel { x: -3, y: -1 },
@@ -46,7 +54,7 @@ pub(crate) fn decode(
             ],
             Template::Template1 | Template::Template2 | Template::Template3 => [
                 AdaptiveTemplatePixel {
-                    x: -(pattern_width as i8),
+                    x: adaptive_x,
                     y: 0,
                 },
                 // Unused.
@@ -200,6 +208,9 @@ pub(crate) struct PatternDictionaryHeader<'a> {
 pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<PatternDictionaryHeader<'a>> {
     let flags_byte = reader.read_byte().ok_or(ParseError::UnexpectedEof)?;
     let mmr = flags_byte & 0x01 != 0;
+    if flags_byte & 0xf8 != 0 || (mmr && flags_byte & 0x06 != 0) {
+        bail!(FormatError::ReservedBits);
+    }
     let template = Template::from_byte(flags_byte >> 1);
     let pattern_width = reader
         .read_nonzero_byte()

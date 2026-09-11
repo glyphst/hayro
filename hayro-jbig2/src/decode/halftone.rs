@@ -8,7 +8,7 @@ use super::pattern::PatternDictionary;
 use super::{CombinationOperator, RegionSegmentInfo, Template, parse_region_segment_info};
 use crate::ScratchBuffers;
 use crate::bitmap::{Bitmap, MAX_DIMENSION, WORD_BITS};
-use crate::error::{OverflowError, ParseError, RegionError, Result, bail};
+use crate::error::{FormatError, OverflowError, ParseError, RegionError, Result, bail};
 use crate::gray_scale::{GrayScaleParams, decode_gray_scale_image};
 use crate::reader::Reader;
 
@@ -52,7 +52,7 @@ pub(crate) fn decode_into(
     let bits_per_pixel = (pattern_dict.patterns.len() as u32)
         .saturating_sub(1)
         .checked_ilog2()
-        .map_or(1, |n| n + 1);
+        .map_or(0, |n| n + 1);
 
     // "4) Decode an image GI of size HGW by HGH with HBPP bits per pixel using
     // the gray-scale image decoding procedure as described in Annex C." (6.6.5)
@@ -78,6 +78,9 @@ pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<HalftoneRegionHeader<
     let region_info = parse_region_segment_info(reader)?;
     let flags_byte = reader.read_byte().ok_or(ParseError::UnexpectedEof)?;
     let mmr = flags_byte & 0x01 != 0;
+    if mmr && flags_byte & 0x0e != 0 {
+        bail!(FormatError::ReservedBits);
+    }
     let template = Template::from_byte(flags_byte >> 1);
     let enable_skip = flags_byte & 0x08 != 0;
     let combination_operator = CombinationOperator::from_value(flags_byte >> 4)?;
@@ -98,8 +101,8 @@ pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<HalftoneRegionHeader<
         bail!(OverflowError::GridDimension);
     }
 
-    // TODO: Check grid offsets as well.
-
+    // Offsets use the full signed range. GridCoords accumulates in i64; the
+    // bounded grid dimensions and vectors keep shifted pixel coordinates in i32.
     let grid_horizontal_offset = reader.read_i32().ok_or(ParseError::UnexpectedEof)?;
     let grid_vertical_offset = reader.read_i32().ok_or(ParseError::UnexpectedEof)?;
 
@@ -326,9 +329,6 @@ fn render_patterns(
                 let first_word = xu / WORD_BITS;
                 let offset = xu % WORD_BITS;
                 let two = offset != 0 && first_word + 1 < stride;
-
-                // TODO: It seems our current test suite only triggers for
-                // `Or`.
 
                 match op {
                     CombinationOperator::Or => {

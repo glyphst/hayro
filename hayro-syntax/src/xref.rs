@@ -293,6 +293,7 @@ impl XRef {
             map: Arc::new(RwLock::new(MapRepr { xref_map, repaired })),
             decryptor: Arc::new(Decryptor::None),
             encryption_info: None,
+            encryption_obj_id: None,
             has_ocgs: false,
             metadata: Arc::new(Metadata::default()),
             trailer_data,
@@ -303,7 +304,7 @@ impl XRef {
         // time to resolve the catalog dictionary, etc. This allows us to support catalog dictionaries
         // that are stored in an encrypted object stream.
 
-        let (decryptor, encryption_info) = {
+        let (decryptor, encryption_info, encryption_obj_id) = {
             match input {
                 XRefInput::TrailerDictData(trailer_dict_data) => {
                     let mut r = Reader::new(trailer_dict_data);
@@ -314,7 +315,7 @@ impl XRef {
 
                     get_decryptor(&trailer_dict, password)?
                 }
-                XRefInput::RootRef(_) => (Decryptor::None, None),
+                XRefInput::RootRef(_) => (Decryptor::None, None, None),
             }
         };
 
@@ -324,6 +325,7 @@ impl XRef {
                 let mutable = Arc::make_mut(r);
                 mutable.decryptor = Arc::new(decryptor.clone());
                 mutable.encryption_info = encryption_info;
+                mutable.encryption_obj_id = encryption_obj_id;
             }
         }
 
@@ -386,7 +388,7 @@ impl XRef {
         Ok(xref)
     }
 
-    fn is_repaired(&self) -> bool {
+    pub(crate) fn is_repaired(&self) -> bool {
         match &self.0 {
             Inner::Dummy => false,
             Inner::Some(r) => {
@@ -516,6 +518,14 @@ impl XRef {
         }
     }
 
+    /// PDF 1.7 §§7.6.1 and 7.5.8.2 exempt encryption and `XRef` dictionary strings.
+    pub(crate) fn strings_need_decryption(&self, ctx: &ReaderContext<'_>) -> bool {
+        self.needs_decryption(ctx)
+            && !ctx.unencrypted_strings()
+            && !matches!(&self.0, Inner::Some(repr)
+                if repr.encryption_obj_id.is_some() && repr.encryption_obj_id == ctx.obj_number())
+    }
+
     #[inline]
     pub(crate) fn decrypt(
         &self,
@@ -578,6 +588,8 @@ impl XRef {
         let mut ctx = ctx.clone();
         ctx.set_obj_number(id);
         ctx.set_in_content_stream(false);
+        // Dictionary-local exemptions follow direct children, never references.
+        ctx.set_unencrypted_strings(false);
 
         match entry {
             EntryType::Normal(offset) => {
@@ -702,6 +714,7 @@ struct SomeRepr {
     metadata: Arc<Metadata>,
     decryptor: Arc<Decryptor>,
     encryption_info: Option<EncryptionInfo>,
+    encryption_obj_id: Option<ObjectIdentifier>,
     has_ocgs: bool,
     password: Zeroizing<Vec<u8>>,
     trailer_data: TrailerData,
@@ -1068,7 +1081,7 @@ fn read_xref_table_trailer<'a>(
 fn get_decryptor(
     trailer_dict: &Dict<'_>,
     password: &[u8],
-) -> Result<(Decryptor, Option<EncryptionInfo>), XRefError> {
+) -> Result<(Decryptor, Option<EncryptionInfo>, Option<ObjectIdentifier>), XRefError> {
     if let Some(encryption_dict) = trailer_dict.get::<Dict<'_>>(ENCRYPT) {
         let id = if let Some(id) = trailer_dict
             .get::<Array<'_>>(ID)
@@ -1081,10 +1094,10 @@ fn get_decryptor(
         };
 
         get(&encryption_dict, &id, password)
-            .map(|(decryptor, info)| (decryptor, Some(info)))
+            .map(|(decryptor, info)| (decryptor, Some(info), encryption_dict.obj_id()))
             .map_err(XRefError::Encryption)
     } else {
-        Ok((Decryptor::None, None))
+        Ok((Decryptor::None, None, None))
     }
 }
 

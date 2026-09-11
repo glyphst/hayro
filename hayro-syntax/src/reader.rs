@@ -118,6 +118,7 @@ struct ReaderContextData<'a> {
     xref: &'a XRef,
     in_content_stream: bool,
     in_object_stream: bool,
+    unencrypted_strings: bool,
     obj_number: Option<ObjectIdentifier>,
     parent_chain: SmallVec<[ObjectIdentifier; 8]>,
 }
@@ -139,6 +140,7 @@ impl<'a> ReaderContext<'a> {
             in_content_stream,
             obj_number: None,
             in_object_stream: false,
+            unencrypted_strings: false,
             parent_chain: smallvec![],
         })))
     }
@@ -208,6 +210,21 @@ impl<'a> ReaderContext<'a> {
         match &mut self.0 {
             ReaderContextInner::Shared(inner) => Arc::make_mut(inner).in_object_stream = val,
             ReaderContextInner::Dummy { .. } => {}
+        }
+    }
+
+    #[inline]
+    pub(crate) fn unencrypted_strings(&self) -> bool {
+        match &self.0 {
+            ReaderContextInner::Shared(inner) => inner.unencrypted_strings,
+            ReaderContextInner::Dummy { .. } => false,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set_unencrypted_strings(&mut self, val: bool) {
+        if let ReaderContextInner::Shared(inner) = &mut self.0 {
+            Arc::make_mut(inner).unencrypted_strings = val;
         }
     }
 

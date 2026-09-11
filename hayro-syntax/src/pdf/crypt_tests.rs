@@ -8,6 +8,14 @@ use crate::{PasswordAuthentication, Pdf};
 #[allow(dead_code)]
 #[path = "crypt_fixtures.rs"]
 mod fixtures;
+use fixtures as crypt_filters;
+
+#[allow(dead_code)]
+#[path = "string_exemptions.rs"]
+mod string_exemptions;
+
+#[path = "crypt_string_tests.rs"]
+mod strings;
 
 #[test]
 fn independent_standard_crypt_filters_decrypt_exactly_for_both_password_roles() {

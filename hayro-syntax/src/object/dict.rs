@@ -203,7 +203,24 @@ impl Skippable for Dict<'_> {
 
 impl<'a> Readable<'a> for Dict<'a> {
     fn read(r: &mut Reader<'a>, ctx: &ReaderContext<'a>) -> Option<Self> {
-        read_inner(r, ctx, Some(b"<<"), b">>")
+        let mut dict = read_inner(r, ctx, Some(b"<<"), b">>")?;
+        if ctx.xref().strings_need_decryption(ctx) {
+            // Set the context before any lazy string reads, including callers
+            // that request just the dictionary of an indirect stream object.
+            // Type is required to be direct in a cross-reference stream.
+            let mut following = r.clone();
+            following.skip_white_spaces_and_comments();
+            if following.forward_tag(b"stream").is_some()
+                && following
+                    .peek_byte()
+                    .is_some_and(|byte| matches!(byte, b'\r' | b'\n'))
+                && matches!(dict.get_raw::<Name<'_>>(b"Type"), Some(MaybeRef::NotRef(name)) if name.as_ref() == b"XRef")
+                && let Inner::Some(repr) = &mut dict.0
+            {
+                Arc::get_mut(repr)?.ctx.set_unencrypted_strings(true);
+            }
+        }
+        Some(dict)
     }
 }
 

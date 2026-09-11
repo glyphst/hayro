@@ -112,7 +112,7 @@ impl<'a> Readable<'a> for String<'a> {
         };
 
         // Apply decryption if needed.
-        let final_data = if ctx.xref().needs_decryption(ctx) {
+        let final_data = if ctx.xref().strings_need_decryption(ctx) {
             if let Some(obj_number) = ctx.obj_number() {
                 StringInner::from(ctx.xref().decrypt(
                     obj_number,

@@ -148,3 +148,6 @@ mod lzw_predictor_tests;
 
 #[cfg(test)]
 mod flate_tests;
+
+#[cfg(all(test, feature = "images"))]
+mod ccitt_tests;

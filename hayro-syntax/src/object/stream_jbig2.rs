@@ -1,4 +1,4 @@
-//! JBIG2 image dictionary contracts (PDF 1.7 §7.4.7 and Table 89).
+//! Bilevel image dictionary contracts (PDF 1.7 §§7.4.6–7.4.7 and Table 89).
 use super::{DecodeFailure, Dict, Object};
 use crate::object::dict::keys::*;
 
@@ -7,6 +7,16 @@ use crate::object::dict::keys::*;
 /// Callers must identify the filter first. This does not decode compressed data
 /// or resolve the colour space; its component count is checked during decoding.
 pub fn validate_jbig2_image_dictionary(dict: &Dict<'_>) -> Result<(), DecodeFailure> {
+    validate_bilevel_image_dictionary(dict)
+}
+
+/// Validate a CCITT image dictionary before decoding or consulting an image cache.
+/// The caller must first identify the CCITT filter; generic streams are exempt.
+pub fn validate_ccitt_image_dictionary(dict: &Dict<'_>) -> Result<(), DecodeFailure> {
+    validate_bilevel_image_dictionary(dict)
+}
+
+fn validate_bilevel_image_dictionary(dict: &Dict<'_>) -> Result<(), DecodeFailure> {
     let entry = |short, long| {
         optional_entry(
             dict,

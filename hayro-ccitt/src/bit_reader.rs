@@ -62,6 +62,33 @@ impl<'a> BitReader<'a> {
         self.bit_offset >> 3
     }
 
+    pub(crate) fn bit_offset(&self) -> usize {
+        self.bit_offset
+    }
+
+    pub(crate) fn only_padding(&self) -> bool {
+        let mut trial = self.clone();
+        // At most the unused tail of the current byte can be padding.
+        if self.data.len().saturating_sub(self.byte_pos()) > usize::from(self.bit_pos() != 0) {
+            return false;
+        }
+        while !trial.at_end() {
+            if trial.read_bit() != Ok(0) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn align_zero(&mut self) -> Result<()> {
+        while self.bit_pos() != 0 {
+            if self.read_bit()? != 0 {
+                return Err(DecodeError::InvalidCode);
+            }
+        }
+        Ok(())
+    }
+
     #[inline(always)]
     fn bit_pos(&self) -> usize {
         self.bit_offset & 7

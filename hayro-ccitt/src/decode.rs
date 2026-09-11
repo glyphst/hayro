@@ -15,6 +15,8 @@ pub(crate) enum Mode {
     Horizontal,
     /// Vertical mode with offset (T.4 Section 4.2.1.3.2b, T.6 Section 2.2.3.2).
     Vertical(i8),
+    /// Uncompressed extension (T.4 Table 5, T.6 Table 4).
+    Uncompressed,
 }
 
 impl BitReader<'_> {
@@ -55,30 +57,12 @@ impl BitReader<'_> {
         }
     }
 
-    /// Decode a white run length.
-    #[inline(always)]
-    fn decode_white_run(&mut self) -> Result<u32> {
-        self.decode_run_inner(&WHITE_STATES)
-            // See 0506179.pdf. We are lenient and check whether perhaps
-            // the opposite color works.
-            .or_else(|_| self.decode_run_inner(&BLACK_STATES))
-    }
-
-    /// Decode a black run length.
-    #[inline(always)]
-    fn decode_black_run(&mut self) -> Result<u32> {
-        self.decode_run_inner(&BLACK_STATES)
-            // See 0506179.pdf. We are lenient and check whether perhaps
-            // the opposite color works.
-            .or_else(|_| self.decode_run_inner(&WHITE_STATES))
-    }
-
     /// Decode a run length for the specified color.
     #[inline(always)]
     pub(crate) fn decode_run(&mut self, color: Color) -> Result<u32> {
         match color {
-            Color::White => self.decode_white_run(),
-            Color::Black => self.decode_black_run(),
+            Color::White => self.decode_run_inner(&WHITE_STATES),
+            Color::Black => self.decode_run_inner(&BLACK_STATES),
         }
     }
 
@@ -110,7 +94,11 @@ impl BitReader<'_> {
         }
 
         if self.read_bit()? == 0 {
-            return Err(DecodeError::InvalidCode);
+            return if self.read_bits(4)? == 0b1111 {
+                Ok(Mode::Uncompressed)
+            } else {
+                Err(DecodeError::InvalidCode)
+            };
         }
 
         Ok(if self.read_bit()? == 1 {
@@ -120,39 +108,19 @@ impl BitReader<'_> {
         })
     }
 
-    /// Read EOL (End-of-Line) codes if present (T.4 Section 4.1.2).
-    ///
-    /// EOL is defined as `000000000001` (11 zeros followed by a 1).
-    /// Fill bits (T.4 Section 4.1.3) may precede the EOL as a variable-length
-    /// string of zeros.
-    #[inline(always)]
-    pub(crate) fn read_eol_if_available(&mut self) -> usize {
-        let mut count = 0;
-
-        // T.4 Section 4.1.2: EOL = 000000000001
-        // T.4 Section 4.1.3: Fill = variable length string of 0s before EOL
-        loop {
-            let mut fill_bits = 0;
-
-            // Let's limit the maximum number of fill bits to prevent
-            // exponential explosion in malformed files.
-            const MAX_FILL_BITS: usize = 24;
-
-            while fill_bits < MAX_FILL_BITS {
-                match self.peak_bits(fill_bits + 1) {
-                    Ok(0) => fill_bits += 1,
-                    _ => break,
-                }
-            }
-
-            if fill_bits >= 11 && self.peak_bits(fill_bits + 1) == Ok(1) {
-                // Found EOL with fill bits, consume all of it.
-                self.read_bits(fill_bits + 1).unwrap();
-                count += 1;
-                continue;
-            }
-
-            return count;
+    /// Consume one EOL, including arbitrarily long zero fill, in linear time.
+    pub(crate) fn read_eol(&mut self) -> bool {
+        let mut trial = self.clone();
+        let mut zeros = 0;
+        while trial.read_bit() == Ok(0) {
+            zeros += 1;
+        }
+        // The failed read must have been a one, not the end of the stream.
+        if zeros >= 11 && trial.bit_offset() > self.bit_offset() + zeros {
+            *self = trial;
+            true
+        } else {
+            false
         }
     }
 }

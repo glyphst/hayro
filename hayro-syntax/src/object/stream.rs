@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 #[path = "stream_jbig2.rs"]
 mod jbig2;
 pub(crate) use jbig2::optional_entry;
-pub use jbig2::validate_jbig2_image_dictionary;
+pub use jbig2::{validate_ccitt_image_dictionary, validate_jbig2_image_dictionary};
 
 struct FiltersAndParams<'a> {
     filters: SmallVec<[Filter; 2]>,
@@ -341,6 +341,15 @@ impl<'a> Stream<'a> {
         {
             validate_jbig2_image_dictionary(&self.dict)?;
         }
+        let ccitt_image = filters_and_params.filters.contains(&Filter::CcittFaxDecode)
+            && (image
+                || self
+                    .dict
+                    .get::<Name<'_>>(SUBTYPE)
+                    .is_some_and(|name| name.as_ref() == b"Image"));
+        if ccitt_image {
+            validate_ccitt_image_dictionary(&self.dict)?;
+        }
         let data = self.raw_data();
 
         let mut current: Option<FilterResult<'a>> = None;
@@ -407,6 +416,29 @@ impl<'a> Stream<'a> {
             current = Some(new);
         }
 
+        if ccitt_image && filters_and_params.filters.last() == Some(&Filter::CcittFaxDecode) {
+            use crate::object::dict::keys::{H, HEIGHT, W, WIDTH};
+            let width = self
+                .dict
+                .get::<u32>(W)
+                .or_else(|| self.dict.get::<u32>(WIDTH))
+                .ok_or(DecodeFailure::StreamDecode)?;
+            let height = self
+                .dict
+                .get::<u32>(H)
+                .or_else(|| self.dict.get::<u32>(HEIGHT))
+                .ok_or(DecodeFailure::StreamDecode)?;
+            let needed = (width as usize)
+                .div_ceil(8)
+                .checked_mul(height as usize)
+                .ok_or(DecodeFailure::StreamDecode)?;
+            if current
+                .as_ref()
+                .is_none_or(|result| result.data.len() < needed)
+            {
+                return Err(DecodeFailure::StreamDecode);
+            }
+        }
         Ok(current.unwrap_or(FilterResult {
             data,
             image_data: None,

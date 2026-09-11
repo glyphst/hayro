@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 mod blob;
 mod cid;
+mod cid_metrics;
 mod generated;
 mod glyph_simulator;
 pub(crate) mod outline;

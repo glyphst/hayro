@@ -1,4 +1,5 @@
 use crate::font::blob::{CffFontBlob, OpenTypeFontBlob, Type1FontBlob};
+use crate::font::cid_metrics::CidMetrics;
 use crate::font::generated::glyph_names;
 use crate::font::standard_font::select_standard_font;
 use crate::font::true_type::{MAX_EMBEDDED_UNICODE_CMAP_MAPPINGS, collect_cmap_unicodes};
@@ -29,7 +30,7 @@ pub(crate) struct Type0Font {
     cache_key: u128,
     dw: f32,
     dw2: (f32, f32),
-    widths: FxHashMap<u32, f32>,
+    widths: FxHashMap<u32, [f32; 1]>,
     encoding: CMap,
     to_unicode: Option<CMap>,
     widths2: FxHashMap<u32, [f32; 3]>,
@@ -60,10 +61,12 @@ impl Type0Font {
 
         let horizontal = cmap.metadata().writing_mode != Some(WritingMode::Vertical);
 
-        let descendant_font = dict
-            .get::<Array<'_>>(DESCENDANT_FONTS)?
-            .iter::<Dict<'_>>()
-            .next()?;
+        let descendants = dict.get::<Array<'_>>(DESCENDANT_FONTS)?;
+        if descendants.raw_iter().take(2).count() != 1 {
+            return None;
+        }
+        let descendant_font = descendants.iter::<Dict<'_>>().next()?;
+        let metrics = CidMetrics::read(&descendant_font, horizontal)?;
         let font_descriptor = descendant_font
             .get::<Dict<'_>>(FONT_DESC)
             .unwrap_or_default();
@@ -103,20 +106,6 @@ impl Type0Font {
         };
         let text_metrics = resolve_font_text_metrics(&font_descriptor, font_type.text_metrics());
 
-        let default_width = descendant_font.get::<f32>(DW).unwrap_or(1000.0);
-        let dw2 = descendant_font
-            .get::<[f32; 2]>(DW2)
-            .map(|v| (v[0], v[1]))
-            .unwrap_or((880.0, -1000.0));
-
-        let widths = descendant_font
-            .get::<Array<'_>>(W)
-            .and_then(|a| read_widths(&a))
-            .unwrap_or_default();
-        let widths2 = descendant_font
-            .get::<Array<'_>>(W2)
-            .and_then(|a| read_widths2(&a))
-            .unwrap_or_default();
         let cid_to_gid_map = CidToGIdMap::new(&descendant_font).unwrap_or_default();
         let cache_key = dict.cache_key();
 
@@ -164,10 +153,10 @@ impl Type0Font {
             encoding: cmap,
             to_unicode,
             font_type,
-            dw: default_width,
-            dw2,
-            widths,
-            widths2,
+            dw: metrics.dw,
+            dw2: metrics.dw2,
+            widths: metrics.widths,
+            widths2: metrics.widths2,
             cid_to_gid_map,
             postscript_name,
             font_flags,
@@ -293,7 +282,7 @@ impl Type0Font {
             && let Some(actual_width) = t.glyph_metrics().advance_width(glyph)
             // Only use an expected width if there is an explicit /W array,
             // not the default width, as it leads to weird results from my testing.
-            && let Some(expected_width) = self.widths.get(&cid).copied()
+            && let Some([expected_width]) = self.widths.get(&cid).copied()
         {
             return stretch_glyph(path, expected_width, actual_width);
         }
@@ -383,7 +372,7 @@ impl Type0Font {
     }
 
     fn horizontal_width(&self, cid: u32) -> f32 {
-        self.widths.get(&cid).copied().unwrap_or(self.dw)
+        self.widths.get(&cid).map_or(self.dw, |[width]| *width)
     }
 
     pub(crate) fn is_horizontal(&self) -> bool {
@@ -556,54 +545,6 @@ impl CidToGIdMap {
             }
         }
     }
-}
-
-fn read_widths(arr: &Array<'_>) -> Option<FxHashMap<u32, f32>> {
-    let mut map = FxHashMap::default();
-    let mut iter = arr.flex_iter();
-
-    loop {
-        if let Some((mut first, range)) = iter.next::<(u32, Array<'_>)>() {
-            for width in range.iter::<f32>() {
-                map.insert(first, width);
-                first = first.checked_add(1)?;
-            }
-        } else if let Some((first, second, width)) = iter.next::<(u32, u32, f32)>() {
-            for i in first..=second {
-                map.insert(i, width);
-            }
-        } else {
-            break;
-        }
-    }
-
-    Some(map)
-}
-
-fn read_widths2(arr: &Array<'_>) -> Option<FxHashMap<u32, [f32; 3]>> {
-    let mut map = FxHashMap::default();
-    let mut iter = arr.flex_iter();
-
-    loop {
-        if let Some((mut first, range)) = iter.next::<(u32, Array<'_>)>() {
-            let mut iter = range.iter::<f32>();
-
-            while let Some(w) = iter.next() {
-                let v1 = iter.next()?;
-                let v2 = iter.next()?;
-                map.insert(first, [w, v1, v2]);
-                first = first.checked_add(1)?;
-            }
-        } else if let Some((first, second, w, v1, v2)) = iter.next::<(u32, u32, f32, f32, f32)>() {
-            for i in first..=second {
-                map.insert(i, [w, v1, v2]);
-            }
-        } else {
-            break;
-        }
-    }
-
-    Some(map)
 }
 
 fn read_cid_system_info(descendant_font: &Dict<'_>) -> Option<CharacterCollection> {

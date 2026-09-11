@@ -114,10 +114,11 @@ impl<'a> Readable<'a> for String<'a> {
         // Apply decryption if needed.
         let final_data = if ctx.xref().needs_decryption(ctx) {
             if let Some(obj_number) = ctx.obj_number() {
-                ctx.xref()
-                    .decrypt(obj_number, decoded.as_ref(), DecryptionTarget::String)
-                    .map(StringInner::from)
-                    .unwrap_or(decoded)
+                StringInner::from(ctx.xref().decrypt(
+                    obj_number,
+                    decoded.as_ref(),
+                    DecryptionTarget::String,
+                )?)
             } else {
                 decoded
             }

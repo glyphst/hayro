@@ -1,15 +1,14 @@
 //! Streams.
 
-use crate::crypto::DecryptionTarget;
 use crate::filter::Filter;
 use crate::object;
 use crate::object::Dict;
 use crate::object::Name;
+use crate::object::ObjectIdentifier;
 use crate::object::dict::keys::{
     BITS_PER_COMPONENT, BPC, DECODE_PARMS, DP, F, FILTER, FLATE_DECODE, FLATE_DECODE_ABBREVIATION,
-    JPX_DECODE, LENGTH, SMASK_IN_DATA, SUBTYPE, TYPE,
+    JPX_DECODE, LENGTH, SMASK_IN_DATA, SUBTYPE,
 };
-use crate::object::{Array, ObjectIdentifier};
 use crate::object::{Object, ObjectLike, ObjectRefLike};
 use crate::reader::Reader;
 use crate::reader::{Readable, ReaderContext, ReaderExt, Skippable};
@@ -20,6 +19,8 @@ use alloc::vec::Vec;
 use core::fmt::{Debug, Display, Formatter};
 use smallvec::SmallVec;
 
+#[path = "stream_crypt.rs"]
+mod crypt;
 #[path = "stream_jbig2.rs"]
 mod jbig2;
 pub(crate) use jbig2::optional_entry;
@@ -121,20 +122,30 @@ impl<'a> Stream<'a> {
         };
         if let Some(Object::Name(name)) = filters {
             let filter = Filter::from_name(name).ok_or(DecodeFailure::InvalidFilter)?;
-            let params = self
-                .dict
-                .get::<Dict<'_>>(DP)
-                .or_else(|| self.dict.get::<Dict<'_>>(DECODE_PARMS))
-                .unwrap_or_default();
+            let key = if self.dict.contains_key(DP) {
+                DP
+            } else {
+                DECODE_PARMS
+            };
+            let params = match optional_entry(&self.dict, key)? {
+                None => Dict::default(),
+                Some(Object::Dict(params)) => params,
+                _ => return Err(DecodeFailure::StreamDecode),
+            };
 
             collected_filters.push(filter);
             collected_params.push(params);
         } else if let Some(Object::Array(filters)) = filters {
-            let mut params = self
-                .dict
-                .get::<Array<'_>>(DP)
-                .or_else(|| self.dict.get::<Array<'_>>(DECODE_PARMS))
-                .map(|a| a.iter::<Object<'_>>());
+            let key = if self.dict.contains_key(DP) {
+                DP
+            } else {
+                DECODE_PARMS
+            };
+            let mut params = match optional_entry(&self.dict, key)? {
+                None => None,
+                Some(Object::Array(params)) => Some(params.raw_iter()),
+                _ => return Err(DecodeFailure::StreamDecode),
+            };
 
             for filter in filters.raw_iter() {
                 let name = filter
@@ -142,14 +153,32 @@ impl<'a> Stream<'a> {
                     .and_then(Object::into_name)
                     .ok_or(DecodeFailure::InvalidFilter)?;
                 let filter = Filter::from_name(name).ok_or(DecodeFailure::InvalidFilter)?;
-                let params = params
-                    .as_mut()
-                    .and_then(|p| p.next())
-                    .and_then(|p| p.into_dict())
-                    .unwrap_or_default();
+                let params = match params.as_mut() {
+                    None => Dict::default(),
+                    Some(params) => {
+                        let raw = params.next().ok_or(DecodeFailure::StreamDecode)?;
+                        if raw.as_obj_ref().is_some_and(|reference| {
+                            !self.dict.ctx().xref().contains_object(reference.into())
+                        }) {
+                            Dict::default()
+                        } else {
+                            match raw.resolve(self.dict.ctx()) {
+                                Some(Object::Null(_)) => Dict::default(),
+                                Some(Object::Dict(params)) => params,
+                                _ => return Err(DecodeFailure::StreamDecode),
+                            }
+                        }
+                    }
+                };
 
                 collected_filters.push(filter);
                 collected_params.push(params);
+            }
+            if params
+                .as_mut()
+                .is_some_and(|params| params.next().is_some())
+            {
+                return Err(DecodeFailure::StreamDecode);
             }
         } else if !matches!(filters, None | Some(Object::Null(_))) {
             return Err(DecodeFailure::InvalidFilter);
@@ -161,28 +190,11 @@ impl<'a> Stream<'a> {
         })
     }
 
-    /// Return the raw, decrypted data of the stream.
-    ///
-    /// Stream filters will not be applied.
+    /// Return raw data after implicit document decryption, without stream filters.
+    /// Explicit `Crypt` data remains encoded, like other explicitly filtered data.
+    /// A failure yields empty data; use [`Self::raw_data_checked`] to retain errors.
     pub fn raw_data(&self) -> Cow<'a, [u8]> {
-        let ctx = self.dict.ctx();
-
-        if ctx.xref().needs_decryption(ctx)
-            && self
-                .dict
-                .get::<object::String<'_>>(TYPE)
-                .map(|t| t.as_ref() != b"XRef")
-                .unwrap_or(true)
-        {
-            Cow::Owned(
-                ctx.xref()
-                    .decrypt(self.obj_id(), self.data, DecryptionTarget::Stream)
-                    // TODO: MAybe an error would be better?
-                    .unwrap_or_default(),
-            )
-        } else {
-            Cow::Borrowed(self.data)
-        }
+        self.raw_data_checked().unwrap_or_default()
     }
 
     /// Return the raw, underlying dictionary of the stream.
@@ -249,7 +261,9 @@ impl<'a> Stream<'a> {
         }
 
         if !self.dict.contains_key(FILTER) {
-            let data = self.raw_data();
+            let data = self
+                .raw_data_checked()
+                .map_err(|_| LimitedStreamDecodeFailure::Decode)?;
             return if data.len() <= max_output_bytes {
                 Ok(data)
             } else {
@@ -286,7 +300,9 @@ impl<'a> Stream<'a> {
             return Err(LimitedStreamDecodeFailure::UnsupportedDecodeParameters);
         }
 
-        let data = self.raw_data();
+        let data = self
+            .raw_data_checked()
+            .map_err(|_| LimitedStreamDecodeFailure::Decode)?;
         crate::filter::lzw_flate::flate::decode_with_limit(&data, max_output_bytes)
             .map(Cow::Owned)
             .map_err(|failure| match failure {
@@ -318,6 +334,7 @@ impl<'a> Stream<'a> {
         image: bool,
     ) -> Result<FilterResult<'a>, DecodeFailure> {
         let filters_and_params = self.filters_and_params()?;
+        self.validate_crypt_placement(&filters_and_params)?;
         if self.is_inline_image() && filters_and_params.filters.contains(&Filter::Jbig2Decode) {
             return Err(DecodeFailure::InvalidFilterPlacement);
         }
@@ -350,7 +367,7 @@ impl<'a> Stream<'a> {
         if ccitt_image {
             validate_ccitt_image_dictionary(&self.dict)?;
         }
-        let data = self.raw_data();
+        let data = self.data_before_filters(&filters_and_params)?;
 
         let mut current: Option<FilterResult<'a>> = None;
 
@@ -386,12 +403,17 @@ impl<'a> Stream<'a> {
                     return Err(DecodeFailure::StreamDecode);
                 }
             }
-            let new = filter.apply(
-                current.as_ref().map(|c| c.data.as_ref()).unwrap_or(&data),
-                params,
-                image_params,
-                self.is_inline_image() && current.is_none(),
-            )?;
+            let input = current.as_ref().map(|c| c.data.as_ref()).unwrap_or(&data);
+            let new = if *filter == Filter::Crypt {
+                FilterResult::from_data(self.decrypt_explicit(input, params)?)
+            } else {
+                filter.apply(
+                    input,
+                    params,
+                    image_params,
+                    self.is_inline_image() && current.is_none(),
+                )?
+            };
             if *filter == Filter::Jbig2Decode
                 && (image
                     || self
@@ -682,6 +704,10 @@ mod jpx_tests;
 #[cfg(test)]
 #[path = "stream_jbig2_tests.rs"]
 mod jbig2_tests;
+
+#[cfg(test)]
+#[path = "stream_crypt_tests.rs"]
+mod crypt_tests;
 
 #[cfg(test)]
 mod tests {

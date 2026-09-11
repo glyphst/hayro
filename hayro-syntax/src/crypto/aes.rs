@@ -438,6 +438,27 @@ impl<const KEY_SIZE: usize, const ROUNDS: usize> AESCipher<KEY_SIZE, ROUNDS> {
         result
     }
 
+    /// Decrypt a complete PDF CBC payload, requiring valid PKCS#7 padding.
+    /// The IV is consumed by the caller and is not part of `data`.
+    pub(crate) fn decrypt_cbc_checked(&self, data: &[u8], iv: &[u8; 16]) -> Option<Vec<u8>> {
+        if data.is_empty() || !data.len().is_multiple_of(16) {
+            return None;
+        }
+        let mut result = Zeroizing::new(self.decrypt_cbc(data, iv, false));
+        let count = usize::from(*result.last()?);
+        if !(1..=16).contains(&count)
+            || result.len() < count
+            || !result[result.len() - count..]
+                .iter()
+                .all(|byte| usize::from(*byte) == count)
+        {
+            return None;
+        }
+        let end = result.len() - count;
+        result.truncate(end);
+        Some(core::mem::take(&mut *result))
+    }
+
     pub(crate) fn decrypt_cbc(&self, data: &[u8], iv: &[u8; 16], unpad: bool) -> Vec<u8> {
         let mut result = Vec::new();
         let mut prev_block = *iv;

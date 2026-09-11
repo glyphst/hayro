@@ -14,6 +14,9 @@ use crate::metadata::Metadata;
 #[cfg(test)]
 mod password_tests;
 
+#[cfg(test)]
+mod crypt_tests;
+
 /// A PDF file.
 pub struct Pdf {
     xref: Arc<XRef>,

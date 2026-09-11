@@ -521,10 +521,10 @@ impl XRef {
         &self,
         id: ObjectIdentifier,
         data: &[u8],
-        target: DecryptionTarget,
+        target: DecryptionTarget<'_>,
     ) -> Option<Vec<u8>> {
         match &self.0 {
-            Inner::Dummy => Some(data.to_vec()),
+            Inner::Dummy => Decryptor::None.decrypt(id, data, target),
             Inner::Some(r) => r.decryptor.decrypt(id, data, target),
         }
     }

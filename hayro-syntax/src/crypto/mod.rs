@@ -9,12 +9,8 @@ use crate::crypto::DecryptionError::InvalidEncryption;
 use crate::crypto::aes::{AES128Cipher, AES256Cipher};
 use crate::crypto::rc4::Rc4;
 use crate::object;
-use crate::object::dict::keys::{
-    CF, CFM, ENCRYPT_META_DATA, FILTER, LENGTH, O, OE, P, PERMS, R, STM_F, STR_F, U, UE, V,
-};
+use crate::object::dict::keys::{ENCRYPT_META_DATA, FILTER, LENGTH, O, OE, P, PERMS, R, U, UE, V};
 use crate::object::{Dict, Name, ObjectIdentifier};
-use crate::sync::HashMap;
-use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::cmp;
 use core::fmt;
@@ -22,11 +18,13 @@ use core::ops::Deref;
 use zeroize::Zeroizing;
 
 mod aes;
+mod filters;
 mod md5;
 mod rc4;
 mod sha256;
 mod sha384;
 mod sha512;
+use filters::DecryptorData;
 
 const PASSWORD_PADDING: [u8; 32] = [
     0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08,
@@ -114,7 +112,7 @@ enum DecryptorTag {
 impl DecryptorTag {
     fn from_name(name: &Name<'_>) -> Option<Self> {
         match name.as_str() {
-            "None" | "Identity" => Some(Self::None),
+            "None" => Some(Self::None),
             "V2" => Some(Self::Rc4),
             "AESV2" => Some(Self::Aes128),
             "AESV3" => Some(Self::Aes256),
@@ -158,9 +156,11 @@ impl fmt::Debug for Decryptor {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub(crate) enum DecryptionTarget {
+pub(crate) enum DecryptionTarget<'a> {
     String,
     Stream,
+    EmbeddedFile,
+    Named(&'a [u8]),
 }
 
 impl Decryptor {
@@ -168,18 +168,23 @@ impl Decryptor {
         &self,
         id: ObjectIdentifier,
         data: &[u8],
-        target: DecryptionTarget,
+        target: DecryptionTarget<'_>,
     ) -> Option<Vec<u8>> {
+        if let DecryptionTarget::Named(name) = target
+            && name == b"Identity"
+        {
+            return Some(data.to_vec());
+        }
         match self {
-            Self::None => Some(data.to_vec()),
-            Self::Rc4 { key } => decrypt_rc4(key, data, id),
+            Self::None => (!matches!(target, DecryptionTarget::Named(_))).then(|| data.to_vec()),
+            Self::Rc4 { key } => {
+                if matches!(target, DecryptionTarget::Named(_)) {
+                    return None;
+                }
+                decrypt_rc4(key, data, id)
+            }
             Self::Aes128 { key, dict } | Self::Aes256 { key, dict } => {
-                let crypt_dict = match target {
-                    DecryptionTarget::String => dict.string_filter,
-                    DecryptionTarget::Stream => dict.stream_filter,
-                };
-
-                match crypt_dict.cfm {
+                match dict.select(target)? {
                     DecryptorTag::None => Some(data.to_vec()),
                     DecryptorTag::Rc4 => decrypt_rc4(key, data, id),
                     DecryptorTag::Aes128 => decrypt_aes128(key, data, id),
@@ -202,8 +207,18 @@ pub(crate) fn get(
     }
 
     let encryption_v = dict.get::<u8>(V).ok_or(InvalidEncryption)?;
-    let encrypt_metadata = dict.get::<bool>(ENCRYPT_META_DATA).unwrap_or(true);
     let revision = dict.get::<u8>(R).ok_or(InvalidEncryption)?;
+    let encrypt_metadata = if revision >= 4 {
+        match object::stream::optional_entry(dict, ENCRYPT_META_DATA)
+            .map_err(|_| InvalidEncryption)?
+        {
+            None => true,
+            Some(object::Object::Boolean(value)) => value,
+            _ => return Err(InvalidEncryption),
+        }
+    } else {
+        true
+    };
     if !matches!(revision, 2..=6) {
         return Err(DecryptionError::UnsupportedAlgorithm);
     }
@@ -215,8 +230,25 @@ pub(crate) fn get(
     }
     let length = match encryption_v {
         1 => 40,
-        2 => dict.get::<u16>(LENGTH).unwrap_or(40),
-        4 => dict.get::<u16>(LENGTH).unwrap_or(128),
+        2 | 4 => {
+            match object::stream::optional_entry(dict, LENGTH).map_err(|_| InvalidEncryption)? {
+                None => {
+                    if encryption_v == 2 {
+                        40
+                    } else {
+                        128
+                    }
+                }
+                Some(object::Object::Number(value)) => {
+                    let value = value.as_i64_exact().ok_or(InvalidEncryption)?;
+                    if !(40..=128).contains(&value) || value % 8 != 0 {
+                        return Err(InvalidEncryption);
+                    }
+                    value as u16
+                }
+                _ => return Err(InvalidEncryption),
+            }
+        }
         5 => 256,
         _ => return Err(DecryptionError::UnsupportedAlgorithm),
     };
@@ -226,11 +258,11 @@ pub(crate) fn get(
         2 => (DecryptorTag::Rc4, None),
         4 => (
             DecryptorTag::Aes128,
-            Some(DecryptorData::from_dict(dict, length).ok_or(InvalidEncryption)?),
+            Some(DecryptorData::from_dict(dict, length, encryption_v)?),
         ),
         5 | 6 => (
             DecryptorTag::Aes256,
-            Some(DecryptorData::from_dict(dict, length).ok_or(InvalidEncryption)?),
+            Some(DecryptorData::from_dict(dict, length, encryption_v)?),
         ),
         _ => {
             return Err(DecryptionError::UnsupportedAlgorithm);
@@ -251,7 +283,7 @@ pub(crate) fn get(
         u32::try_from(raw_permissions).map_err(|_| InvalidEncryption)?
     };
 
-    let (mut decryption_key, authentication) = if revision <= 4 {
+    let (decryption_key, authentication) = if revision <= 4 {
         authenticate_password_rev234(
             password,
             encrypt_metadata,
@@ -268,11 +300,6 @@ pub(crate) fn get(
 
     if revision >= 5 {
         validate_permissions_rev56(dict, &decryption_key, permissions, encrypt_metadata)?;
-    }
-
-    // See pdf.js issue 19484.
-    if encryption_v == 4 && decryption_key.len() < 16 {
-        decryption_key.resize(16, 0);
     }
 
     let decryptor = match algorithm {
@@ -307,11 +334,20 @@ fn decrypt_aes256(key: &[u8], data: &[u8]) -> Option<Vec<u8>> {
     let (iv, data) = data.split_at_checked(16)?;
     let iv: [u8; 16] = iv.try_into().ok()?;
     let cipher = AES256Cipher::new(key)?;
-    Some(cipher.decrypt_cbc(data, &iv, true))
+    cipher.decrypt_cbc_checked(data, &iv)
 }
 
 fn decrypt_aes128(key: &[u8], data: &[u8], id: ObjectIdentifier) -> Option<Vec<u8>> {
-    decrypt_rc_aes(key, id, true, |key| {
+    // Preserve the existing short-key AES compatibility (pdf.js issue 19484),
+    // without changing the actual file key used by a V2 crypt filter.
+    let mut padded = Zeroizing::new([0; 16]);
+    let aes_key = if key.len() < 16 {
+        padded[..key.len()].copy_from_slice(key);
+        &padded[..]
+    } else {
+        key
+    };
+    decrypt_rc_aes(aes_key, id, true, |key| {
         // If using the AES algorithm, the Cipher Block Chaining (CBC) mode, which requires an initialization
         // vector, is used. The block size parameter is set to 16 bytes, and the initialization vector is a 16-byte
         // random number that is stored as the first 16 bytes of the encrypted stream or string.
@@ -319,7 +355,7 @@ fn decrypt_aes128(key: &[u8], data: &[u8], id: ObjectIdentifier) -> Option<Vec<u
         let (iv, data) = data.split_at_checked(16)?;
         let iv: [u8; 16] = iv.try_into().ok()?;
 
-        Some(cipher.decrypt_cbc(data, &iv, true))
+        cipher.decrypt_cbc_checked(data, &iv)
     })
 }
 
@@ -369,77 +405,6 @@ fn decrypt_rc_aes(
     let final_key = &hash[..cmp::min(16, n + 5)];
 
     with_key(final_key)
-}
-
-#[derive(Debug, Copy, Clone)]
-pub(crate) struct DecryptorData {
-    stream_filter: CryptDictionary,
-    string_filter: CryptDictionary,
-}
-
-impl DecryptorData {
-    fn from_dict(dict: &Dict<'_>, default_length: u16) -> Option<Self> {
-        let mut mappings = HashMap::new();
-
-        if let Some(dict) = dict.get::<Dict<'_>>(CF) {
-            for key in dict.keys() {
-                if let Some(dict) = dict.get::<Dict<'_>>(key.as_ref())
-                    && let Some(crypt_dict) = CryptDictionary::from_dict(&dict, default_length)
-                {
-                    mappings.insert(key.as_str().to_string(), crypt_dict);
-                }
-            }
-        }
-
-        let stm_f = *mappings
-            .get(dict.get::<Name<'_>>(STM_F)?.as_str())
-            .unwrap_or(&CryptDictionary::identity(default_length));
-        let str_f = *mappings
-            .get(dict.get::<Name<'_>>(STR_F)?.as_str())
-            .unwrap_or(&CryptDictionary::identity(default_length));
-
-        Some(Self {
-            stream_filter: stm_f,
-            string_filter: str_f,
-        })
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-struct CryptDictionary {
-    cfm: DecryptorTag,
-    _length: u16,
-}
-
-impl CryptDictionary {
-    fn from_dict(dict: &Dict<'_>, default_length: u16) -> Option<Self> {
-        let cfm = DecryptorTag::from_name(&dict.get::<Name<'_>>(CFM)?)?;
-        // The standard security handler expresses the Length entry in bytes (e.g., 32 means a
-        // length of 256 bits) and public-key security handlers express it as is (e.g., 256 means a
-        // length of 256 bits).
-        // Note: We only support the standard security handler.
-        let mut length = dict.get::<u16>(LENGTH).unwrap_or(default_length / 8);
-
-        // When CFM is AESV2, the Length key shall have the value of 128. When
-        // CFM is AESV3, the Length key shall have a value of 256.
-        if cfm == DecryptorTag::Aes128 {
-            length = 16;
-        } else if cfm == DecryptorTag::Aes256 {
-            length = 32;
-        }
-
-        Some(Self {
-            cfm,
-            _length: length,
-        })
-    }
-
-    fn identity(default_length: u16) -> Self {
-        Self {
-            cfm: DecryptorTag::None,
-            _length: default_length,
-        }
-    }
 }
 
 /// Algorithm 2.B: Computing a hash (revision 6 and later)

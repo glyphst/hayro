@@ -22,6 +22,7 @@ pub struct TransferFunction {
     key: u128,
     function: Option<Function>,
     samples: Arc<[u8; 256]>,
+    clamp_output: bool,
 }
 
 impl TransferFunction {
@@ -33,18 +34,28 @@ impl TransferFunction {
     }
 
     pub(crate) fn new(function: Function) -> Option<Self> {
+        Self::new_with_output_policy(function, false)
+    }
+
+    /// Table 144 clamps a soft-mask transfer result to the unit interval.
+    pub(crate) fn new_soft_mask(function: Function) -> Option<Self> {
+        Self::new_with_output_policy(function, true)
+    }
+
+    fn new_with_output_policy(function: Function, clamp_output: bool) -> Option<Self> {
         if function.arity() != Some((1, 1)) {
             return None;
         }
         let mut samples = [0; 256];
         for (index, sample) in samples.iter_mut().enumerate() {
-            let output = evaluate(&function, index as f32 / 255.0)?;
+            let output = evaluate(&function, index as f32 / 255.0, clamp_output)?;
             *sample = (output * 255.0 + 0.5) as u8;
         }
         Some(Self {
-            key: crate::util::hash128(&format!("{function:?}")),
+            key: crate::util::hash128(&format!("{function:?}:clamp={clamp_output}")),
             function: Some(function),
             samples: Arc::new(samples),
+            clamp_output,
         })
     }
 
@@ -52,6 +63,7 @@ impl TransferFunction {
         Self {
             key: crate::util::hash128(&"Identity"),
             function: None,
+            clamp_output: false,
             samples: Arc::new(std::array::from_fn(|index| index as u8)),
         }
     }
@@ -74,16 +86,23 @@ impl TransferFunction {
             return None;
         }
         let value = value.clamp(0.0, 1.0);
-        self.function
-            .as_ref()
-            .map_or(Some(value), |function| evaluate(function, value))
+        self.function.as_ref().map_or(Some(value), |function| {
+            evaluate(function, value, self.clamp_output)
+        })
     }
 }
 
-fn evaluate(function: &Function, value: f32) -> Option<f32> {
+fn evaluate(function: &Function, value: f32, clamp_output: bool) -> Option<f32> {
     let result = function.eval(smallvec![value])?;
     let output = *result.first()?;
-    (result.len() == 1 && output.is_finite() && (0.0..=1.0).contains(&output)).then_some(output)
+    if result.len() != 1 || !output.is_finite() {
+        return None;
+    }
+    if clamp_output {
+        Some(output.clamp(0.0, 1.0))
+    } else {
+        (0.0..=1.0).contains(&output).then_some(output)
+    }
 }
 
 impl std::fmt::Debug for TransferFunction {

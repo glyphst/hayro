@@ -125,7 +125,7 @@ impl<'a> SoftMask<'a> {
         {
             None
         } else {
-            Some(TransferFunction::new(Function::new(
+            Some(TransferFunction::new_soft_mask(Function::new(
                 &dict.get::<Object<'_>>(TR)?,
             )?)?)
         };

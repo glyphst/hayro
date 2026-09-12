@@ -180,3 +180,25 @@ fn identical_byte_tables_do_not_alias_different_real_transfer_boundaries() {
     assert_ne!(a.apply_f32(0.4995), b.apply_f32(0.4995));
     assert_ne!(a.cache_key(), b.cache_key());
 }
+
+#[test]
+fn soft_mask_transfer_clamps_output_without_changing_graphics_transfer_policy() {
+    let source = "<< /FunctionType 2 /Domain [0 1] /C0 [-1] /C1 [2] /N 2 >>";
+    let function = Function::new(&Object::from_bytes(source.as_bytes()).unwrap()).unwrap();
+    assert!(TransferFunction::new(function.clone()).is_none());
+    let mask = TransferFunction::new_soft_mask(function).unwrap();
+    assert_eq!(mask.apply_f32(0.0), Some(0.0));
+    assert_eq!(mask.apply_f32(0.5), Some(0.0));
+    assert_eq!(mask.apply_f32(0.75), Some(0.6875));
+    assert_eq!(mask.apply_f32(1.0), Some(1.0));
+    let mut bytes = [0, 128, 255];
+    mask.apply_to(&mut bytes);
+    assert_eq!(bytes, [0, 0, 255]);
+    let function = Function::new(&Object::from_bytes(INVERT.as_bytes()).unwrap()).unwrap();
+    assert_ne!(
+        TransferFunction::new(function.clone()).unwrap().cache_key(),
+        TransferFunction::new_soft_mask(function)
+            .unwrap()
+            .cache_key()
+    );
+}

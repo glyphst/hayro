@@ -326,7 +326,7 @@ impl<'a> FormXObject<'a> {
                 is_transparency,
                 isolated: group.get::<bool>(I).unwrap_or(false),
                 knockout: group.get::<bool>(K).unwrap_or(false),
-                has_color_space: group.contains_key(CS),
+                has_color_space: !group.is_null_or_absent(CS),
                 declared_color_space_kind: color_space_kind,
                 color_space_kind,
                 color_space_default_overridden: false,
@@ -397,7 +397,7 @@ fn transformed_bbox(transform: Affine, bbox: [f32; 4]) -> Rect {
     .bounding_box()
 }
 
-fn resources_cache_key(resources: &Resources<'_>) -> u128 {
+pub(super) fn resources_cache_key(resources: &Resources<'_>) -> u128 {
     let local = hash128(&[
         resources.ext_g_states.cache_key(),
         resources.fonts.cache_key(),
@@ -1326,6 +1326,54 @@ mod tests {
         assert_eq!(device.soft_masks[0].1, ColorSpaceKind::DeviceCmyk);
         assert!(device.soft_masks[0].2);
         assert_eq!(device.soft_masks[0].3, vec![0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn soft_mask_construction_failures_are_typed_and_named_spaces_resolve() {
+        for entry in [
+            "/TR true",
+            "/TR /Bad#zz",
+            "/TR << /FunctionType 2 /Domain [0 1] /C0 [0 0] /C1 [1 1] /N 1 >>",
+        ] {
+            let warnings = Arc::new(Mutex::new(Vec::new()));
+            let target = warnings.clone();
+            let device = interpret_bytes_with_settings(
+                luminosity_soft_mask_pdf_with_backdrop(entry),
+                false,
+                InterpreterSettings {
+                    warning_sink: Arc::new(move |w| target.lock().unwrap().push(w)),
+                    ..Default::default()
+                },
+            );
+            assert!(device.soft_masks.is_empty(), "{entry}");
+            assert!(
+                warnings
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|w| matches!(w, InterpreterWarning::SoftMaskFailure)),
+                "{entry}"
+            );
+        }
+        let device = interpret_bytes(
+            luminosity_soft_mask_pdf_with_options(
+                "",
+                "/Alias",
+                "/ColorSpace << /Alias /DeviceRGB >>",
+            ),
+            false,
+        );
+        assert_eq!(device.soft_masks.len(), 1);
+        assert_eq!(device.soft_masks[0].1, ColorSpaceKind::DeviceRgb);
+        let device = interpret_bytes(
+            luminosity_soft_mask_pdf_with_options(
+                "",
+                "/Alias",
+                "/ColorSpace << /Alias /DeviceRGB /DefaultRGB /DeviceGray >>",
+            ),
+            false,
+        );
+        assert!(device.soft_masks[0].2);
     }
 
     #[test]

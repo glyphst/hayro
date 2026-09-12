@@ -411,6 +411,8 @@ pub enum InterpreterWarning {
     TransferFunctionFailure,
     /// A selected line dash declaration could not be decoded completely.
     DashPatternFailure,
+    /// A selected soft mask could not be constructed completely.
+    SoftMaskFailure,
     /// An image color-space declaration or selected default could not be resolved.
     ImageColorSpace(crate::color::ImageColorSpaceError),
     /// A selected paint or shading color space could not be resolved exactly.

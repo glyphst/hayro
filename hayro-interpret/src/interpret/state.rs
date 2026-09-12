@@ -380,6 +380,11 @@ pub(crate) fn handle_gs_single<'a>(
     context: &mut Context<'a>,
     parent_resources: &Resources<'a>,
 ) -> Option<()> {
+    // PDF 7.3.7/7.3.9: null and undefined optional entries are absent and
+    // therefore preserve the currently selected graphics-state parameter.
+    if dict.is_null_or_absent(&key) {
+        return Some(());
+    }
     // TODO Can we use constants here somehow?
     match key.as_str() {
         "RI" => match crate::color::RenderingIntent::from_object(dict.get::<Object<'_>>(key)) {
@@ -429,14 +434,18 @@ pub(crate) fn handle_gs_single<'a>(
             }
         }
         "SMask" => {
-            if let Some(name) = dict.get::<Name<'_>>(SMASK) {
-                if name.deref() == b"None" {
-                    context.get_mut().graphics_state.soft_mask = None;
-                }
+            if dict
+                .get::<Name<'_>>(SMASK)
+                .is_some_and(|name| name.deref() == b"None")
+            {
+                context.get_mut().graphics_state.soft_mask = None;
+            } else if let Some(mask) = dict
+                .get::<Dict<'_>>(SMASK)
+                .and_then(|d| SoftMask::new(&d, context, parent_resources.clone()))
+            {
+                context.get_mut().graphics_state.soft_mask = Some(mask);
             } else {
-                context.get_mut().graphics_state.soft_mask = dict
-                    .get::<Dict<'_>>(SMASK)
-                    .and_then(|d| SoftMask::new(&d, context, parent_resources.clone()));
+                (context.settings.warning_sink)(crate::InterpreterWarning::SoftMaskFailure);
             }
         }
         "BM" => {
@@ -460,9 +469,6 @@ pub(crate) fn handle_gs_single<'a>(
             context.get_mut().graphics_state.blend_mode = BlendMode::Normal;
         }
         "Font" => {
-            if dict.is_null_or_absent(FONT) {
-                return Some(());
-            }
             if let Some((font_dict, size)) = dict
                 .get::<Array<'_>>(FONT)
                 .and_then(crate::font::read_ext_g_state_font)
@@ -475,10 +481,6 @@ pub(crate) fn handle_gs_single<'a>(
             }
         }
         "D" => {
-            // Null dictionary values have the same meaning as absent entries.
-            if dict.is_null_or_absent(&key) {
-                return Some(());
-            }
             if let Some(pattern) = dict
                 .get::<Array<'_>>(key)
                 .and_then(super::DashPattern::from_ext_g_state)

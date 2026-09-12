@@ -1,4 +1,6 @@
-use super::form::{FormGroupProperties, FormXObject, resources_contain_color_space};
+use super::form::{
+    FormGroupProperties, FormXObject, resources_cache_key, resources_contain_color_space,
+};
 use crate::color::{Color, ColorComponents, ColorSpace, ColorSpaceKind};
 use crate::context::{Context, InterpreterCache};
 use crate::device::Device;
@@ -31,6 +33,7 @@ pub enum MaskType {
 
 struct Repr<'a> {
     obj_id: ObjectIdentifier,
+    retained_key: u128,
     group: FormXObject<'a>,
     mask_type: MaskType,
     parent_resources: Resources<'a>,
@@ -48,9 +51,7 @@ struct Repr<'a> {
 
 impl Hash for Repr<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.obj_id.hash(state);
-        self.root_transform.cache_key().hash(state);
-        self.settings.defer_transfer_functions.hash(state);
+        self.retained_key.hash(state);
     }
 }
 
@@ -60,14 +61,13 @@ pub struct SoftMask<'a>(Rc<Repr<'a>>);
 
 impl Debug for SoftMask<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SoftMask({:?})", self.0.obj_id)
+        write!(f, "SoftMask({:?}, {})", self.0.obj_id, self.0.retained_key)
     }
 }
 
 impl PartialEq for SoftMask<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.0.obj_id == other.0.obj_id
-            && self.0.settings.defer_transfer_functions == other.0.settings.defer_transfer_functions
+        self.0.retained_key == other.0.retained_key
     }
 }
 
@@ -75,7 +75,7 @@ impl Eq for SoftMask<'_> {}
 
 impl CacheKey for SoftMask<'_> {
     fn cache_key(&self) -> u128 {
-        hash128(self)
+        self.0.retained_key
     }
 }
 
@@ -85,19 +85,36 @@ impl<'a> SoftMask<'a> {
         context: &Context<'a>,
         parent_resources: Resources<'a>,
     ) -> Option<Self> {
-        // TODO: With this setup, if there is a luminosity mask and alpha mask pointing to the
-        // same xobject, the ID will be the same.
         let obj_id = dict.get_ref(G)?.into();
         let group_stream = dict.get::<Stream<'_>>(G)?;
         let group = FormXObject::new(&group_stream)?;
-        let cs = ColorSpace::new(
-            group.dict.get::<Dict<'_>>(GROUP)?.get::<Object<'_>>(CS)?,
-            &context.interpreter_cache.object_cache,
-        )?;
+        let properties = group.dict.get::<Dict<'_>>(GROUP)?;
+        let mask_type = match dict.get::<Name<'_>>(S)?.deref() {
+            LUMINOSITY => MaskType::Luminosity,
+            ALPHA => MaskType::Alpha,
+            _ => return None,
+        };
         let group_resources = Resources::from_parent(
             group.dict.get::<Dict<'_>>(RESOURCES).unwrap_or_default(),
             parent_resources.clone(),
         );
+        let cs = if mask_type == MaskType::Alpha && properties.is_null_or_absent(CS) {
+            // Table 144 requires CS only for luminosity. This placeholder is
+            // never consulted when extracting the source group's alpha.
+            ColorSpace::device_gray()
+        } else {
+            let object = properties.get::<Object<'_>>(CS)?;
+            ColorSpace::new(object.clone(), &context.interpreter_cache.object_cache).or_else(
+                || {
+                    object
+                        .into_name()
+                        .and_then(|name| group_resources.get_color_space(&name))
+                        .and_then(|resolved| {
+                            ColorSpace::new(resolved, &context.interpreter_cache.object_cache)
+                        })
+                },
+            )?
+        };
         let default_name = match cs.kind() {
             ColorSpaceKind::DeviceGray => Some(DEFAULT_GRAY),
             ColorSpaceKind::DeviceRgb => Some(DEFAULT_RGB),
@@ -106,30 +123,42 @@ impl<'a> SoftMask<'a> {
         };
         let group_color_space_default_overridden =
             default_name.is_some_and(|name| resources_contain_color_space(&group_resources, name));
-        let transfer_function = dict
-            .get::<Object<'_>>(TR)
-            .and_then(|o| Function::new(&o))
-            .and_then(TransferFunction::new);
-        let (mask_type, background) = match dict.get::<Name<'_>>(S)?.deref() {
-            LUMINOSITY => {
-                let color = dict
-                    .get::<ColorComponents>(BC)
-                    .map(|c| Color::new(cs.clone(), c, 1.0))
-                    .unwrap_or_else(|| Color::new(cs.clone(), cs.initial_color(), 1.0));
-
-                (MaskType::Luminosity, color)
-            }
-            ALPHA => (
-                MaskType::Alpha,
+        let transfer_function = if dict.is_null_or_absent(TR)
+            || dict
+                .get::<Name<'_>>(TR)
+                .is_some_and(|name| name.as_ref() == b"Identity")
+        {
+            None
+        } else {
+            Some(TransferFunction::new(Function::new(
+                &dict.get::<Object<'_>>(TR)?,
+            )?)?)
+        };
+        let background = match mask_type {
+            MaskType::Luminosity => dict
+                .get::<ColorComponents>(BC)
+                .map(|c| Color::new(cs.clone(), c, 1.0))
+                .unwrap_or_else(|| Color::new(cs.clone(), cs.initial_color(), 1.0)),
+            MaskType::Alpha => {
                 // Background color attribute should only be used with luminosity masks.
-                Color::new(ColorSpace::device_gray(), smallvec![0.0], 1.0),
-            ),
-            _ => return None,
+                Color::new(ColorSpace::device_gray(), smallvec![0.0], 1.0)
+            }
         };
         let nesting_depth = context.nesting_depth() + 1;
+        // G alone does not identify a mask: S, BC, TR, inherited resources,
+        // and the transform at gs all affect the result. Keep equality,
+        // hashing, and inherited-state debug keys on the same identity.
+        let retained_key = hash128(&(
+            dict.cache_key(),
+            resources_cache_key(&group_resources),
+            context.get().ctm.cache_key(),
+            context.bbox().cache_key(),
+            context.settings.defer_transfer_functions,
+        ));
 
         Some(Self(Rc::new(Repr {
             obj_id,
+            retained_key,
             group,
             mask_type,
             root_transform: context.get().ctm,
@@ -163,9 +192,10 @@ impl<'a> SoftMask<'a> {
             .draw(&self.0.parent_resources, &mut ctx, device);
     }
 
-    /// Return the object identifier of the mask.
+    /// Return the object identifier of the mask's source Form.
     ///
-    /// This can be used as a unique identifier for caching purposes.
+    /// Different masks can share this Form. Use [`CacheKey::cache_key`] for
+    /// identity that includes mask properties and invocation state.
     pub fn id(&self) -> ObjectIdentifier {
         self.0.obj_id
     }
@@ -195,8 +225,8 @@ impl<'a> SoftMask<'a> {
         &self.0.group_color_space
     }
 
-    /// Whether a default device-space resource remaps the mask group's direct
-    /// `/CS` name.
+    /// Whether a default device-space resource remaps the resolved mask group
+    /// color space, including a device space reached through a resource name.
     pub fn group_color_space_is_default_overridden(&self) -> bool {
         self.0.group_color_space_default_overridden
     }
@@ -204,5 +234,84 @@ impl<'a> SoftMask<'a> {
     /// Return the transfer function that should be used for the mask.
     pub fn transfer_function(&self) -> Option<&TransferFunction> {
         self.0.transfer_function.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hayro_syntax::Pdf;
+    use kurbo::Rect;
+
+    #[test]
+    fn soft_mask_identity_and_null_graphics_state_preserve_invocation_semantics() {
+        let pdf = Pdf::new(
+            b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]
+/Resources << /ColorSpace << /Blend /DeviceGray >> /ExtGState <<
+/A << /SMask << /S /Alpha /G 4 0 R >> /BM /Multiply /RI /Perceptual >>
+/B << /SMask << /S /Luminosity /G 4 0 R >> >>
+/N << /SMask null /BM null /RI null >>
+/U << /SMask 999 0 R /BM 999 0 R /RI 999 0 R >>
+>> >> /Other << /ColorSpace << /Blend /DeviceRGB >> >> >> endobj
+4 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 100 100]
+/Group << /S /Transparency /CS /Blend >> /Length 0 >> stream
+
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF"
+                .to_vec(),
+        )
+        .expect("PDF");
+        let resources = pdf.pages()[0].resources().clone();
+        let states = &resources.ext_g_states;
+        let cache = InterpreterCache::new();
+        let mut context = Context::new(
+            Affine::IDENTITY,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            &cache,
+            pdf.xref(),
+            InterpreterSettings::default(),
+        );
+        let dict = states.get::<Dict<'_>>(b"A").unwrap();
+        crate::interpret::state::handle_gs(&dict, &mut context, &resources);
+        let first = context.get().graphics_state.soft_mask.clone().unwrap();
+        for name in [b"N", b"U"] {
+            let dict = states.get::<Dict<'_>>(name).unwrap();
+            crate::interpret::state::handle_gs(&dict, &mut context, &resources);
+            let state = &context.get().graphics_state;
+            assert_eq!(state.soft_mask.as_ref(), Some(&first));
+            assert_eq!(state.blend_mode, crate::BlendMode::Multiply);
+            assert_eq!(
+                state.rendering_intent,
+                crate::color::RenderingIntent::Perceptual
+            );
+        }
+        let a = dict.get::<Dict<'_>>(SMASK).unwrap();
+        let same = SoftMask::new(&a, &context, resources.clone()).unwrap();
+        assert_eq!(first, same);
+        assert_eq!(hash128(&first), hash128(&same));
+        assert_eq!(format!("{first:?}"), format!("{same:?}"));
+        let b = states
+            .get::<Dict<'_>>(b"B")
+            .unwrap()
+            .get::<Dict<'_>>(SMASK)
+            .unwrap();
+        let different_mode = SoftMask::new(&b, &context, resources.clone()).unwrap();
+        assert_eq!(first.id(), different_mode.id());
+        assert_ne!(first, different_mode);
+        assert_ne!(first.cache_key(), different_mode.cache_key());
+        let other = Resources::from_parent(
+            pdf.pages()[0].raw().get::<Dict<'_>>(b"Other").unwrap(),
+            resources.clone(),
+        );
+        let different_resources = SoftMask::new(&a, &context, other).unwrap();
+        assert_ne!(first, different_resources);
+        context.get_mut().ctm = Affine::translate((10.0, 20.0));
+        let translated = SoftMask::new(&a, &context, resources).unwrap();
+        assert_ne!(first, translated);
+        assert_ne!(first.cache_key(), translated.cache_key());
     }
 }

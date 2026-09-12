@@ -1329,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn soft_mask_construction_failures_are_typed_and_named_spaces_resolve() {
+    fn soft_mask_construction_failures_and_resource_aliases_are_typed() {
         for entry in [
             "/TR true",
             "/TR /Bad#zz",
@@ -1355,25 +1355,29 @@ mod tests {
                 "{entry}"
             );
         }
-        let device = interpret_bytes(
-            luminosity_soft_mask_pdf_with_options(
-                "",
-                "/Alias",
-                "/ColorSpace << /Alias /DeviceRGB >>",
-            ),
-            false,
-        );
-        assert_eq!(device.soft_masks.len(), 1);
-        assert_eq!(device.soft_masks[0].1, ColorSpaceKind::DeviceRgb);
-        let device = interpret_bytes(
-            luminosity_soft_mask_pdf_with_options(
-                "",
-                "/Alias",
-                "/ColorSpace << /Alias /DeviceRGB /DefaultRGB /DeviceGray >>",
-            ),
-            false,
-        );
-        assert!(device.soft_masks[0].2);
+        for resources in [
+            "/ColorSpace << /Alias /DeviceRGB >>",
+            "/ColorSpace << /Alias /DeviceRGB /DefaultRGB /DeviceGray >>",
+        ] {
+            let warnings = Arc::new(Mutex::new(Vec::new()));
+            let target = warnings.clone();
+            let device = interpret_bytes_with_settings(
+                luminosity_soft_mask_pdf_with_options("", "/Alias", resources),
+                false,
+                InterpreterSettings {
+                    warning_sink: Arc::new(move |w| target.lock().unwrap().push(w)),
+                    ..Default::default()
+                },
+            );
+            assert!(device.soft_masks.is_empty());
+            assert!(
+                warnings
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|w| matches!(w, InterpreterWarning::SoftMaskFailure))
+            );
+        }
     }
 
     #[test]

@@ -103,16 +103,11 @@ impl<'a> SoftMask<'a> {
             // never consulted when extracting the source group's alpha.
             ColorSpace::device_gray()
         } else {
-            let object = properties.get::<Object<'_>>(CS)?;
-            ColorSpace::new(object.clone(), &context.interpreter_cache.object_cache).or_else(
-                || {
-                    object
-                        .into_name()
-                        .and_then(|name| group_resources.get_color_space(&name))
-                        .and_then(|resolved| {
-                            ColorSpace::new(resolved, &context.interpreter_cache.object_cache)
-                        })
-                },
+            // Outside content operators, 8.6.3 requires the colour-space
+            // object itself; a resource alias is not a valid declaration.
+            ColorSpace::new(
+                properties.get::<Object<'_>>(CS)?,
+                &context.interpreter_cache.object_cache,
             )?
         };
         let default_name = match cs.kind() {
@@ -226,7 +221,7 @@ impl<'a> SoftMask<'a> {
     }
 
     /// Whether a default device-space resource remaps the resolved mask group
-    /// color space, including a device space reached through a resource name.
+    /// color space.
     pub fn group_color_space_is_default_overridden(&self) -> bool {
         self.0.group_color_space_default_overridden
     }
@@ -257,7 +252,7 @@ mod tests {
 /U << /SMask 999 0 R /BM 999 0 R /RI 999 0 R >>
 >> >> /Other << /ColorSpace << /Blend /DeviceRGB >> >> >> endobj
 4 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 100 100]
-/Group << /S /Transparency /CS /Blend >> /Length 0 >> stream
+/Group << /S /Transparency /CS /DeviceGray >> /Length 0 >> stream
 
 endstream endobj
 trailer << /Root 1 0 R >>

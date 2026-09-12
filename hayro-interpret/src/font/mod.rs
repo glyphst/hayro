@@ -453,6 +453,8 @@ pub struct Type3Glyph<'a> {
     pub(crate) settings: InterpreterSettings,
     pub(crate) nesting_depth: u32,
     pub(crate) char_code: u32,
+    pub(crate) inherited_clip: kurbo::Rect,
+    pub(crate) instance_transform: Affine,
 }
 
 /// Owned nominal metrics for a Type 3 glyph in Hayro's normalized 1000-unit
@@ -471,6 +473,16 @@ pub struct Type3GlyphMetrics {
 
 /// A glyph defined by PDF drawing instructions.
 impl<'a> Type3Glyph<'a> {
+    /// Whether `/FontBBox` supplies a known nominal bound.
+    ///
+    /// PDF permits an all-zero rectangle to mean unknown bounds. In that case,
+    /// [`Self::text_metrics`] still supplies the advance, but its nominal quad
+    /// must not be used to infer glyph size; devices can retain the painted
+    /// program's bounds for selection instead.
+    pub fn has_known_font_bounds(&self) -> bool {
+        self.font.has_known_bounds()
+    }
+
     /// Draw the type3 glyph to the given device.
     pub fn interpret(
         &self,
@@ -491,7 +503,8 @@ impl<'a> Type3Glyph<'a> {
         self.font.char_code_to_unicode(self.char_code)
     }
 
-    /// Return owned metrics suitable for text selection and search geometry.
+    /// Return owned advance and nominal font metrics. Check
+    /// [`Self::has_known_font_bounds`] before using the nominal quad for size.
     pub fn text_metrics(&self) -> Type3GlyphMetrics {
         debug_assert!(self.char_code <= u8::MAX as u32);
         Type3GlyphMetrics {
@@ -503,10 +516,23 @@ impl<'a> Type3Glyph<'a> {
 
 impl CacheKey for Type3Glyph<'_> {
     fn cache_key(&self) -> u128 {
+        let unknown_domain = (!self.has_known_font_bounds()).then(|| {
+            (
+                [
+                    self.inherited_clip.x0,
+                    self.inherited_clip.y0,
+                    self.inherited_clip.x1,
+                    self.inherited_clip.y1,
+                ]
+                .map(f64::to_bits),
+                self.instance_transform.as_coeffs().map(f64::to_bits),
+            )
+        });
         hash128(&(
             self.font.cache_key(),
             self.glyph_id,
             self.settings.defer_transfer_functions,
+            unknown_domain,
         ))
     }
 }
@@ -644,6 +670,10 @@ impl<'a> Font<'a> {
                     settings: ctx.settings.clone(),
                     nesting_depth,
                     char_code,
+                    inherited_clip: ctx.bbox(),
+                    instance_transform: ctx.get().ctm
+                        * ctx.get().text_state.full_transform()
+                        * Affine::scale(1.0 / UNITS_PER_EM as f64),
                 };
 
                 Glyph::Type3(Box::new(shape_glyph))

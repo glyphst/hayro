@@ -109,6 +109,10 @@ impl<'a> Type3<'a> {
         ]
     }
 
+    pub(crate) fn has_known_bounds(&self) -> bool {
+        self.font_bbox != Rect::ZERO
+    }
+
     pub(crate) fn char_code_to_unicode(&self, char_code: u32) -> Option<BfString> {
         if let Some(unicode) = self
             .to_unicode
@@ -164,9 +168,35 @@ impl<'a> Type3<'a> {
             is_shape_glyph
         };
 
+        // Context bounds are in the device coordinate system, including the
+        // FontMatrix. An all-zero FontBBox is explicitly unknown (Table 112):
+        // keep the inherited clip domain, including when a retaining device
+        // interprets this instance in normalized glyph coordinates.
+        let bounds = if self.has_known_bounds() {
+            root_transform.transform_rect_bbox(self.font_bbox)
+        } else {
+            let outer = transform * glyph_transform;
+            if outer == glyph.instance_transform {
+                glyph.inherited_clip
+            } else {
+                let mapping = outer * glyph.instance_transform.inverse();
+                if !mapping.as_coeffs().iter().all(|value| value.is_finite()) {
+                    (glyph.settings.warning_sink)(crate::InterpreterWarning::UnsupportedFont);
+                    return None;
+                }
+                mapping.transform_rect_bbox(glyph.inherited_clip)
+            }
+        };
+        if ![bounds.x0, bounds.y0, bounds.x1, bounds.y1]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            (glyph.settings.warning_sink)(crate::InterpreterWarning::UnsupportedFont);
+            return None;
+        }
         let mut context = Context::new_with(
             state.ctm,
-            self.font_bbox,
+            bounds,
             &glyph.cache,
             glyph.xref,
             glyph.settings.clone(),

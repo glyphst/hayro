@@ -75,7 +75,17 @@ pub(crate) fn show_glyph_run<'a>(ctx: &mut Context<'a>, device: &mut impl Device
         return;
     }
 
-    let render_mode = ctx.get().text_state.render_mode;
+    // Section 9.3.6: only invisible text rendering mode affects Type 3 fonts.
+    // A text run uses one selected font, so all its glyphs share this choice.
+    let render_mode = if matches!(&ctx.glyph_scratch[0].glyph, Glyph::Type3(_))
+        && !matches!(
+            ctx.get().text_state.render_mode,
+            TextRenderingMode::Invisible
+        ) {
+        TextRenderingMode::Fill
+    } else {
+        ctx.get().text_state.render_mode
+    };
     let stroke_props = ctx.stroke_props();
     let fill_props = ctx.draw_props(false);
     let stroke_draw_props = ctx.draw_props(true);

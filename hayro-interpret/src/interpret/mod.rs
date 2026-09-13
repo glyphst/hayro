@@ -596,6 +596,9 @@ pub fn interpret<'a>(
         if device.is_cancelled() {
             break;
         }
+        if context.get().type3_shape_only && crate::font::type3_ignores_color_operator(&op) {
+            continue;
+        }
         if text_object_active && matches!(&op, TypedInstruction::BeginText(_)) {
             if !warned_nested_text_object {
                 (context.settings.warning_sink)(InterpreterWarning::NestedTextObject);

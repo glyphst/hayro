@@ -38,7 +38,7 @@ mod standard_font;
 mod true_type;
 mod type1;
 pub(crate) mod type3;
-pub use type3::Type3Encoding;
+pub use type3::{Type3Encoding, type3_ignores_color_operator, type3_ignores_color_parameter};
 
 pub(crate) const UNITS_PER_EM: f32 = 1000.0;
 

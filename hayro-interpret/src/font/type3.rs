@@ -24,6 +24,68 @@ use kurbo::{Affine, BezPath, Point, Rect};
 use rustc_hash::FxHashMap;
 use skrifa::GlyphId;
 
+/// Whether a colour-setting instruction is ignored in a Type 3 `d1` program.
+///
+/// PDF 9.6.5, Table 113 requires these operators to have no effect, including
+/// resource lookup. This also applies inside nested glyphs and lexical Forms.
+/// Painting operators and transparency parameters are not colour setters.
+pub fn type3_ignores_color_operator(instruction: &TypedInstruction<'_, '_>) -> bool {
+    match instruction {
+        TypedInstruction::NonStrokeColorDeviceGray(_)
+        | TypedInstruction::StrokeColorDeviceGray(_)
+        | TypedInstruction::NonStrokeColorDeviceRgb(_)
+        | TypedInstruction::StrokeColorDeviceRgb(_)
+        | TypedInstruction::NonStrokeColorCmyk(_)
+        | TypedInstruction::StrokeColorCmyk(_)
+        | TypedInstruction::ColorSpaceNonStroke(_)
+        | TypedInstruction::ColorSpaceStroke(_)
+        | TypedInstruction::NonStrokeColor(_)
+        | TypedInstruction::StrokeColor(_)
+        | TypedInstruction::NonStrokeColorNamed(_)
+        | TypedInstruction::StrokeColorNamed(_)
+        | TypedInstruction::RenderingIntent(_) => true,
+        TypedInstruction::Fallback(operator) => matches!(
+            operator.as_ref(),
+            b"g" | b"G"
+                | b"rg"
+                | b"RG"
+                | b"k"
+                | b"K"
+                | b"cs"
+                | b"CS"
+                | b"sc"
+                | b"SC"
+                | b"scn"
+                | b"SCN"
+                | b"ri"
+        ),
+        _ => false,
+    }
+}
+
+/// Whether a colour-related `ExtGState` entry is ignored in a Type 3 `d1` program.
+///
+/// PDF 8.4, Tables 52/53 identify colour conversion, overprint, transfer,
+/// halftone and colour-gradient precision parameters. Font selection, line
+/// geometry and transparency entries retain their separate semantics.
+pub fn type3_ignores_color_parameter(key: &[u8]) -> bool {
+    matches!(
+        key,
+        b"RI"
+            | b"OP"
+            | b"op"
+            | b"OPM"
+            | b"BG"
+            | b"BG2"
+            | b"UCR"
+            | b"UCR2"
+            | b"TR"
+            | b"TR2"
+            | b"HT"
+            | b"SM"
+    )
+}
+
 /// The character-to-program mapping used by a Type 3 font.
 ///
 /// This shares the interpreter's base encoding, Differences and missing-code

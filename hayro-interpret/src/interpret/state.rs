@@ -403,6 +403,9 @@ pub(crate) fn handle_gs_single<'a>(
     context: &mut Context<'a>,
     parent_resources: &Resources<'a>,
 ) -> Option<()> {
+    if context.get().type3_shape_only && crate::font::type3_ignores_color_parameter(key.as_ref()) {
+        return Some(());
+    }
     // PDF 7.3.7/7.3.9: null and undefined optional entries are absent and
     // therefore preserve the currently selected graphics-state parameter.
     if dict.is_null_or_absent(&key) {

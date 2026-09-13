@@ -193,15 +193,37 @@ pub(crate) enum ColorSpaceType {
     DeviceN(DeviceN),
 }
 
+#[derive(Clone, Copy)]
+enum ColorSpaceUse {
+    General,
+    TintAlternate,
+}
+
+impl ColorSpaceUse {
+    fn permits(self, kind: ColorSpaceKind) -> bool {
+        !matches!(self, Self::TintAlternate)
+            || !matches!(
+                kind,
+                ColorSpaceKind::Pattern
+                    | ColorSpaceKind::Indexed
+                    | ColorSpaceKind::Separation
+                    | ColorSpaceKind::DeviceN
+            )
+    }
+}
+
 impl ColorSpaceType {
     fn new(object: Object<'_>, cache: &Cache) -> Option<Self> {
-        Self::new_inner(object, cache, &mut |object| ColorSpace::new(object, cache))
+        Self::new_inner(object, cache, &mut |object, usage| {
+            let space = ColorSpace::new(object, cache)?;
+            usage.permits(space.kind()).then_some(space)
+        })
     }
 
     fn new_inner<'a>(
         object: Object<'a>,
         cache: &Cache,
-        resolve: &mut dyn FnMut(Object<'a>) -> Option<ColorSpace>,
+        resolve: &mut dyn FnMut(Object<'a>, ColorSpaceUse) -> Option<ColorSpace>,
     ) -> Option<Self> {
         if let Object::Name(name) = object {
             return Self::new_from_name(&name);
@@ -252,19 +274,26 @@ impl ColorSpaceType {
                     return Some(Self::Lab(Lab::new(&lab_dict)?));
                 }
                 INDEXED | I => {
-                    return Some(Self::Indexed(Indexed::new(&color_array, resolve)?));
+                    return Some(Self::Indexed(Indexed::new(&color_array, &mut |object| {
+                        resolve(object, ColorSpaceUse::General)
+                    })?));
                 }
                 SEPARATION => {
-                    return Some(Self::Separation(Separation::new(&color_array, resolve)?));
+                    return Some(Self::Separation(Separation::new(
+                        &color_array,
+                        &mut |object| resolve(object, ColorSpaceUse::TintAlternate),
+                    )?));
                 }
                 DEVICE_N => {
-                    return Some(Self::DeviceN(DeviceN::new(&color_array, resolve)?));
+                    return Some(Self::DeviceN(DeviceN::new(&color_array, &mut |object| {
+                        resolve(object, ColorSpaceUse::TintAlternate)
+                    })?));
                 }
                 PATTERN => {
                     let cs = if color_array.raw_iter().take(2).count() == 1 {
                         ColorSpace::device_rgb()
                     } else {
-                        resolve(iter.next::<Object<'_>>()?)?
+                        resolve(iter.next::<Object<'_>>()?, ColorSpaceUse::General)?
                     };
                     return Some(Self::Pattern(Pattern::new(cs)));
                 }

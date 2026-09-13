@@ -35,6 +35,11 @@ impl Separation {
         let name = iter.next::<Name<'_>>()?;
         let alternate_space = resolve(iter.next::<Object<'_>>()?)?;
         let tint_transform = Function::new(&iter.next::<Object<'_>>()?)?;
+        // All and None ignore tint evaluation, but still require a valid
+        // device/CIE alternate and a function with matching components.
+        if tint_transform.arity()? != (1, alternate_space.component_count()) {
+            return None;
+        }
         // Either I did something wrong, or no other viewers properly handles
         // `All`, so let's just ignore it as well.
         let is_none_separation = name.as_str() == "None";

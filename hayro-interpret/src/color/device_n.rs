@@ -49,6 +49,14 @@ impl DeviceN {
         let all_none = names.iter().all(|n| n.as_str() == "None");
         let alternate_space = resolve(iter.next::<Object<'_>>()?)?;
         let tint_transform = Function::new(&iter.next::<Object<'_>>()?)?;
+        if tint_transform.arity()?
+            != (
+                usize::from(num_components),
+                alternate_space.component_count(),
+            )
+        {
+            return None;
+        }
         if count == 5 {
             let attributes = iter.next::<Dict<'_>>()?;
             if attributes

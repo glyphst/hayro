@@ -69,3 +69,48 @@ fn invalid_non_marking_declarations_do_not_hide_their_tail() {
         assert!(space(&source).is_none(), "{source}");
     }
 }
+
+#[test]
+fn special_spaces_are_not_valid_tint_alternates() {
+    let gray = "<< /FunctionType 2 /Domain [0 1] /C0 [.5] /C1 [.5] /N 1 >>";
+    for prefix in [
+        "/Separation /None",
+        "/Separation /All",
+        "/Separation /Spot",
+        "/DeviceN [/None]",
+        "/DeviceN [/Spot]",
+    ] {
+        assert!(space(&format!("[{prefix} /DeviceRGB {TINT}]")).is_some());
+        for (alternate, tint) in [
+            ("[/Indexed /DeviceRGB 1 <000000ffffff>]".to_owned(), gray),
+            (format!("[/Separation /Spot /DeviceRGB {TINT}]"), gray),
+            (format!("[/DeviceN [/Spot] /DeviceRGB {TINT}]"), gray),
+            ("[/Pattern /DeviceRGB]".to_owned(), TINT),
+        ] {
+            let source = format!("[{prefix} {alternate} {tint}]");
+            assert!(space(&source).is_none(), "{source}");
+        }
+    }
+}
+
+#[test]
+fn ignored_tint_functions_still_require_matching_arity() {
+    for prefix in [
+        "/Separation /None",
+        "/Separation /All",
+        "/Separation /Spot",
+        "/DeviceN [/None]",
+        "/DeviceN [/Spot]",
+    ] {
+        for outputs in [".5", ".1 .2 .3 .4"] {
+            let source = format!(
+                "[{prefix} /DeviceRGB << /FunctionType 2 /Domain [0 1] /C0 [{outputs}] /C1 [{outputs}] /N 1 >>]"
+            );
+            assert!(space(&source).is_none(), "{source}");
+        }
+    }
+    for names in ["/None /None", "/None /Spot", "/One /Two"] {
+        let source = format!("[/DeviceN [{names}] /DeviceRGB {TINT}]");
+        assert!(space(&source).is_none(), "{source}");
+    }
+}

@@ -93,22 +93,36 @@ fn parse_image_color_space<'a>(
     let mut overridden = false;
     let mut nested_error = None;
     let parsed =
-        ColorSpaceType::new_inner(object, cache, &mut |object| match parse_image_color_space(
+        ColorSpaceType::new_inner(
             object,
             cache,
-            resolve,
-            depth + 1,
-            apply_defaults,
-        ) {
-            Ok((space, properties)) => {
-                overridden |= properties.color_space_is_default_overridden();
-                Some(space)
-            }
-            Err(error) => {
-                nested_error = Some(error);
-                None
-            }
-        });
+            &mut |object, usage| match parse_image_color_space(
+                object,
+                cache,
+                resolve,
+                depth + 1,
+                apply_defaults,
+            ) {
+                Ok((space, properties)) => {
+                    // Validate the declared alternate before device defaults.
+                    // A valid DefaultCMYK DeviceN replacement may itself be a
+                    // special space; it does not change the declared family.
+                    if !properties
+                        .declared_color_space_kind()
+                        .is_some_and(|kind| usage.permits(kind))
+                    {
+                        nested_error = Some(ImageColorSpaceError::Invalid);
+                        return None;
+                    }
+                    overridden |= properties.color_space_is_default_overridden();
+                    Some(space)
+                }
+                Err(error) => {
+                    nested_error = Some(error);
+                    None
+                }
+            },
+        );
     if let Some(error) = nested_error {
         return Err(error);
     }
@@ -252,21 +266,36 @@ mod tests {
                 let remapped_pdf = document(&source, &format!("/{default} {replacement}"), &extra);
                 let explicit_pdf = document(&explicit, "", &extra);
                 let (remapped, properties) = parse(&remapped_pdf, &cache).expect("remapped space");
-                let (explicit, explicit_properties) =
-                    parse(&explicit_pdf, &cache).expect("explicit space");
                 assert_eq!(properties.declared_color_space_kind(), Some(kind));
                 assert_eq!(properties.color_space_kind(), Some(kind));
                 assert!(properties.color_space_is_default_overridden());
-                assert!(!explicit_properties.color_space_is_default_overridden());
                 let count = input.len() / remapped.component_count();
                 let mut actual = vec![0; count * 3];
-                let mut expected = vec![0; count * 3];
                 remapped
                     .convert(&input, &mut actual)
                     .expect("remapped pixels");
-                explicit
-                    .convert(&input, &mut expected)
-                    .expect("explicit pixels");
+                let expected = if device == "DeviceCMYK" && kind != ColorSpaceKind::Indexed {
+                    // Device defaults may use DeviceN, but spelling DeviceN
+                    // directly as a tint alternate is prohibited. The two
+                    // tint functions above compose to gray from input 0.
+                    assert!(matches!(
+                        parse(&explicit_pdf, &cache),
+                        Err(ImageColorSpaceError::Invalid)
+                    ));
+                    input
+                        .chunks_exact(remapped.component_count())
+                        .flat_map(|components| [components[0]; 3])
+                        .collect::<Vec<_>>()
+                } else {
+                    let (explicit, explicit_properties) =
+                        parse(&explicit_pdf, &cache).expect("explicit space");
+                    assert!(!explicit_properties.color_space_is_default_overridden());
+                    let mut expected = vec![0; count * 3];
+                    explicit
+                        .convert(&input, &mut expected)
+                        .expect("explicit pixels");
+                    expected
+                };
                 assert_eq!(actual, expected, "{default}: {source}");
             }
         }

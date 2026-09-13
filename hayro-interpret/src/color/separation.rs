@@ -8,6 +8,7 @@ pub(crate) struct Separation {
     alternate_space: ColorSpace,
     tint_transform: Function,
     is_none_separation: bool,
+    is_all_separation: bool,
     lookup: U8Lookup<[u8; 3]>,
 }
 
@@ -17,6 +18,9 @@ impl Separation {
         intent: super::RenderingIntent,
     ) -> Result<Self, super::ColorConversionError> {
         let mut result = self.clone();
+        if self.is_all_separation {
+            return Ok(result);
+        }
         result.alternate_space = self.alternate_space.with_rendering_intent(intent)?;
         result.lookup = U8Lookup::default();
         Ok(result)
@@ -40,14 +44,14 @@ impl Separation {
         if tint_transform.arity()? != (1, alternate_space.component_count()) {
             return None;
         }
-        // Either I did something wrong, or no other viewers properly handles
-        // `All`, so let's just ignore it as well.
         let is_none_separation = name.as_str() == "None";
+        let is_all_separation = name.as_str() == "All";
 
         Some(Self {
             alternate_space,
             tint_transform,
             is_none_separation,
+            is_all_separation,
             lookup: U8Lookup::default(),
         })
     }
@@ -70,10 +74,20 @@ impl Separation {
         self.lookup
             .get_or_init(|input, output| self.convert_inner(input, output))
     }
+
+    pub(super) fn is_all(&self) -> bool {
+        self.is_all_separation
+    }
 }
 
 impl ToRgb for Separation {
     fn convert(&self, input: &[u8], output: &mut [u8]) -> Option<()> {
+        if self.is_all_separation {
+            for (tint, pixel) in input.iter().zip(output.chunks_exact_mut(3)) {
+                pixel.fill(255 - tint);
+            }
+            return Some(());
+        }
         let lookup = self.u8_lookup()?;
         for (input, output) in input.iter().zip(output.chunks_exact_mut(3)) {
             output.copy_from_slice(&lookup[*input as usize]);

@@ -57,7 +57,13 @@ fn decode_rgb<const BYTES: usize>(
     }
     let dict = obj.stream.dict();
     let jpx = uses_jpx_decode(dict);
-    let components = match obj.color_space.as_ref().map(|space| space.kind()) {
+    let components = match obj.color_space.as_ref().map(|space| {
+        if space.is_all_colorants() {
+            ColorSpaceKind::DeviceGray
+        } else {
+            space.kind()
+        }
+    }) {
         Some(ColorSpaceKind::DeviceGray | ColorSpaceKind::CalGray) => 1,
         Some(ColorSpaceKind::DeviceRgb | ColorSpaceKind::CalRgb | ColorSpaceKind::Lab) => 3,
         _ => return Err(Error::Unsupported),
@@ -114,7 +120,11 @@ pub(super) fn decode_context_rgb<const BYTES: usize>(
     mut checkpoint: impl FnMut() -> bool,
     encode: impl Fn(f64) -> [u8; BYTES],
 ) -> Result<Vec<u8>, Error> {
-    let components = match context.color_space.kind() {
+    let components = match if context.color_space.is_all_colorants() {
+        ColorSpaceKind::DeviceGray
+    } else {
+        context.color_space.kind()
+    } {
         ColorSpaceKind::DeviceGray | ColorSpaceKind::CalGray => 1,
         ColorSpaceKind::DeviceRgb | ColorSpaceKind::CalRgb | ColorSpaceKind::Lab => 3,
         _ => return Err(Error::Unsupported),

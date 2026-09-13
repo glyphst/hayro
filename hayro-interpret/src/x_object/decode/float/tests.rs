@@ -598,3 +598,102 @@ fn jpx_lab_uses_native_components_and_ignores_dictionary_decode() {
         }
     });
 }
+
+#[test]
+fn all_colorant_images_recover_tints_after_decode_and_palette_lookup() {
+    let all = "[/Separation /All /DeviceRGB << /FunctionType 2 /Domain [0 1] /C0 [.1 .2 .8] /C1 [.1 .2 .8] /N 1 >>]";
+    for (space, bits, decode, data, tints) in [
+        (
+            all.to_owned(),
+            1,
+            "",
+            vec![0x58],
+            vec![0.0, 1.0, 0.0, 1.0, 1.0],
+        ),
+        (
+            all.to_owned(),
+            2,
+            "",
+            vec![0x1b, 0x40],
+            vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0, 1.0 / 3.0],
+        ),
+        (
+            all.to_owned(),
+            4,
+            "",
+            vec![0x04, 0x8c, 0xf0],
+            vec![0.0, 4.0 / 15.0, 8.0 / 15.0, 12.0 / 15.0, 1.0],
+        ),
+        (
+            all.to_owned(),
+            8,
+            "/Decode [1 0]",
+            vec![0, 64, 128, 192, 255],
+            vec![1.0, 191.0 / 255.0, 127.0 / 255.0, 63.0 / 255.0, 0.0],
+        ),
+        (
+            all.to_owned(),
+            16,
+            "",
+            vec![0, 0, 0x80, 0, 0x80, 1, 0xff, 0xfe, 0xff, 0xff],
+            vec![
+                0.0,
+                32768.0 / 65535.0,
+                32769.0 / 65535.0,
+                65534.0 / 65535.0,
+                1.0,
+            ],
+        ),
+        (
+            format!("[/Indexed {all} 4 <ff408000c0>]"),
+            8,
+            "",
+            vec![0, 1, 2, 3, 4],
+            vec![1.0, 64.0 / 255.0, 128.0 / 255.0, 0.0, 192.0 / 255.0],
+        ),
+    ] {
+        let header =
+            format!("/Width 5 /Height 1 /ColorSpace {space} /BitsPerComponent {bits} {decode}");
+        with_image(&header, &data, |image| {
+            let raster = crate::RasterImage(image.clone());
+            assert!(raster.is_all_colorants());
+            let floats = raster.decode_rgb_f64(120, || true).unwrap();
+            let actual: Vec<f64> = floats
+                .data
+                .chunks_exact(8)
+                .map(|bytes| f64::from_le_bytes(bytes.try_into().unwrap()))
+                .collect();
+            let expected: Vec<f64> = tints.iter().flat_map(|tint| [1.0 - tint; 3]).collect();
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| (a - b).abs() <= f64::EPSILON),
+                "{bits}: {actual:?} {expected:?}"
+            );
+            let mut retained = None;
+            raster.with_all_colorants(
+                |tint, alpha| {
+                    assert!(alpha.is_none());
+                    retained = Some(tint.data);
+                },
+                None,
+            );
+            let retained = retained.expect("retained subtractive tints");
+            assert!(
+                retained
+                    .iter()
+                    .zip(&tints)
+                    .all(|(byte, tint)| (f64::from(*byte) - tint * 255.0).abs() <= 0.50001)
+            );
+            assert!(matches!(
+                raster.decode_rgb_f64(119, || true),
+                Err(Error::Limit { requested: 120 })
+            ));
+            assert!(matches!(
+                raster.decode_rgb_f64(120, || false),
+                Err(Error::Cancelled)
+            ));
+        });
+    }
+}

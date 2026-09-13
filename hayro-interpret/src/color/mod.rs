@@ -578,6 +578,9 @@ impl ColorSpace {
 
     /// Convert admitted image components without quantizing either side to bytes.
     pub(crate) fn image_rgb_f64(&self, input: &[f64]) -> Option<[f64; 3]> {
+        if let Some(tint) = self.all_colorant_tint(*input.first()?) {
+            return Some([1.0 - tint; 3]);
+        }
         let rgb = match self.0.as_ref() {
             ColorSpaceType::DeviceGray(_) => [*input.first()?; 3],
             ColorSpaceType::DeviceRgb(_) => [*input.first()?, *input.get(1)?, *input.get(2)?],
@@ -675,6 +678,11 @@ impl ColorSpace {
         let opacity = opacity.clamp(0.0, 1.0);
         let component = |index: usize| c.get(index).copied().unwrap_or(0.0).clamp(0.0, 1.0);
 
+        if let Some(tint) = self.all_colorant_tint(f64::from(c.first().copied().unwrap_or(0.0))) {
+            let gray = 1.0 - tint as f32;
+            return AlphaColor::new([gray, gray, gray, opacity]);
+        }
+
         match self.0.as_ref() {
             ColorSpaceType::DeviceGray(_) => {
                 let gray = component(0);
@@ -719,6 +727,34 @@ impl ColorSpace {
     /// over those spaces. It differs from zero opacity in a knockout group.
     pub fn is_non_marking(&self) -> bool {
         self.is_none()
+    }
+
+    /// Whether this space selects every output colorant using one subtractive tint.
+    /// Indexed palettes over Separation /All retain the same colorant identity.
+    pub fn is_all_colorants(&self) -> bool {
+        match self.0.as_ref() {
+            ColorSpaceType::Separation(space) => space.is_all(),
+            ColorSpaceType::Indexed(space) => space.base().is_all_colorants(),
+            _ => false,
+        }
+    }
+
+    /// Resolve a single source component to the original /All tint.
+    ///
+    /// The result remains subtractive regardless of the destination. Retained
+    /// consumers must apply it to every process component in their working space;
+    /// converting it to an ordinary gray paint would lose that identity.
+    pub fn all_colorant_tint(&self, component: f64) -> Option<f64> {
+        if !component.is_finite() {
+            return None;
+        }
+        match self.0.as_ref() {
+            ColorSpaceType::Separation(space) if space.is_all() => Some(component.clamp(0.0, 1.0)),
+            ColorSpaceType::Indexed(space) if space.base().is_all_colorants() => {
+                Some(f64::from(*space.entry(component).first()?) / 255.0)
+            }
+            _ => None,
+        }
     }
 
     fn to_alpha_color(&self, input: &[f32], opacity: f32) -> Option<AlphaColor> {
@@ -851,6 +887,21 @@ impl Color {
         self.color_space.is_non_marking()
     }
 
+    /// Original subtractive tint when this color addresses every output colorant.
+    pub fn all_colorant_tint(&self) -> Option<f32> {
+        let [component] = self.components.as_slice() else {
+            return None;
+        };
+        self.color_space
+            .all_colorant_tint(f64::from(*component))
+            .map(|tint| tint as f32)
+    }
+
+    /// Whether this color addresses every output colorant.
+    pub fn is_all_colorants(&self) -> bool {
+        self.color_space.is_all_colorants()
+    }
+
     /// Return the color's original PDF color-space family.
     pub fn color_space_kind(&self) -> ColorSpaceKind {
         self.color_space.kind()
@@ -901,6 +952,9 @@ fn encode_components(input: &[f32], ranges: &[(f32, f32)]) -> SmallVec<[u8; 4]> 
 
 #[cfg(test)]
 mod non_marking_tests;
+
+#[cfg(test)]
+mod all_colorant_tests;
 
 #[cfg(test)]
 mod retained_inspection_tests {

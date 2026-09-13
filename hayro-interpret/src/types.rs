@@ -1,5 +1,5 @@
 use crate::CacheKey;
-use crate::color::{Color, ColorSpaceKind};
+use crate::color::{Color, ColorSpace, ColorSpaceKind};
 use crate::pattern::Pattern;
 use crate::util::hash128;
 use crate::x_object::ImageXObject;
@@ -118,6 +118,14 @@ impl RasterImage<'_> {
         self.0.color_space_properties
     }
 
+    /// Whether the effective source space addresses every output colorant.
+    pub fn is_all_colorants(&self) -> bool {
+        self.0
+            .color_space
+            .as_ref()
+            .is_some_and(ColorSpace::is_all_colorants)
+    }
+
     /// Perform some operation with the RGB and alpha channel of the image.
     ///
     /// The second argument allows you to give the image decoder a hint for
@@ -150,6 +158,51 @@ impl RasterImage<'_> {
         if let Some(decoded) = self.0.decoded_device_cmyk_image(target_dimension) {
             func(decoded.image, decoded.alpha);
         }
+    }
+
+    /// Decode original /All tints and alpha for destination-dependent rendering.
+    ///
+    /// The callback receives subtractive bytes rather than the gray RGB preview.
+    /// Eager transfer functions prevent retaining that original colorant identity.
+    pub fn with_all_colorants(
+        &self,
+        func: impl FnOnce(LumaData, Option<LumaData>),
+        target_dimension: Option<(u32, u32)>,
+    ) {
+        if !self.is_all_colorants() || self.0.transfer_function.is_some() {
+            return;
+        }
+        let Some(decoded) = self.0.decoded_image(target_dimension) else {
+            return;
+        };
+        let tints = match decoded.image {
+            ImageData::Luma(mut data) => {
+                for value in &mut data.data {
+                    *value = 255 - *value;
+                }
+                data
+            }
+            ImageData::Rgb(data) => {
+                let mut tints = Vec::new();
+                if tints.try_reserve_exact(data.data.len() / 3).is_err() {
+                    return;
+                }
+                for pixel in data.data.chunks_exact(3) {
+                    if pixel[0] != pixel[1] || pixel[0] != pixel[2] {
+                        return;
+                    }
+                    tints.push(255 - pixel[0]);
+                }
+                LumaData {
+                    data: tints,
+                    width: data.width,
+                    height: data.height,
+                    interpolate: data.interpolate,
+                    scale_factors: data.scale_factors,
+                }
+            }
+        };
+        func(tints, decoded.alpha);
     }
 
     /// Return the underlying stream object.
@@ -478,7 +531,11 @@ impl CacheKey for Paint<'_> {
             Paint::Color(c) => {
                 // TODO: We should actually cache the color with color space etc., not just the
                 // RGBA8 version.
-                hash128(&(c.is_non_marking(), c.to_rgba().to_rgba8()))
+                hash128(&(
+                    c.is_non_marking(),
+                    c.all_colorant_tint().map(f32::to_bits),
+                    c.to_rgba().to_rgba8(),
+                ))
             }
             Paint::Pattern(p) => p.cache_key(),
         }

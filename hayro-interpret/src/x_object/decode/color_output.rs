@@ -23,14 +23,15 @@ impl<'a> ColorOutput<'a> {
             return None;
         }
         let gray = space.kind() == ColorSpaceKind::DeviceGray;
-        let native = matches!(
-            space.kind(),
-            ColorSpaceKind::DeviceGray
-                | ColorSpaceKind::DeviceRgb
-                | ColorSpaceKind::CalGray
-                | ColorSpaceKind::CalRgb
-                | ColorSpaceKind::Lab
-        );
+        let native = space.is_all_colorants()
+            || matches!(
+                space.kind(),
+                ColorSpaceKind::DeviceGray
+                    | ColorSpaceKind::DeviceRgb
+                    | ColorSpaceKind::CalGray
+                    | ColorSpaceKind::CalRgb
+                    | ColorSpaceKind::Lab
+            );
         let mut data = Vec::new();
         data.try_reserve_exact(count.checked_mul(if gray { 1 } else { 3 })?)
             .ok()?;

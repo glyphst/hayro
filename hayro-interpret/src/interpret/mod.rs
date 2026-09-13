@@ -768,16 +768,7 @@ pub fn interpret<'a>(
                 stroke_path(context, device);
             }
             TypedInstruction::EndPath(_) => {
-                if let Some(clip) = *context.clip()
-                    && !context.path().elements().is_empty()
-                {
-                    let clip_path = context.get().ctm * context.path().clone();
-                    context.push_clip_path(clip_path, clip, device);
-
-                    *(context.clip_mut()) = None;
-                }
-
-                context.path_mut().truncate(0);
+                path::end_path(context, device);
             }
             TypedInstruction::NonStrokeColor(c) => {
                 let gs = &mut context.get_mut().graphics_state;

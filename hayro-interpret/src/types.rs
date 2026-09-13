@@ -287,6 +287,22 @@ pub enum Image<'a, 'b> {
 }
 
 impl Image<'_, '_> {
+    /// Whether the image produces neither color nor object shape.
+    ///
+    /// Raster images use their own effective color space; stencils use the
+    /// selecting nonstroking paint. Decoding alone does not retain this state
+    /// in RGB samples, so devices must discard the corresponding paint operation.
+    pub fn is_non_marking(&self) -> bool {
+        match self {
+            Self::Stencil(image) => image.paint.is_non_marking(false),
+            Self::Raster(image) => image
+                .0
+                .color_space
+                .as_ref()
+                .is_some_and(|c| c.is_non_marking()),
+        }
+    }
+
     // These are hidden since clients are supposed to call get the
     // width/height from `LumaData/RgbData` instead.
     #[doc(hidden)]
@@ -433,10 +449,27 @@ impl ImageData {
 /// A type of paint.
 #[derive(Clone, Debug)]
 pub enum Paint<'a> {
-    /// A solid RGBA color.
+    /// A solid PDF color, retaining its source color-space identity.
     Color(Color),
     /// A PDF pattern.
     Pattern(Box<Pattern<'a>>),
+}
+
+impl Paint<'_> {
+    /// Whether this paint produces neither color nor object shape.
+    /// Colored patterns and colored Type 3 programs still interpret their own
+    /// paint operations; this describes only the selected paint itself.
+    pub fn is_non_marking(&self, is_stroke: bool) -> bool {
+        match self {
+            Self::Color(color) => color.is_non_marking(),
+            Self::Pattern(pattern) => match pattern.as_ref() {
+                Pattern::Shading(pattern) => pattern.shading.color_space.is_non_marking(),
+                Pattern::Tiling(pattern) => pattern
+                    .uncolored_base_color(is_stroke)
+                    .is_some_and(Color::is_non_marking),
+            },
+        }
+    }
 }
 
 impl CacheKey for Paint<'_> {
@@ -445,7 +478,7 @@ impl CacheKey for Paint<'_> {
             Paint::Color(c) => {
                 // TODO: We should actually cache the color with color space etc., not just the
                 // RGBA8 version.
-                hash128(&c.to_rgba().to_rgba8())
+                hash128(&(c.is_non_marking(), c.to_rgba().to_rgba8()))
             }
             Paint::Pattern(p) => p.cache_key(),
         }

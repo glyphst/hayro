@@ -116,10 +116,14 @@ impl<'a> Pattern<'a> {
                 if !pattern.is_color
                     && let Some(tf) = &tf
                 {
-                    pattern.stroke_paint =
-                        Color::from_rgba(tf.apply(&pattern.stroke_paint.to_rgba())?);
-                    pattern.non_stroking_paint =
-                        Color::from_rgba(tf.apply(&pattern.non_stroking_paint.to_rgba())?);
+                    if !pattern.stroke_paint.is_non_marking() {
+                        pattern.stroke_paint =
+                            Color::from_rgba(tf.apply(&pattern.stroke_paint.to_rgba())?);
+                    }
+                    if !pattern.non_stroking_paint.is_non_marking() {
+                        pattern.non_stroking_paint =
+                            Color::from_rgba(tf.apply(&pattern.non_stroking_paint.to_rgba())?);
+                    }
                 }
             }
         }

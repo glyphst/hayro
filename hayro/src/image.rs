@@ -483,6 +483,9 @@ impl Renderer<'_> {
         image: hayro_interpret::Image<'a, '_>,
         props: ImageDrawProps<'a>,
     ) {
+        if image.is_non_marking() {
+            return;
+        }
         self.apply_image_props(&props);
         let mut transform = props.transform;
         self.ctx.set_paint_transform(Affine::IDENTITY);

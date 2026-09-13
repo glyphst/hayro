@@ -333,6 +333,10 @@ impl ColorSpace {
         &self,
         intent: RenderingIntent,
     ) -> Result<Self, ColorConversionError> {
+        if self.is_non_marking() {
+            // The alternate space is ignored for /None, including its intent conversion.
+            return Ok(Self(self.0.clone(), intent, self.2.clone()));
+        }
         let variant = self.2[intent as usize].get_or_init(|| {
             let kind = match self.0.as_ref() {
                 ColorSpaceType::ICCBased(profile) => {
@@ -680,17 +684,20 @@ impl ColorSpace {
         }
     }
 
-    fn to_alpha_color(&self, input: &[f32], mut opacity: f32) -> Option<AlphaColor> {
+    /// Whether painting in this space produces neither color nor object shape.
+    ///
+    /// This includes Separation /None, all-None `DeviceN`, and Indexed palettes
+    /// over those spaces. It differs from zero opacity in a knockout group.
+    pub fn is_non_marking(&self) -> bool {
+        self.is_none()
+    }
+
+    fn to_alpha_color(&self, input: &[f32], opacity: f32) -> Option<AlphaColor> {
+        if self.is_non_marking() {
+            return Some(AlphaColor::TRANSPARENT);
+        }
         let mut output = [0; 3];
         self.convert_values(input, &mut output)?;
-
-        // For separation color spaces:
-        // "The special colourant name None shall not produce any visible output.
-        // Painting operations in a Separation space with this colourant name
-        // shall have no effect on the current page."
-        if self.is_none() {
-            opacity = 0.0;
-        }
 
         Some(AlphaColor::new([
             u8_to_f32(output[0]),
@@ -703,6 +710,10 @@ impl ColorSpace {
 
 impl ToRgb for ColorSpace {
     fn convert(&self, input: &[u8], output: &mut [u8]) -> Option<()> {
+        if self.is_non_marking() {
+            output.fill(0);
+            return Some(());
+        }
         match self.0.as_ref() {
             ColorSpaceType::DeviceCmyk(i) => i.convert(input, output),
             ColorSpaceType::DeviceGray(i) => i.convert(input, output),
@@ -719,6 +730,13 @@ impl ToRgb for ColorSpace {
     }
 
     fn convert_in_place(&self, input: &mut [u8]) -> Option<()> {
+        if self.is_non_marking() {
+            if self.num_components() != 3 {
+                return None;
+            }
+            input.fill(0);
+            return Some(());
+        }
         match self.0.as_ref() {
             ColorSpaceType::DeviceCmyk(i) => i.convert_in_place(input),
             ColorSpaceType::DeviceGray(i) => i.convert_in_place(input),
@@ -738,6 +756,7 @@ impl ToRgb for ColorSpace {
         match self.0.as_ref() {
             ColorSpaceType::Separation(s) => s.is_none(),
             ColorSpaceType::DeviceN(d) => d.is_none(),
+            ColorSpaceType::Indexed(i) => i.base().is_non_marking(),
             _ => false,
         }
     }
@@ -798,6 +817,11 @@ impl Color {
         self.color_space.to_rgba(&self.components, self.opacity)
     }
 
+    /// Whether this color produces no mark, even where zero opacity has shape.
+    pub fn is_non_marking(&self) -> bool {
+        self.color_space.is_non_marking()
+    }
+
     /// Return the color's original PDF color-space family.
     pub fn color_space_kind(&self) -> ColorSpaceKind {
         self.color_space.kind()
@@ -845,6 +869,9 @@ fn encode_components(input: &[f32], ranges: &[(f32, f32)]) -> SmallVec<[u8; 4]> 
         })
         .collect()
 }
+
+#[cfg(test)]
+mod non_marking_tests;
 
 #[cfg(test)]
 mod retained_inspection_tests {

@@ -508,6 +508,7 @@ impl<'a> Context<'a> {
         };
         let paint = self.get_paint(is_stroke);
         let deferred_transfer_function = (self.settings.defer_transfer_functions
+            && !paint.is_non_marking(is_stroke)
             && matches!(paint, Paint::Color(_)))
         .then(|| self.get().graphics_state.transfer_function.clone())
         .flatten();
@@ -569,6 +570,7 @@ impl<'a> Context<'a> {
             let color = Color::new(color_space, data.color, data.alpha);
 
             if !self.settings.defer_transfer_functions
+                && !color.is_non_marking()
                 && let Some(tf) = &data.transfer_function
             {
                 match tf.apply(&color.to_rgba()) {
@@ -608,10 +610,6 @@ impl<'a> Context<'a> {
 
     pub(crate) fn last_point_mut(&mut self) -> &mut Point {
         &mut self.last_point
-    }
-
-    pub(crate) fn clip(&self) -> &Option<FillRule> {
-        &self.clip
     }
 
     pub(crate) fn clip_mut(&mut self) -> &mut Option<FillRule> {

@@ -1,6 +1,6 @@
 use super::{ColorSpace, ToRgb, U8Lookup};
 use crate::function::Function;
-use hayro_syntax::object::{Array, Name, Object};
+use hayro_syntax::object::{Array, Dict, Name, Object};
 
 #[derive(Debug, Clone)]
 pub(crate) struct DeviceN {
@@ -26,18 +26,39 @@ impl DeviceN {
         array: &Array<'a>,
         resolve: &mut dyn FnMut(Object<'a>) -> Option<ColorSpace>,
     ) -> Option<Self> {
+        let count = array.raw_iter().take(6).count();
+        if !matches!(count, 4 | 5) {
+            return None;
+        }
         let mut iter = array.flex_iter();
         // Skip `/DeviceN`
         let _ = iter.next::<Name<'_>>()?;
-        // Skip `Name`.
-        let names = iter
-            .next::<Array<'_>>()?
-            .iter::<Name<'_>>()
-            .collect::<Vec<_>>();
-        let num_components = u8::try_from(names.len()).ok()?;
+        let names = iter.next::<Array<'_>>()?;
+        let num_components = u8::try_from(names.raw_iter().take(256).count()).ok()?;
+        let mut names_iter = names.flex_iter();
+        // Read every slot: a malformed tail must not turn a prefix of /None
+        // components into a valid non-marking space.
+        let names = (0..num_components)
+            .map(|_| names_iter.next::<Name<'_>>())
+            .collect::<Option<Vec<_>>>()?;
+        if names.iter().enumerate().any(|(index, name)| {
+            name.as_str() == "All" || (name.as_str() != "None" && names[..index].contains(name))
+        }) {
+            return None;
+        }
         let all_none = names.iter().all(|n| n.as_str() == "None");
         let alternate_space = resolve(iter.next::<Object<'_>>()?)?;
         let tint_transform = Function::new(&iter.next::<Object<'_>>()?)?;
+        if count == 5 {
+            let attributes = iter.next::<Dict<'_>>()?;
+            if attributes
+                .get::<Name<'_>>(b"Subtype")
+                .is_some_and(|n| n.as_str() == "NChannel")
+                && names.iter().any(|n| n.as_str() == "None")
+            {
+                return None;
+            }
+        }
 
         if num_components == 0 {
             return None;

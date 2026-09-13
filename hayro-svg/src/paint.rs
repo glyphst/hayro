@@ -90,12 +90,15 @@ impl<'a> SvgRenderer<'a> {
         path_transform: Affine,
         stroke_props: Option<&StrokeProps>,
     ) -> (String, f32) {
+        if paint.is_non_marking(stroke_props.is_some()) {
+            return ("none".to_owned(), 1.0);
+        }
         match &paint {
             Paint::Color(c) => {
                 let rgba8 = c.to_rgba().to_rgba8();
                 let color = format!(
                     "#{}",
-                    &rgba8[0..3]
+                    rgba8[0..3]
                         .iter()
                         .map(|b| format!("{b:02x}"))
                         .collect::<String>()

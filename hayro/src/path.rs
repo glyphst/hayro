@@ -39,6 +39,9 @@ impl Renderer<'_> {
         stroke_props: &StrokeProps,
         is_text: bool,
     ) {
+        if props.paint.is_non_marking(true) {
+            return;
+        }
         self.apply_draw_props(&props);
         self.set_stroke_properties(stroke_props, is_text);
 
@@ -53,6 +56,9 @@ impl Renderer<'_> {
     }
 
     pub(super) fn fill_path(&mut self, path: &BezPath, props: DrawProps<'_>, fill_rule: FillRule) {
+        if props.paint.is_non_marking(false) {
+            return;
+        }
         self.ctx.set_fill_rule(convert_fill_rule(fill_rule));
         self.apply_draw_props(&props);
 
@@ -97,6 +103,9 @@ impl Renderer<'_> {
     ) {
         match draw_mode {
             DrawMode::Fill(fill_rule) => {
+                if props.paint.is_non_marking(false) {
+                    return;
+                }
                 self.ctx.set_fill_rule(convert_fill_rule(*fill_rule));
                 self.apply_draw_props(&props);
 

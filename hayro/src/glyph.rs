@@ -121,6 +121,9 @@ impl Renderer<'_> {
     }
 
     fn fill_outline_run(&mut self, glyph_run: &GlyphRun<'_, '_>, props: &DrawProps<'_>) {
+        if props.paint.is_non_marking(false) {
+            return;
+        }
         match &props.paint {
             Paint::Color(_) => {
                 let clip_path = self.begin_fill_run(props, Rect::ZERO);
@@ -151,6 +154,9 @@ impl Renderer<'_> {
         props: &DrawProps<'_>,
         stroke_props: &StrokeProps,
     ) {
+        if props.paint.is_non_marking(true) {
+            return;
+        }
         match &props.paint {
             Paint::Color(_) => {
                 let clip_path = self.begin_stroke_run(props, stroke_props, Rect::ZERO);

@@ -26,6 +26,9 @@ impl Separation {
         array: &Array<'a>,
         resolve: &mut dyn FnMut(Object<'a>) -> Option<ColorSpace>,
     ) -> Option<Self> {
+        if array.raw_iter().take(5).count() != 4 {
+            return None;
+        }
         let mut iter = array.flex_iter();
         // Skip `/Separation`
         let _ = iter.next::<Name<'_>>()?;

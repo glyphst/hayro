@@ -142,7 +142,7 @@ impl<'a> SvgRenderer<'a> {
                     format!("translate({} {})", c[4] as f32, c[5] as f32)
                 }
                 _ => {
-                    format!("matrix({})", &convert_transform(&transform))
+                    format!("matrix({})", convert_transform(&transform))
                 }
             };
 
@@ -324,6 +324,9 @@ impl<'a> Device<'a> for SvgRenderer<'a> {
     }
 
     fn draw_image(&mut self, image: Image<'a, '_>, props: ImageDrawProps<'a>) {
+        if image.is_non_marking() {
+            return;
+        }
         self.with_group(props.soft_mask.clone(), props.blend_mode, |r| {
             let mut transform = props.transform;
             match image {

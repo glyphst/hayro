@@ -193,6 +193,13 @@ impl<'a> ImageXObject<'a> {
         }
 
         let mut bound = self.clone();
+        if bound
+            .color_space
+            .as_ref()
+            .is_some_and(ColorSpace::is_non_marking)
+        {
+            bound.transfer_function = None;
+        }
         let mut deferred_transfer_function = if context.settings.defer_transfer_functions {
             bound.transfer_function.take()
         } else {

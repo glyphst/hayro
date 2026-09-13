@@ -11,13 +11,13 @@ pub(crate) fn fill_path<'a>(
 ) {
     fill_path_impl(context, device, fill_rule, None);
 
-    context.path_mut().truncate(0);
+    end_path(context, device);
 }
 
 pub(crate) fn stroke_path<'a>(context: &mut Context<'a>, device: &mut impl Device<'a>) {
     stroke_path_impl(context, device, None);
 
-    context.path_mut().truncate(0);
+    end_path(context, device);
 }
 
 pub(crate) fn fill_stroke_path<'a>(
@@ -30,6 +30,16 @@ pub(crate) fn fill_stroke_path<'a>(
     stroke_path_impl(context, device, None);
     device.end_combined_fill_stroke();
 
+    end_path(context, device);
+}
+
+pub(crate) fn end_path<'a>(context: &mut Context<'a>, device: &mut impl Device<'a>) {
+    // W/W* take effect after the terminating paint operator, including a
+    // non-marking paint. Consume the pending clip before clearing the path.
+    if let Some(clip) = context.clip_mut().take() {
+        let clip_path = context.get().ctm * context.path().clone();
+        context.push_clip_path(clip_path, clip, device);
+    }
     context.path_mut().truncate(0);
 }
 

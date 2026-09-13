@@ -9,6 +9,7 @@ mod jpx_fixtures;
 mod mask;
 mod matte;
 mod samples;
+mod tint;
 
 pub(crate) use float::{decode_rgb_f32, decode_rgb_f64};
 

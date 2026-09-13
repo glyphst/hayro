@@ -24,6 +24,7 @@ impl<'a> ColorOutput<'a> {
         }
         let gray = space.kind() == ColorSpaceKind::DeviceGray;
         let native = space.is_all_colorants()
+            || space.uses_tint_transform()
             || matches!(
                 space.kind(),
                 ColorSpaceKind::DeviceGray
@@ -67,7 +68,7 @@ impl<'a> ColorOutput<'a> {
                     .map(|value| (value * 255.0).round() as u8),
             );
         } else {
-            // Preserve the existing byte-input ICC/tint policy, after recovery.
+            // Preserve the existing byte-input ICC policy, after recovery.
             self.batch.extend(
                 values
                     .iter()

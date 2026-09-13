@@ -56,18 +56,28 @@ impl Separation {
         })
     }
 
+    pub(super) fn convert_components(
+        &self,
+        input: &[f32],
+        opacity: f32,
+    ) -> Option<super::AlphaColor> {
+        let [tint] = input else { return None };
+        if !tint.is_finite() {
+            return None;
+        }
+        let values = self.tint_transform.eval(smallvec![tint.clamp(0.0, 1.0)])?;
+        Some(self.alternate_space.to_rgba(&values, opacity))
+    }
+
     fn convert_inner(&self, input: &[u8], output: &mut [u8]) -> Option<()> {
-        let evaluated = input
-            .iter()
-            .flat_map(|n| {
-                let values = self
-                    .tint_transform
-                    .eval(smallvec![*n as f32 / 255.0])
-                    .unwrap_or(self.alternate_space.initial_color());
-                self.alternate_space.encode_values(&values)
-            })
-            .collect::<Vec<u8>>();
-        self.alternate_space.convert(&evaluated, output)
+        if output.len() != input.len().checked_mul(3)? {
+            return None;
+        }
+        for (tint, pixel) in input.iter().zip(output.chunks_exact_mut(3)) {
+            let color = self.convert_components(&[f32::from(*tint) / 255.0], 1.0)?;
+            pixel.copy_from_slice(&color.to_rgba8()[..3]);
+        }
+        Some(())
     }
 
     fn u8_lookup(&self) -> Option<&[[u8; 3]; 256]> {

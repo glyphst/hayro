@@ -81,23 +81,41 @@ impl DeviceN {
         })
     }
 
-    fn evaluate(&self, input: &[u8]) -> Vec<u8> {
-        input
-            .chunks_exact(self.num_components as usize)
-            .flat_map(|n| {
-                let input = n.iter().map(|value| *value as f32 / 255.0).collect();
-                let values = self
-                    .tint_transform
-                    .eval(input)
-                    .unwrap_or(self.alternate_space.initial_color());
-                self.alternate_space.encode_values(&values)
-            })
-            .collect()
+    pub(super) fn convert_components(
+        &self,
+        input: &[f32],
+        opacity: f32,
+    ) -> Option<super::AlphaColor> {
+        if input.len() != usize::from(self.num_components)
+            || input.iter().any(|value| !value.is_finite())
+        {
+            return None;
+        }
+        let values = self
+            .tint_transform
+            .eval(input.iter().map(|value| value.clamp(0.0, 1.0)).collect())?;
+        Some(self.alternate_space.to_rgba(&values, opacity))
     }
 
     fn convert_inner(&self, input: &[u8], output: &mut [u8]) -> Option<()> {
-        let evaluated = self.evaluate(input);
-        self.alternate_space.convert(&evaluated, output)
+        let components = usize::from(self.num_components);
+        if !input.len().is_multiple_of(components)
+            || output.len() != (input.len() / components).checked_mul(3)?
+        {
+            return None;
+        }
+        for (source, pixel) in input
+            .chunks_exact(components)
+            .zip(output.chunks_exact_mut(3))
+        {
+            let values: smallvec::SmallVec<[f32; 4]> = source
+                .iter()
+                .map(|value| f32::from(*value) / 255.0)
+                .collect();
+            let color = self.convert_components(&values, 1.0)?;
+            pixel.copy_from_slice(&color.to_rgba8()[..3]);
+        }
+        Some(())
     }
 
     fn u8_lookup(&self) -> Option<&[[u8; 3]; 256]> {
@@ -121,12 +139,16 @@ impl ToRgb for DeviceN {
     }
 
     fn convert_in_place(&self, input: &mut [u8]) -> Option<()> {
-        if self.num_components != 3 {
+        if self.num_components != 3 || !input.len().is_multiple_of(3) {
             return None;
         }
 
-        let evaluated = self.evaluate(input);
-        self.alternate_space.convert(&evaluated, input)
+        for pixel in input.chunks_exact_mut(3) {
+            let values = [pixel[0], pixel[1], pixel[2]].map(|value| f32::from(value) / 255.0);
+            let color = self.convert_components(&values, 1.0)?;
+            pixel.copy_from_slice(&color.to_rgba8()[..3]);
+        }
+        Some(())
     }
 
     fn is_none(&self) -> bool {

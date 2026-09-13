@@ -90,6 +90,11 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
 
     fn decode_image(&mut self) -> Option<ImageData> {
         let dict = self.obj.stream.dict();
+        if self.ctx.color_space.uses_tint_transform()
+            && super::tint::needs_native_samples(&self.ctx)
+        {
+            return super::tint::decode(self.obj, &self.ctx);
+        }
         if self.ctx.color_space.kind() == ColorSpaceKind::Lab
             && !dict.contains_key(MASK)
             && !dict.contains_key(SMASK)

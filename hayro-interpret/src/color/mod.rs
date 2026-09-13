@@ -14,6 +14,7 @@ mod intent;
 mod lab;
 mod pattern;
 mod separation;
+mod tint;
 
 use self::cal_gray::CalGray;
 use self::cal_rgb::CalRgb;
@@ -549,6 +550,11 @@ impl ColorSpace {
     }
 
     pub(crate) fn convert_values(&self, input: &[f32], output: &mut [u8]) -> Option<()> {
+        if self.uses_tint_transform() {
+            let color = self.tint_rgba(input, 1.0)?;
+            output.get_mut(..3)?.copy_from_slice(&color.to_rgba8()[..3]);
+            return Some(());
+        }
         // Calibrated paints and sampled shadings carry real components.
         // Quantizing before gamma creates large steps in their dark colors.
         let calibrated = match self.0.as_ref() {
@@ -580,6 +586,12 @@ impl ColorSpace {
     pub(crate) fn image_rgb_f64(&self, input: &[f64]) -> Option<[f64; 3]> {
         if let Some(tint) = self.all_colorant_tint(*input.first()?) {
             return Some([1.0 - tint; 3]);
+        }
+        if self.uses_tint_transform() {
+            // The bounded PDF function executor retains its binary32 real
+            // arithmetic. Preserve native Decode/Matte values until that input
+            // boundary; do not introduce an eight-bit tint table first.
+            return self.image_tint_rgb(input);
         }
         let rgb = match self.0.as_ref() {
             ColorSpaceType::DeviceGray(_) => [*input.first()?; 3],
@@ -683,7 +695,12 @@ impl ColorSpace {
             return AlphaColor::new([gray, gray, gray, opacity]);
         }
 
+        if self.uses_tint_transform() {
+            return self.tint_rgba(c, opacity).unwrap_or(AlphaColor::BLACK);
+        }
+
         match self.0.as_ref() {
+            ColorSpaceType::Pattern(pattern) => pattern.color_space().to_rgba(c, opacity),
             ColorSpaceType::DeviceGray(_) => {
                 let gray = component(0);
                 AlphaColor::new([gray, gray, gray, opacity])
@@ -955,6 +972,8 @@ mod non_marking_tests;
 
 #[cfg(test)]
 mod all_colorant_tests;
+#[cfg(test)]
+mod tint_tests;
 
 #[cfg(test)]
 mod retained_inspection_tests {

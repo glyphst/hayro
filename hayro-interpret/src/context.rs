@@ -536,6 +536,11 @@ impl<'a> Context<'a> {
         };
         if data.color_space.is_pattern() || data.pattern.is_some() {
             if let Some(mut pattern) = data.pattern {
+                // Alpha belongs to the painting operation, which may occur
+                // after a different ExtGState than the pattern selection.
+                if let crate::pattern::Pattern::Shading(shading) = &mut pattern {
+                    shading.opacity = data.alpha;
+                }
                 if let Err(error) = pattern.set_rendering_intent(intent) {
                     return failed(error);
                 }

@@ -132,6 +132,7 @@ impl<'a> Type3<'a> {
         transform: Affine,
         glyph_transform: Affine,
         paint: &Paint<'a>,
+        paint_shape: bool,
         device: &mut impl Device<'a>,
     ) -> Option<()> {
         let mut state = glyph.state.clone();
@@ -168,6 +169,17 @@ impl<'a> Type3<'a> {
             is_shape_glyph || state.type3_shape_only
         };
         state.type3_shape_only = is_shape_glyph;
+        if paint_shape {
+            if !is_shape_glyph {
+                return None;
+            }
+            state.graphics_state.non_stroke_alpha = 1.0;
+            state.graphics_state.stroke_alpha = 1.0;
+            state.graphics_state.alpha_is_shape = false;
+            state.graphics_state.soft_mask = None;
+            state.graphics_state.blend_mode = BlendMode::Normal;
+            state.graphics_state.transfer_function = None;
+        }
 
         // Context bounds are in the device coordinate system, including the
         // FontMatrix. An all-zero FontBBox is explicitly unknown (Table 112):
@@ -216,13 +228,16 @@ impl<'a> Type3<'a> {
         }
 
         if is_shape_glyph {
-            let deferred_transfer_function = glyph
-                .settings
-                .defer_transfer_functions
+            let deferred_transfer_function = (glyph.settings.defer_transfer_functions
+                && !paint_shape)
                 .then(|| glyph.state.graphics_state.transfer_function.clone())
                 .flatten();
-            let mut device =
-                Type3ShapeGlyphDevice::new(device, paint.clone(), deferred_transfer_function);
+            let mut device = Type3ShapeGlyphDevice::new(
+                device,
+                paint.clone(),
+                deferred_transfer_function,
+                paint_shape,
+            );
             interpret(iter, &resources, &mut context, &mut device);
         } else {
             interpret(iter, &resources, &mut context, device);
@@ -274,6 +289,7 @@ struct Type3ShapeGlyphDevice<'a, 'b, T: Device<'a>> {
     inner: &'b mut T,
     paint: Paint<'a>,
     deferred_transfer_function: Option<crate::ActiveTransferFunction>,
+    opaque_shape: bool,
 }
 
 impl<'a, 'b, T: Device<'a>> Type3ShapeGlyphDevice<'a, 'b, T> {
@@ -281,11 +297,13 @@ impl<'a, 'b, T: Device<'a>> Type3ShapeGlyphDevice<'a, 'b, T> {
         device: &'b mut T,
         paint: Paint<'a>,
         deferred_transfer_function: Option<crate::ActiveTransferFunction>,
+        opaque_shape: bool,
     ) -> Self {
         Self {
             inner: device,
             paint,
             deferred_transfer_function,
+            opaque_shape,
         }
     }
 }
@@ -356,7 +374,10 @@ impl<'a, T: Device<'a>> Device<'a> for Type3ShapeGlyphDevice<'a, '_, T> {
     }
 
     fn begin_text_object(&mut self, text_knockout: bool) {
-        self.inner.begin_text_object(text_knockout);
+        // Uniform opaque shape marks combine by union. Their text knockout
+        // boundary cannot change a sample's color or shape.
+        self.inner
+            .begin_text_object(text_knockout && !self.opaque_shape);
     }
 
     fn end_text_object(&mut self) {

@@ -492,7 +492,30 @@ impl<'a> Type3Glyph<'a> {
         paint: &Paint<'a>,
     ) {
         self.font
-            .render_glyph(self, transform, glyph_transform, paint, device);
+            .render_glyph(self, transform, glyph_transform, paint, false, device);
+    }
+
+    /// Interpret an uncolored glyph as a uniformly colored opaque RGB shape.
+    ///
+    /// Inherited opacity, blend mode, soft mask, alpha source and transfer are
+    /// excluded. Use white to construct an alpha mask, or the selecting RGB
+    /// color to construct an isolated group. The caller must apply the selecting
+    /// transparency once to the combined shape. Returns false without drawing
+    /// when the glyph is colored or has no readable program.
+    pub fn interpret_shape(
+        &self,
+        device: &mut impl Device<'a>,
+        transform: Affine,
+        glyph_transform: Affine,
+        color: [f32; 3],
+    ) -> bool {
+        let [r, g, b] = color;
+        let paint = Paint::Color(crate::color::Color::from_rgba(
+            crate::color::AlphaColor::new([r, g, b, 1.0]),
+        ));
+        self.font
+            .render_glyph(self, transform, glyph_transform, &paint, true, device)
+            .is_some()
     }
 
     /// Returns the Unicode code point for this glyph, if available.

@@ -165,8 +165,9 @@ impl<'a> Type3<'a> {
                 }
             }
 
-            is_shape_glyph
+            is_shape_glyph || state.type3_shape_only
         };
+        state.type3_shape_only = is_shape_glyph;
 
         // Context bounds are in the device coordinate system, including the
         // FontMatrix. An all-zero FontBBox is explicitly unknown (Table 112):
@@ -289,7 +290,8 @@ impl<'a, 'b, T: Device<'a>> Type3ShapeGlyphDevice<'a, 'b, T> {
     }
 }
 
-// Only filling, stroking of paths and stencil masks are allowed.
+// Every mark in an uncolored program uses the selecting text paint. Nested
+// Type 3 invocations also retain type3_shape_only in their interpreter state.
 impl<'a, T: Device<'a>> Device<'a> for Type3ShapeGlyphDevice<'a, '_, T> {
     fn draw_path(&mut self, path: &BezPath, props: DrawProps<'a>, draw_mode: &DrawMode) {
         let props = DrawProps {
@@ -312,7 +314,45 @@ impl<'a, T: Device<'a>> Device<'a> for Type3ShapeGlyphDevice<'a, '_, T> {
         props: DrawProps<'a>,
         draw_mode: &DrawMode,
     ) {
+        let props = DrawProps {
+            paint: self.paint.clone(),
+            deferred_transfer_function: self.deferred_transfer_function.clone(),
+            ..props
+        };
         self.inner.draw_glyph_run(glyph_run, props, draw_mode);
+    }
+
+    fn record_glyph_run(&mut self, glyph_run: &GlyphRun<'_, 'a>, transform: Affine, visible: bool) {
+        self.inner.record_glyph_run(glyph_run, transform, visible);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
+    }
+
+    fn begin_marked_content(&mut self, tag: &[u8], mcid: Option<i32>) {
+        self.inner.begin_marked_content(tag, mcid);
+    }
+
+    fn begin_marked_content_with_properties(
+        &mut self,
+        tag: &[u8],
+        properties: crate::MarkedContentProperties,
+    ) {
+        self.inner
+            .begin_marked_content_with_properties(tag, properties);
+    }
+
+    fn end_marked_content(&mut self) {
+        self.inner.end_marked_content();
+    }
+
+    fn begin_optional_content(&mut self, expression: &crate::OptionalContentExpression) {
+        self.inner.begin_optional_content(expression);
+    }
+
+    fn end_optional_content(&mut self) {
+        self.inner.end_optional_content();
     }
 
     fn begin_text_object(&mut self, text_knockout: bool) {

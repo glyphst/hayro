@@ -532,6 +532,7 @@ impl CacheKey for Type3Glyph<'_> {
             self.font.cache_key(),
             self.glyph_id,
             self.settings.defer_transfer_functions,
+            self.state.type3_shape_only,
             unknown_domain,
         ))
     }

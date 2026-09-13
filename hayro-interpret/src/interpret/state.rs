@@ -126,6 +126,10 @@ pub(crate) struct State<'a> {
     // Strictly speaking not part of the graphics state, but we keep it there for
     // consistency.
     pub(crate) clips: Vec<ClipType>,
+    // A nested glyph or Form remains part of an enclosing d1 program's shape,
+    // even when its own CharProc begins with d0. This travels with invocations
+    // retained by devices; it is not reset by text or color operators.
+    pub(crate) type3_shape_only: bool,
 }
 
 impl Default for State<'_> {
@@ -133,6 +137,7 @@ impl Default for State<'_> {
         State {
             ctm: Affine::IDENTITY,
             clips: vec![],
+            type3_shape_only: false,
             text_state: TextState::default(),
             graphics_state: GraphicsState::default(),
         }

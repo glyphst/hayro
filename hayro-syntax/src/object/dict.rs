@@ -81,6 +81,18 @@ impl<'a> Dict<'a> {
         self.get_raw::<T>(key.as_ref())?.resolve(self.ctx())
     }
 
+    /// Read a named resource independently of its caller's object ancestry.
+    /// Direct values retain the dictionary's decryption context. Interpretation
+    /// owns invocation cycles; parsing inside this lookup still checks cycles.
+    pub(crate) fn get_resource<T: ObjectLike<'a>>(&self, key: &[u8]) -> Option<T> {
+        let offset = *self.offsets()?.get(key)?;
+        let mut ctx = self.ctx().clone();
+        ctx.clear_parent_chain();
+        Reader::new(&self.data()[offset..])
+            .read_with_context::<MaybeRef<T>>(&ctx)?
+            .resolve(&ctx)
+    }
+
     /// Get the object reference linked to a key.
     pub fn get_ref(&self, key: impl AsRef<[u8]>) -> Option<ObjRef> {
         let offset = *self.offsets()?.get(key.as_ref())?;

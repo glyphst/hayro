@@ -24,11 +24,39 @@ use kurbo::{Affine, BezPath, Point, Rect};
 use rustc_hash::FxHashMap;
 use skrifa::GlyphId;
 
+/// The character-to-program mapping used by a Type 3 font.
+///
+/// This shares the interpreter's base encoding, Differences and missing-code
+/// behavior with callers that inspect glyph programs without painting them.
+#[derive(Debug)]
+pub struct Type3Encoding {
+    base: Encoding,
+    differences: FxHashMap<u8, String>,
+}
+
+impl Type3Encoding {
+    /// Read the font dictionary's Encoding using the interpreter's rules.
+    pub fn new(font: &Dict<'_>) -> Self {
+        let (base, differences) = read_encoding(font);
+        Self { base, differences }
+    }
+
+    /// Return the encoded glyph name, when this code has a mapping.
+    pub fn glyph_name(&self, code: u8) -> Option<&str> {
+        encoded_glyph_name(&self.base, &self.differences, code)
+    }
+
+    /// Return the program name selected by the interpreter, including its
+    /// existing missing-code glyph-simulator mapping.
+    pub fn program_name(&self, code: u8) -> &str {
+        self.glyph_name(code).unwrap_or("notdef")
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Type3<'a> {
     widths: [f32; 256],
-    encoding: Encoding,
-    encodings: FxHashMap<u8, String>,
+    encoding: Type3Encoding,
     dict: Dict<'a>,
     char_procs: FxHashMap<String, Stream<'a>>,
     glyph_simulator: GlyphSimulator,
@@ -39,7 +67,7 @@ pub(crate) struct Type3<'a> {
 
 impl<'a> Type3<'a> {
     pub(crate) fn new(dict: &Dict<'a>, cmap_resolver: &CMapResolverFn) -> Option<Self> {
-        let (encoding, encodings) = read_encoding(dict);
+        let encoding = Type3Encoding::new(dict);
         let widths = read_type3_widths(dict)?;
         let bbox = dict.get::<[f64; 4]>(FONT_BBOX)?;
         let coefficients = dict.get::<[f64; 6]>(FONT_MATRIX)?;
@@ -79,7 +107,6 @@ impl<'a> Type3<'a> {
             font_bbox,
             char_procs,
             widths,
-            encodings,
             matrix,
             dict: dict.clone(),
             to_unicode,
@@ -87,7 +114,8 @@ impl<'a> Type3<'a> {
     }
 
     pub(crate) fn map_code(&self, code: u8) -> GlyphId {
-        encoded_glyph_name(&self.encoding, &self.encodings, code)
+        self.encoding
+            .glyph_name(code)
             .map(|g| self.glyph_simulator.string_to_glyph(g))
             .unwrap_or(GlyphId::NOTDEF)
     }
@@ -123,7 +151,9 @@ impl<'a> Type3<'a> {
         }
 
         let code = u8::try_from(char_code).ok()?;
-        encoded_glyph_name(&self.encoding, &self.encodings, code).and_then(glyph_name_to_bf_string)
+        self.encoding
+            .glyph_name(code)
+            .and_then(glyph_name_to_bf_string)
     }
 
     pub(crate) fn render_glyph(
@@ -409,12 +439,42 @@ impl<'a, T: Device<'a>> Device<'a> for Type3ShapeGlyphDevice<'a, '_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Type3, encoded_glyph_name, read_type3_widths};
+    use super::{Type3, Type3Encoding, encoded_glyph_name, read_type3_widths};
     use crate::CMapResolverFn;
     use crate::font::Encoding;
     use hayro_syntax::object::{Array, Dict, FromBytes};
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn type3_encoding_shares_base_differences_aliases_and_missing_programs() {
+        let dict = Dict::from_bytes(b"<< /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [65 /B /B 67 /C#61ll 255 /Last /Outside 65 /Override] >> >>").unwrap();
+        let encoding = Type3Encoding::new(&dict);
+        for (code, expected) in [
+            (65, "Override"),
+            (66, "B"),
+            (67, "Call"),
+            (128, "Euro"),
+            (255, "Last"),
+        ] {
+            assert_eq!(encoding.glyph_name(code), Some(expected));
+            assert_eq!(encoding.program_name(code), expected);
+        }
+        let empty = Type3Encoding::new(&Dict::from_bytes(b"<< >>").unwrap());
+        assert_eq!(empty.glyph_name(1), None);
+        assert_eq!(empty.glyph_name(0), Some(".notdef"));
+        assert_eq!(empty.program_name(1), "notdef");
+        assert_eq!(empty.program_name(0), ".notdef");
+    }
+
+    #[test]
+    fn type3_encoding_out_of_range_differences_cannot_overflow() {
+        let dict = Dict::from_bytes(b"<< /Encoding << /Differences [9223372036854775807 /Outside /StillOutside -1 /Negative /Zero 65 /A] >> >>").unwrap();
+        let encoding = Type3Encoding::new(&dict);
+        assert_eq!(encoding.glyph_name(0), Some("Zero"));
+        assert_eq!(encoding.glyph_name(65), Some("A"));
+        assert_eq!(encoding.glyph_name(255), None);
+    }
 
     #[test]
     fn graphics_state_font_pairs_require_complete_reads() {

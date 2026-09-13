@@ -601,7 +601,7 @@ impl<'a> Resources<'a> {
     }
 
     fn get_resource<T: ObjectLike<'a>>(&self, name: &Name<'_>, dict: &Dict<'a>) -> Option<T> {
-        dict.get::<T>(name.deref())
+        dict.get_resource::<T>(name.deref())
     }
 
     /// Get the parent in the resource, chain, if available.

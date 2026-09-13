@@ -228,6 +228,14 @@ impl<'a> ReaderContext<'a> {
         }
     }
 
+    /// Resource invocation starts a new lookup, retaining string ownership and
+    /// decryption flags while discarding only completed object-read ancestry.
+    pub(crate) fn clear_parent_chain(&mut self) {
+        if let ReaderContextInner::Shared(inner) = &mut self.0 {
+            Arc::make_mut(inner).parent_chain.clear();
+        }
+    }
+
     #[inline]
     pub(crate) fn parent_chain_contains(&self, id: &ObjectIdentifier) -> bool {
         match &self.0 {

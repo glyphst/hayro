@@ -227,3 +227,23 @@ fn external_and_unresolved_members_have_explicit_errors() {
         Err(PageStreamError::InvalidContents)
     ));
 }
+
+#[test]
+fn resources_can_revisit_fonts_without_reusing_parser_ancestry() {
+    let pdf = pdf("/Resources << /Font << /F 5 0 R >> >>", b"<< /Type /Font /Subtype /Type3 /Self 5 0 R /Resources << /Font << /F 5 0 R >> /ExtGState << /Select << /Font [5 0 R 1000] >> >> >> >>");
+    let mut resources = pdf.pages()[0].resources().clone();
+    for _ in 0..64 {
+        let font = resources.get_font(&Name::new_unescaped(b"F")).unwrap();
+        assert_eq!(font.get::<Name<'_>>(b"Subtype").unwrap().as_ref(), b"Type3");
+        // Ordinary dictionary recursion remains a failed read.
+        assert!(font.get::<Dict<'_>>(b"Self").is_none());
+        resources =
+            super::Resources::from_parent(font.get::<Dict<'_>>(b"Resources").unwrap(), resources);
+        let state = resources
+            .get_ext_g_state(&Name::new_unescaped(b"Select"))
+            .unwrap();
+        let array = state.get::<crate::object::Array<'_>>(b"Font").unwrap();
+        let selected = array.iter::<Dict<'_>>().next().unwrap();
+        assert_eq!(selected.obj_id(), Some(ObjectIdentifier::new(5, 0)));
+    }
+}

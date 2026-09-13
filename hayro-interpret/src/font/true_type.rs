@@ -592,7 +592,7 @@ pub(crate) fn read_encoding(dict: &Dict<'_>) -> (Encoding, FxHashMap<u8, String>
                         if let Ok(code) = code.try_into() {
                             map.insert(code, name.as_str().to_string());
                         }
-                        code += 1;
+                        code = code.saturating_add(1);
                     }
                     _ => {}
                 }

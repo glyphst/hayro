@@ -152,6 +152,24 @@ impl<'a> State<'a> {
         }
     }
 
+    /// Map already selected patterns into a retained invocation's coordinates.
+    pub(crate) fn transform_patterns(&mut self, transform: Affine) -> bool {
+        let patterns = [
+            &mut self.graphics_state.stroke_pattern,
+            &mut self.graphics_state.non_stroke_pattern,
+        ];
+        if patterns.iter().all(|pattern| pattern.is_none()) {
+            return true;
+        }
+        if !transform.as_coeffs().iter().all(|value| value.is_finite()) {
+            return false;
+        }
+        for pattern in patterns.into_iter().flatten() {
+            pattern.pre_concat_matrix(transform);
+        }
+        true
+    }
+
     pub(crate) fn stroke_data(&self) -> PaintData<'a> {
         PaintData {
             alpha: self.graphics_state.stroke_alpha,

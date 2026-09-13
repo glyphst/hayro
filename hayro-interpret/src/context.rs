@@ -554,7 +554,7 @@ impl<'a> Context<'a> {
                     return Paint::Color(Color::from_rgba(crate::color::AlphaColor::TRANSPARENT));
                 }
 
-                pattern.pre_concat_transform(self.root_transform());
+                pattern.resolve_clip();
 
                 Paint::Pattern(Box::new(pattern))
             } else {

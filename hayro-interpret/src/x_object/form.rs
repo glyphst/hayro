@@ -166,10 +166,17 @@ impl<'a> FormInvocation<'a> {
         let mut normalized_state = state.clone();
         normalized_state.ctm = Affine::IDENTITY;
         normalized_state.clips.clear();
+        // Inherited pattern anchors affect the normalized visual subscene.
+        // Include their local placement so translated invocations cannot reuse
+        // a cell lattice captured for another position.
+        let patterns_normalized = normalized_state.transform_patterns(instance_transform.inverse());
         let form_key = hash128(&(
             hash128(form.decoded.as_ref()),
             form.dict.cache_key(),
             resources_cache_key(&resources),
+            // An invalid normalization must not reuse a valid local replay
+            // and thereby bypass its PatternTransformFailure diagnostic.
+            (!patterns_normalized).then(|| instance_transform.cache_key()),
         ));
         // The complete inherited state determines whether two invocations can
         // share one locally interpreted visual subscene. Debug formatting is
@@ -247,6 +254,12 @@ impl<'a> FormInvocation<'a> {
     fn interpret_with_root(&self, device: &mut impl Device<'a>, root: Affine) {
         let mut state = self.state.clone();
         state.ctm = root * self.form.matrix;
+        if root != self.instance_transform
+            && !state.transform_patterns(root * self.instance_transform.inverse())
+        {
+            (self.settings.warning_sink)(crate::InterpreterWarning::PatternTransformFailure);
+            return;
+        }
         // The caller's clip stack remains active around the form invocation;
         // only clips established inside the form belong to its local replay.
         state.clips.clear();
@@ -720,6 +733,7 @@ mod tests {
         raster_images: Vec<(ImageColorSpaceProperties, Vec<u8>)>,
         raster_alpha_modes: Vec<Option<EmbeddedImageAlphaMode>>,
         raster_alpha_planes: Vec<Option<Vec<u8>>>,
+        patterns: Vec<(Affine, Option<Rect>)>,
     }
 
     impl RecordingDevice {
@@ -747,6 +761,15 @@ mod tests {
             self.draw_modes.push(mode.clone());
             self.alpha_is_shape.push(props.alpha_is_shape);
             self.alpha_constants.push(props.alpha_constant);
+            if let crate::Paint::Pattern(pattern) = &props.paint {
+                self.patterns.push(match pattern.as_ref() {
+                    crate::pattern::Pattern::Tiling(pattern) => (pattern.matrix, None),
+                    crate::pattern::Pattern::Shading(pattern) => (
+                        pattern.matrix,
+                        pattern.shading.clip_path.as_ref().map(Shape::bounding_box),
+                    ),
+                });
+            }
             if let Some(mask) = props.soft_mask.take() {
                 self.record_soft_mask(mask);
             }
@@ -1232,6 +1255,68 @@ mod tests {
                 .all(|transform| transform.as_coeffs() == [1.0, 0.0, 0.0, 1.0, 3.0, 4.0])
         );
         assert!(device.group_properties.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn inherited_pattern_anchors_and_shading_boxes_survive_local_form_replay() {
+        for shading in [false, true] {
+            for select_locally in [false, true] {
+                let page = "/Pattern cs /P scn /Pattern CS /P SCN q 1 0 0 1 10 20 cm /Fm Do Q q 1 0 0 1 30 40 cm /Fm Do Q q 1 0 0 1 10 20 cm /Fm Do Q 0 0 10 10 re f";
+                let form = format!(
+                    "{}0 0 10 10 re f 0 0 10 10 re S",
+                    if select_locally {
+                        "/Pattern cs /P scn /Pattern CS /P SCN "
+                    } else {
+                        ""
+                    }
+                );
+                let pattern = if shading {
+                    "<</Type/Pattern/PatternType 2/Matrix[2 0 0 3 5 7]/Shading<</ShadingType 2/ColorSpace/DeviceRGB/BBox[0 0 2 3]/Coords[0 0 2 0]/Function<</FunctionType 2/Domain[0 1]/C0[0 0 0]/C1[1 1 1]/N 1>>>>>>".to_owned()
+                } else {
+                    let cell = "0 0 2 3 re f";
+                    format!(
+                        "<</Type/Pattern/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 2 3]/XStep 4/YStep 5/Matrix[2 0 0 3 5 7]/Length {}>>stream\n{cell}\nendstream",
+                        cell.len()
+                    )
+                };
+                let bytes = format!("%PDF-1.7\n1 0 obj <</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</Pattern<</P 6 0 R>>/XObject<</Fm 5 0 R>>>>/Contents 4 0 R>>endobj\n4 0 obj <</Length {}>>stream\n{page}\nendstream endobj\n5 0 obj <</Type/XObject/Subtype/Form/BBox[0 0 10 10]/Matrix[1 0 0 1 3 4]/Length {}>>stream\n{form}\nendstream endobj\n6 0 obj {pattern} endobj\ntrailer <</Root 1 0 R>>\n%%EOF", page.len(), form.len()).into_bytes();
+                for retained in [false, true] {
+                    let device = interpret_bytes(bytes.clone(), retained);
+                    assert_eq!(device.patterns.len(), 7);
+                    assert_ne!(device.form_keys[0], device.form_keys[1]);
+                    assert_eq!(device.form_keys[0], device.form_keys[2]);
+                    for (index, (matrix, clip)) in device.patterns.iter().enumerate() {
+                        let outer = if index < 6 {
+                            device.instance_transforms[index / 2]
+                        } else {
+                            Affine::IDENTITY
+                        };
+                        let initial = if select_locally && index < 6 {
+                            outer * Affine::translate((3.0, 4.0))
+                        } else {
+                            Affine::IDENTITY
+                        };
+                        let expected = initial * Affine::new([2.0, 0.0, 0.0, 3.0, 5.0, 7.0]);
+                        let restored = if retained { outer * *matrix } else { *matrix };
+                        assert_eq!(
+                            restored, expected,
+                            "shading {shading}, local {select_locally}, retained {retained}, mark {index}"
+                        );
+                        if shading {
+                            let restored_clip = if retained {
+                                outer.transform_rect_bbox(clip.unwrap())
+                            } else {
+                                clip.unwrap()
+                            };
+                            assert_eq!(
+                                restored_clip,
+                                expected.transform_rect_bbox(Rect::new(0.0, 0.0, 2.0, 3.0))
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

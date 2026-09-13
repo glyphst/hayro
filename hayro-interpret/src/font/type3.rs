@@ -169,6 +169,13 @@ impl<'a> Type3<'a> {
         let root_transform =
             transform * glyph_transform * Affine::scale(UNITS_PER_EM as f64) * self.matrix;
         state.ctm = root_transform;
+        let outer = transform * glyph_transform;
+        if outer != glyph.instance_transform
+            && !state.transform_patterns(outer * glyph.instance_transform.inverse())
+        {
+            (glyph.settings.warning_sink)(crate::InterpreterWarning::PatternTransformFailure);
+            return None;
+        }
 
         // Not sure if this is mentioned anywhere, but I do think we need to reset the text state
         // (though the graphics state itself should be preserved).

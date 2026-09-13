@@ -411,6 +411,8 @@ pub enum InterpreterWarning {
     TransferFunctionFailure,
     /// A selected line dash declaration could not be decoded completely.
     DashPatternFailure,
+    /// An inherited pattern cannot be mapped into a retained invocation.
+    PatternTransformFailure,
     /// A selected soft mask could not be constructed completely.
     SoftMaskFailure,
     /// An image color-space declaration or selected default could not be resolved.
@@ -1134,7 +1136,7 @@ pub fn interpret<'a>(
                     .map(|s| {
                         Pattern::Shading(ShadingPattern {
                             shading: Arc::new(s),
-                            matrix: Affine::IDENTITY,
+                            matrix: context.get().ctm,
                             opacity: context.get().graphics_state.non_stroke_alpha,
                             transfer_function: transfer_function.clone(),
                             defer_transfer_function: context.settings.defer_transfer_functions,

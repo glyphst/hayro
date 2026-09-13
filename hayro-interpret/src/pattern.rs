@@ -39,7 +39,7 @@ impl<'a> Pattern<'a> {
         ctx: &Context<'a>,
         resources: &Resources<'a>,
     ) -> Option<Self> {
-        match object {
+        let mut pattern = match object {
             Object::Dict(dict) => {
                 let mut pattern = ShadingPattern::new(
                     &dict,
@@ -55,7 +55,12 @@ impl<'a> Pattern<'a> {
                 stream, ctx, resources,
             )?))),
             _ => None,
-        }
+        }?;
+        // Anchor the pattern in its defining content stream's initial space.
+        // A later glyph/Form invocation must inherit that space, not bind the
+        // pattern again to its own initial CTM.
+        pattern.pre_concat_matrix(ctx.root_transform());
+        Some(pattern)
     }
 
     pub(crate) fn set_rendering_intent(
@@ -79,14 +84,19 @@ impl<'a> Pattern<'a> {
         Ok(())
     }
 
-    pub(crate) fn pre_concat_transform(&mut self, transform: Affine) {
+    pub(crate) fn pre_concat_matrix(&mut self, transform: Affine) {
         match self {
-            Self::Shading(p) => {
-                p.matrix = transform * p.matrix;
-                let transformed_clip_path = p.shading.clip_path.clone().map(|r| p.matrix * r);
-                Arc::make_mut(&mut p.shading).clip_path = transformed_clip_path;
-            }
+            Self::Shading(p) => p.matrix = transform * p.matrix,
             Self::Tiling(p) => p.matrix = transform * p.matrix,
+        }
+    }
+
+    pub(crate) fn resolve_clip(&mut self) {
+        if let Self::Shading(p) = self {
+            // The source BBox stays in shading coordinates until paint use.
+            // Repeated inherited-state rebasing must not transform it twice.
+            let clip = p.shading.clip_path.clone().map(|path| p.matrix * path);
+            Arc::make_mut(&mut p.shading).clip_path = clip;
         }
     }
 
@@ -233,7 +243,14 @@ pub struct TilingPattern<'a> {
 
 impl Debug for TilingPattern<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TilingPattern")
+        // Retained Form state hashes use this bounded description. The cell's
+        // key deliberately excludes its placement and selecting base colors.
+        f.debug_struct("TilingPattern")
+            .field("cell", &self.cache_key())
+            .field("matrix", &self.matrix)
+            .field("stroke_paint", &self.stroke_paint)
+            .field("non_stroking_paint", &self.non_stroking_paint)
+            .finish()
     }
 }
 

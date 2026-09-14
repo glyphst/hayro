@@ -61,12 +61,20 @@ impl Separation {
         input: &[f32],
         opacity: f32,
     ) -> Option<super::AlphaColor> {
+        let values = self.tint_components(input)?;
+        Some(self.alternate_space.to_rgba(&values, opacity))
+    }
+
+    pub(super) fn alternate_space(&self) -> &ColorSpace {
+        &self.alternate_space
+    }
+
+    pub(super) fn tint_components(&self, input: &[f32]) -> Option<super::ColorComponents> {
         let [tint] = input else { return None };
         if !tint.is_finite() {
             return None;
         }
-        let values = self.tint_transform.eval(smallvec![tint.clamp(0.0, 1.0)])?;
-        Some(self.alternate_space.to_rgba(&values, opacity))
+        self.tint_transform.eval(smallvec![tint.clamp(0.0, 1.0)])
     }
 
     fn convert_inner(&self, input: &[u8], output: &mut [u8]) -> Option<()> {

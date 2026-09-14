@@ -68,10 +68,23 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
     }
 
     fn decode_device_cmyk(mut self) -> Option<DecodedCmykImage> {
-        if self.ctx.color_space.kind() != ColorSpaceKind::DeviceCmyk
-            || self.obj.transfer_function.is_some()
-            || self.has_soft_mask_matte()
-        {
+        if self.obj.transfer_function.is_some() {
+            return None;
+        }
+        if self.ctx.color_space.device_alternate_kind() == Some(ColorSpaceKind::DeviceCmyk) {
+            if self.obj.embedded_alpha_mode().is_some() {
+                return super::embedded::decode_cmyk(self.obj, &mut self.ctx);
+            }
+            if self.has_soft_mask_matte() {
+                return super::matte::decode_cmyk(self.obj, &self.ctx, self.target_dimension);
+            }
+            let image = super::tint::decode_cmyk(self.obj, &self.ctx)?;
+            return Some(DecodedCmykImage {
+                image,
+                alpha: self.decode_alpha_without_matte(),
+            });
+        }
+        if self.ctx.color_space.kind() != ColorSpaceKind::DeviceCmyk || self.has_soft_mask_matte() {
             return None;
         }
         let data = self.decode_components()?;
@@ -144,6 +157,29 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
         let mut rgb_data = self.convert_to_rgb(components)?;
 
         self.apply_transfer_function(&mut rgb_data);
+
+        if self.ctx.color_space.device_alternate_kind() == Some(ColorSpaceKind::DeviceGray)
+            && self
+                .obj
+                .transfer_function
+                .as_ref()
+                .is_none_or(|t| matches!(t, ActiveTransferFunction::Single(_)))
+        {
+            // Keep the exact byte-input tint lookup cache, then retain the
+            // proven Gray alternate without repeating its function per pixel.
+            let count = rgb_data.data.len() / 3;
+            for index in 0..count {
+                rgb_data.data[index] = rgb_data.data[index * 3];
+            }
+            rgb_data.data.truncate(count);
+            return Some(ImageData::Luma(LumaData {
+                data: rgb_data.data,
+                width: rgb_data.width,
+                height: rgb_data.height,
+                interpolate: rgb_data.interpolate,
+                scale_factors: rgb_data.scale_factors,
+            }));
+        }
 
         Some(ImageData::Rgb(rgb_data))
     }

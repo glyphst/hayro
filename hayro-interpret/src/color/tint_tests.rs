@@ -2,11 +2,16 @@ use super::{ColorSpace, ToRgb};
 use hayro_syntax::Pdf;
 use hayro_syntax::object::{FromBytes, Object, ObjectIdentifier};
 
-fn space(definition: &str) -> ColorSpace {
+pub(super) fn space(definition: &str) -> ColorSpace {
     ColorSpace::from_pdf_object(Object::from_bytes(definition.as_bytes()).unwrap()).unwrap()
 }
 
-fn function_space(prefix: &str, alternate: &str, entries: &str, data: &[u8]) -> ColorSpace {
+pub(super) fn function_space(
+    prefix: &str,
+    alternate: &str,
+    entries: &str,
+    data: &[u8],
+) -> ColorSpace {
     let mut bytes = format!(
         "%PDF-1.7\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
          2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\

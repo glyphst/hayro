@@ -1,6 +1,7 @@
 //! PDF 32000-1 11.6.5.3: undo preblending before source color conversion.
+use super::color_output::{ColorOutput, ColorTarget};
 use super::float::validate_decode;
-use super::image::DecodedImage;
+use super::image::{DecodedCmykImage, DecodedImage};
 use super::samples::{Samples, decode_sample};
 use super::{DecodeContext, decode_context};
 use crate::LumaData;
@@ -14,6 +15,31 @@ pub(super) fn decode(
     context: &DecodeContext<'_>,
     target_dimension: Option<(u32, u32)>,
 ) -> Option<DecodedImage> {
+    let (output, alpha) = decode_output(obj, context, target_dimension, ColorTarget::Rgb)?;
+    Some(DecodedImage {
+        image: output.finish(obj, context)?,
+        alpha: Some(alpha),
+    })
+}
+
+pub(super) fn decode_cmyk(
+    obj: &ImageXObject<'_>,
+    context: &DecodeContext<'_>,
+    target_dimension: Option<(u32, u32)>,
+) -> Option<DecodedCmykImage> {
+    let (output, alpha) = decode_output(obj, context, target_dimension, ColorTarget::Cmyk)?;
+    Some(DecodedCmykImage {
+        image: output.finish_cmyk(obj, context)?,
+        alpha: Some(alpha),
+    })
+}
+
+fn decode_output<'a>(
+    obj: &ImageXObject<'_>,
+    context: &'a DecodeContext<'_>,
+    target_dimension: Option<(u32, u32)>,
+    target: ColorTarget,
+) -> Option<(ColorOutput<'a>, LumaData)> {
     let mask = obj.stream.dict().get::<Stream<'_>>(SMASK)?;
     let dict = mask.dict();
     let components = context.color_space.num_components() as usize;
@@ -89,7 +115,7 @@ pub(super) fn decode(
     } else {
         matte.into_iter().map(f64::from).collect()
     };
-    let mut output = super::color_output::ColorOutput::new(color_space, count)?;
+    let mut output = ColorOutput::with_target(color_space, count, target)?;
     let mut alpha = Vec::new();
     alpha.try_reserve_exact(count).ok()?;
     let mut values = vec![0.0; components];
@@ -122,17 +148,16 @@ pub(super) fn decode(
         }
         output.push(&values)?;
     }
-    let image = output.finish(obj, context)?;
-    Some(DecodedImage {
-        image,
-        alpha: Some(LumaData {
+    Some((
+        output,
+        LumaData {
             data: alpha,
             width: mask_context.width,
             height: mask_context.height,
             interpolate: mask_obj.interpolate,
             scale_factors: mask_context.scale_factors,
-        }),
-    })
+        },
+    ))
 }
 
 #[cfg(test)]

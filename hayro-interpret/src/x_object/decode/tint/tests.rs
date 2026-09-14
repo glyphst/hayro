@@ -5,6 +5,15 @@ use hayro_syntax::Pdf;
 use hayro_syntax::object::{ObjectIdentifier, Stream};
 
 fn decode(header: &str, data: &[u8], extra: &[u8]) -> Option<super::super::DecodedImage> {
+    with_image(header, data, extra, |image| decode_image(image, None))
+}
+
+fn with_image<T>(
+    header: &str,
+    data: &[u8],
+    extra: &[u8],
+    callback: impl FnOnce(&ImageXObject<'_>) -> Option<T>,
+) -> Option<T> {
     let mut bytes = format!(
         "%PDF-1.7\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
          2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
@@ -37,12 +46,15 @@ fn decode(header: &str, data: &[u8], extra: &[u8]) -> Option<super::super::Decod
         super::super::decode_rgb_f64(&image, u64::MAX, || true),
         Err(crate::FloatImageError::Unsupported)
     ));
-    decode_image(&image, None)
+    callback(&image)
 }
 
 const RAMP: &str = "<</FunctionType 2/Domain[0 1]/Range[0 1]/C0[-500]/C1[500]/N 1>>";
 
 fn colors(image: &super::super::DecodedImage) -> Vec<u8> {
+    if let ImageData::Luma(image) = &image.image {
+        return image.data.clone();
+    }
     let ImageData::Rgb(image) = &image.image else {
         panic!("RGB output")
     };
@@ -155,5 +167,100 @@ fn jpx_tints_keep_native_depth_and_ignore_pdf_decode_overrides() {
                     .round() as u8
             });
         assert_eq!(colors(&image), expected, "depth {bits}");
+    }
+}
+
+#[test]
+fn cmyk_tints_retain_decode_precision_and_original_mask_samples() {
+    let ramp = "<</FunctionType 2/Domain[0 1]/Range[0 1 0 1 0 1 0 1]/C0[-500 501 .25 .5]/C1[500 -499 .25 .5]/N 1>>";
+    for prefix in ["Separation /Spot", "DeviceN [/Spot]"] {
+        for (bits, samples) in [
+            (1, vec![0x40]),
+            (2, vec![0x30]),
+            (4, vec![0x0f]),
+            (8, vec![0, 255]),
+            (16, vec![0, 0, 255, 255]),
+        ] {
+            let maximum = (1_u32 << bits) - 1;
+            let header = format!(
+                "/Width 2/Height 1/BitsPerComponent {bits}/ColorSpace[/{prefix} /DeviceCMYK {ramp}]/Decode[.5 .501]/Mask[0 0]"
+            );
+            let decoded = with_image(&header, &samples, b"", |obj| {
+                super::super::decode_device_cmyk_image(obj, None)
+            })
+            .unwrap();
+            assert_eq!(
+                decoded.image.data,
+                [0, 255, 64, 128, 255, 0, 64, 128],
+                "{prefix} {bits}/{maximum}"
+            );
+            assert_eq!(decoded.alpha.unwrap().data, [0, 255]);
+            let decoded = with_image(
+                &header.replace("[.5 .501]", "[.501 .5]"),
+                &samples,
+                b"",
+                |obj| super::super::decode_device_cmyk_image(obj, None),
+            )
+            .unwrap();
+            assert_eq!(decoded.image.data, [255, 0, 64, 128, 0, 255, 64, 128]);
+            assert_eq!(decoded.alpha.unwrap().data, [0, 255]);
+        }
+    }
+}
+
+#[test]
+fn cmyk_tints_recover_matte_before_function_and_final_quantization() {
+    let transform = "<</FunctionType 3/Domain[0 1]/Range[0 1 0 1 0 1 0 1]/Functions[<</FunctionType 2/Domain[0 1]/C0[0 1 .25 .5]/C1[0 1 .25 .5]/N 1>><</FunctionType 2/Domain[0 1]/C0[1 0 .25 .5]/C1[1 0 .25 .5]/N 1>>]/Bounds[.50003]/Encode[0 1 0 1]>>";
+    let header = format!(
+        "/Width 2/Height 1/BitsPerComponent 16/ColorSpace[/Separation /Spot /DeviceCMYK {transform}]/SMask 5 0 R"
+    );
+    let mask = b"5 0 obj <</Type/XObject/Subtype/Image/Width 2/Height 1/BitsPerComponent 8/ColorSpace/DeviceGray/Matte[.5]/Length 2>>stream\n\x80\xff\nendstream\nendobj";
+    let decoded = with_image(&header, &[0x80, 1, 0x80, 1], mask, |obj| {
+        super::super::decode_device_cmyk_image(obj, None)
+    })
+    .unwrap();
+    assert_eq!(decoded.image.data, [255, 0, 64, 128, 0, 255, 64, 128]);
+    assert_eq!(decoded.alpha.unwrap().data, [128, 255]);
+    assert!(
+        with_image(&header, &[0x80, 1, 0x80], mask, |obj| {
+            super::super::decode_device_cmyk_image(obj, None)
+        })
+        .is_none()
+    );
+}
+
+#[test]
+fn native_gray_retention_preserves_cached_byte_conversion() {
+    let header = "/Width 3/Height 1/BitsPerComponent 8/ColorSpace[/DeviceN[/Spot]/DeviceGray<</FunctionType 2/Domain[0 1]/C0[.125]/C1[.875]/N 1>>]";
+    let decoded = decode(header, &[0, 128, 255], b"").unwrap();
+    let ImageData::Luma(data) = decoded.image else {
+        panic!("retained Gray alternate")
+    };
+    assert_eq!(data.data, [32, 128, 223]);
+}
+
+#[test]
+fn exact_byte_cmyk_lookup_preserves_palette_keys_and_repeated_samples() {
+    let tint = "[/Separation /Spot /DeviceCMYK <</FunctionType 2/Domain[0 1]/C0[0 1 .25 .5]/C1[1 0 .25 .5]/N 1>>]";
+    for (space, source, expected) in [
+        (
+            tint.to_owned(),
+            vec![0, 64, 128, 255, 128, 64],
+            vec![0, 64, 128, 255, 128, 64],
+        ),
+        (
+            format!("[/Indexed {tint} 3<00ff4080>]"),
+            vec![0, 1, 2, 3, 2, 1],
+            vec![0, 255, 64, 128, 64, 255],
+        ),
+    ] {
+        let header = format!("/Width 6/Height 1/BitsPerComponent 8/ColorSpace {space}");
+        let decoded = with_image(&header, &source, b"", |obj| {
+            super::super::decode_device_cmyk_image(obj, None)
+        })
+        .unwrap();
+        for (pixel, expected) in decoded.image.data.chunks_exact(4).zip(expected) {
+            assert_eq!(pixel, [expected, 255 - expected, 64, 128]);
+        }
     }
 }

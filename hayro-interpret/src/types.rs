@@ -118,6 +118,14 @@ impl RasterImage<'_> {
         self.0.color_space_properties
     }
 
+    /// The direct device alternate reached by an ordinary image tint transform.
+    ///
+    /// This describes the effective space, including resource defaults, without
+    /// changing the source provenance returned by [`Self::color_space_properties`].
+    pub fn device_alternate_kind(&self) -> Option<ColorSpaceKind> {
+        self.0.color_space.as_ref()?.device_alternate_kind()
+    }
+
     /// Whether the effective source space addresses every output colorant.
     pub fn is_all_colorants(&self) -> bool {
         self.0
@@ -143,13 +151,14 @@ impl RasterImage<'_> {
         }
     }
 
-    /// Perform an operation with decoded direct `DeviceCMYK` samples and alpha.
+    /// Perform an operation with decoded native CMYK samples and alpha.
     ///
-    /// The callback is invoked only when the image resolves directly to
-    /// `DeviceCMYK` and neither a transfer function nor soft-mask matte requires
-    /// modifying the source components. Decode arrays and encoded-image color
-    /// transforms are applied before the normalized eight-bit samples are
-    /// returned. Other image color spaces continue through [`Self::with_rgba`].
+    /// Direct `DeviceCMYK` and ordinary tint transforms with a `DeviceCMYK`
+    /// alternate are supported when no eager transfer function is active.
+    /// Decode and embedded opacity recovery precede conversion. Tint sources
+    /// also support source-space soft-mask Matte recovery before their function
+    /// runs. Direct CMYK Matte remains unsupported. The callback receives final
+    /// normalized eight-bit components. Other spaces use [`Self::with_rgba`].
     pub fn with_device_cmyk(
         &self,
         func: impl FnOnce(CmykData, Option<LumaData>),

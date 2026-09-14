@@ -187,3 +187,29 @@ fn subtractive_source_components_recover_before_cmyk_conversion() {
     assert_eq!(decoded.image.data, [128, 255, 64, 32]);
     assert_eq!(decoded.alpha.unwrap().data, [128]);
 }
+
+#[test]
+fn tint_alternates_follow_native_jpx_opacity_and_palette_recovery() {
+    for prefix in ["Separation /Spot", "DeviceN [/Spot]"] {
+        let space = format!(
+            "/ColorSpace[/{prefix} /DeviceCMYK <</FunctionType 2/Domain[0 1]/Range[0 1 0 1 0 1 0 1]/C0[-1 2 .25 .5]/C1[511 -510 .25 .5]/N 1>>]"
+        );
+        for (mode, expected) in [("2", [255, 0, 64, 128]), ("1", [0, 255, 64, 128])] {
+            let decoded = with_image(fixtures::GRAY16, &space, mode, "/Decode false", |obj| {
+                crate::x_object::decode::decode_device_cmyk_image(obj, None)
+            })
+            .unwrap();
+            assert_eq!(decoded.image.data, expected, "{prefix} mode {mode}");
+            assert_eq!(decoded.alpha.unwrap().data, [128]);
+        }
+        let space = format!(
+            "/ColorSpace[/Indexed [/{prefix} /DeviceCMYK <</FunctionType 2/Domain[0 1]/C0[0 1 .25 .5]/C1[1 0 .25 .5]/N 1>>] 3<004080ff>]"
+        );
+        let decoded = with_image(fixtures::INDEXED16, &space, "2", "", |obj| {
+            crate::x_object::decode::decode_device_cmyk_image(obj, None)
+        })
+        .unwrap();
+        assert_eq!(decoded.image.data, [255, 0, 64, 128]);
+        assert_eq!(decoded.alpha.unwrap().data, [102]);
+    }
+}

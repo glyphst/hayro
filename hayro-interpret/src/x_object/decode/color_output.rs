@@ -2,9 +2,15 @@
 use super::DecodeContext;
 use crate::color::{ColorSpace, ColorSpaceKind, ToRgb};
 use crate::x_object::image::ImageXObject;
-use crate::{ImageData, LumaData, RgbData};
+use crate::{CmykData, ImageData, LumaData, RgbData};
 
 pub(super) const CONVERSION_BATCH_PIXELS: usize = 4096;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ColorTarget {
+    Rgb,
+    Cmyk,
+}
 
 pub(super) struct ColorOutput<'a> {
     space: &'a ColorSpace,
@@ -14,15 +20,27 @@ pub(super) struct ColorOutput<'a> {
     remaining: usize,
     native: bool,
     gray: bool,
+    target: ColorTarget,
+    byte_tints: Vec<Option<[u8; 4]>>,
 }
 
 impl<'a> ColorOutput<'a> {
-    pub(super) fn new(space: &'a ColorSpace, count: usize) -> Option<Self> {
+    pub(super) fn with_target(
+        space: &'a ColorSpace,
+        count: usize,
+        target: ColorTarget,
+    ) -> Option<Self> {
         let components = usize::from(space.num_components());
         if count == 0 || components == 0 {
             return None;
         }
-        let gray = space.kind() == ColorSpaceKind::DeviceGray;
+        if target == ColorTarget::Cmyk
+            && space.device_alternate_kind() != Some(ColorSpaceKind::DeviceCmyk)
+        {
+            return None;
+        }
+        let gray = space.kind() == ColorSpaceKind::DeviceGray
+            || space.device_alternate_kind() == Some(ColorSpaceKind::DeviceGray);
         let native = space.is_all_colorants()
             || space.uses_tint_transform()
             || matches!(
@@ -34,8 +52,14 @@ impl<'a> ColorOutput<'a> {
                     | ColorSpaceKind::Lab
             );
         let mut data = Vec::new();
-        data.try_reserve_exact(count.checked_mul(if gray { 1 } else { 3 })?)
-            .ok()?;
+        let channels = if target == ColorTarget::Cmyk {
+            4
+        } else if gray {
+            1
+        } else {
+            3
+        };
+        data.try_reserve_exact(count.checked_mul(channels)?).ok()?;
         let batch_length = count.min(CONVERSION_BATCH_PIXELS).checked_mul(components)?;
         let mut batch = Vec::new();
         if !native {
@@ -49,7 +73,20 @@ impl<'a> ColorOutput<'a> {
             remaining: count,
             native,
             gray,
+            target,
+            byte_tints: Vec::new(),
         })
+    }
+
+    /// The caller proves exact normalized byte tints or integral palette indices.
+    /// Native Decode, Matte and embedded-alpha recovery must bypass this table.
+    pub(super) fn cache_byte_tints(&mut self) -> Option<()> {
+        if self.target != ColorTarget::Cmyk || self.space.num_components() != 1 {
+            return None;
+        }
+        self.byte_tints.try_reserve_exact(256).ok()?;
+        self.byte_tints.resize(256, None);
+        Some(())
     }
 
     pub(super) fn push(&mut self, values: &[f64]) -> Option<()> {
@@ -60,7 +97,28 @@ impl<'a> ColorOutput<'a> {
             return None;
         }
         self.remaining -= 1;
-        if self.native {
+        if self.target == ColorTarget::Cmyk {
+            let index = (!self.byte_tints.is_empty()).then(|| {
+                let value = if self.space.is_indexed() {
+                    values[0]
+                } else {
+                    values[0] * 255.0
+                };
+                value.round().clamp(0.0, 255.0) as usize
+            });
+            let pixel = if let Some(pixel) = index.and_then(|i| self.byte_tints[i]) {
+                pixel
+            } else {
+                let values = self.space.image_device_alternate_components(values)?;
+                let values: [f32; 4] = values.as_slice().try_into().ok()?;
+                let pixel = values.map(|value| (f64::from(value) * 255.0).round() as u8);
+                if let Some(index) = index {
+                    self.byte_tints[index] = Some(pixel);
+                }
+                pixel
+            };
+            self.data.extend(pixel);
+        } else if self.native {
             let rgb = self.space.image_rgb_f64(values)?;
             self.data.extend(
                 rgb.into_iter()
@@ -91,7 +149,7 @@ impl<'a> ColorOutput<'a> {
         obj: &ImageXObject<'_>,
         context: &DecodeContext<'_>,
     ) -> Option<ImageData> {
-        if self.remaining != 0 {
+        if self.remaining != 0 || self.target != ColorTarget::Rgb {
             return None;
         }
         if self.gray
@@ -130,6 +188,26 @@ impl<'a> ColorOutput<'a> {
                 interpolate: obj.interpolate,
                 scale_factors: context.scale_factors,
             })
+        })
+    }
+
+    pub(super) fn finish_cmyk(
+        self,
+        obj: &ImageXObject<'_>,
+        context: &DecodeContext<'_>,
+    ) -> Option<CmykData> {
+        if self.remaining != 0
+            || self.target != ColorTarget::Cmyk
+            || obj.transfer_function.is_some()
+        {
+            return None;
+        }
+        Some(CmykData {
+            data: self.data,
+            width: context.width,
+            height: context.height,
+            interpolate: obj.interpolate,
+            scale_factors: context.scale_factors,
         })
     }
 }

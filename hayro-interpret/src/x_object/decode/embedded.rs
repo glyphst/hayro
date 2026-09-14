@@ -1,7 +1,7 @@
 //! T.800 (2002) I-3: recover channel samples before PDF component mapping.
 use super::DecodeContext;
-use super::color_output::ColorOutput;
-use super::image::DecodedImage;
+use super::color_output::{ColorOutput, ColorTarget};
+use super::image::{DecodedCmykImage, DecodedImage};
 use super::samples::decode_sample;
 use crate::x_object::image::ImageXObject;
 use crate::{EmbeddedImageAlphaMode, LumaData};
@@ -82,11 +82,34 @@ pub(super) fn decode(
     obj: &ImageXObject<'_>,
     context: &mut DecodeContext<'_>,
 ) -> Option<DecodedImage> {
+    let image = decode_output(obj, context, ColorTarget::Rgb)?.finish(obj, context)?;
+    Some(DecodedImage {
+        image,
+        alpha: Some(take_alpha(obj, context)?),
+    })
+}
+
+pub(super) fn decode_cmyk(
+    obj: &ImageXObject<'_>,
+    context: &mut DecodeContext<'_>,
+) -> Option<DecodedCmykImage> {
+    let image = decode_output(obj, context, ColorTarget::Cmyk)?.finish_cmyk(obj, context)?;
+    Some(DecodedCmykImage {
+        image,
+        alpha: Some(take_alpha(obj, context)?),
+    })
+}
+
+fn decode_output<'a>(
+    obj: &ImageXObject<'_>,
+    context: &'a DecodeContext<'_>,
+    target: ColorTarget,
+) -> Option<ColorOutput<'a>> {
     let source = Samples::new(obj, context)?;
     let indexed = context.color_space.indexed();
     let space = indexed.map_or(&context.color_space, |space| space.base());
     let ranges = space.component_ranges();
-    let mut output = ColorOutput::new(space, source.count)?;
+    let mut output = ColorOutput::with_target(space, source.count, target)?;
     let mut values = vec![0.0; usize::from(context.color_space.num_components())];
     let mut palette_values = vec![0.0; usize::from(space.num_components())];
     for pixel in 0..source.count {
@@ -106,17 +129,17 @@ pub(super) fn decode(
             output.push(&values)?;
         }
     }
-    let image = output.finish(obj, context)?;
+    Some(output)
+}
+
+fn take_alpha(obj: &ImageXObject<'_>, context: &mut DecodeContext<'_>) -> Option<LumaData> {
     let alpha = context.decoded.image_data.as_mut()?.alpha.take()?;
-    Some(DecodedImage {
-        image,
-        alpha: Some(LumaData {
-            data: alpha,
-            width: context.width,
-            height: context.height,
-            interpolate: obj.interpolate,
-            scale_factors: context.scale_factors,
-        }),
+    Some(LumaData {
+        data: alpha,
+        width: context.width,
+        height: context.height,
+        interpolate: obj.interpolate,
+        scale_factors: context.scale_factors,
     })
 }
 

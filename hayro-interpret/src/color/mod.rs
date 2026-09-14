@@ -3,6 +3,7 @@
 mod cal_gray;
 mod cal_rgb;
 mod cie;
+mod device_alternate;
 mod device_cmyk;
 mod device_gray;
 mod device_n;
@@ -929,6 +930,11 @@ impl Color {
         &self.components
     }
 
+    /// Return the paint opacity without evaluating its color conversion.
+    pub fn opacity(&self) -> f32 {
+        self.opacity
+    }
+
     /// Create a color from RGBA.
     #[inline]
     pub fn from_rgba(rgba: AlphaColor) -> Self {
@@ -974,6 +980,9 @@ mod non_marking_tests;
 mod all_colorant_tests;
 #[cfg(test)]
 mod tint_tests;
+
+#[cfg(test)]
+mod device_alternate_tests;
 
 #[cfg(test)]
 mod retained_inspection_tests {

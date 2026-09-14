@@ -69,6 +69,10 @@ impl Separation {
         &self.alternate_space
     }
 
+    pub(super) fn tint_transform(&self) -> &Function {
+        &self.tint_transform
+    }
+
     pub(super) fn tint_components(&self, input: &[f32]) -> Option<super::ColorComponents> {
         let [tint] = input else { return None };
         if !tint.is_finite() {

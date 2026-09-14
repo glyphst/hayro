@@ -3,6 +3,28 @@ use super::{Color, ColorComponents, ColorSpace, ColorSpaceKind, ColorSpaceType};
 use smallvec::SmallVec;
 
 impl ColorSpace {
+    /// Borrow an ordinary Separation/DeviceN function and its alternate space.
+    ///
+    /// Callers composing a shading must clamp named-color inputs to [0, 1],
+    /// evaluate this function, then apply the alternate's component bounds and
+    /// conversion. The original function definition retains its Domain, Range,
+    /// stitching boundaries and calculator branches. All/None and wrapper
+    /// spaces return None; an Indexed palette is not a continuous tint input.
+    pub fn tint_transform(&self) -> Option<(&crate::Function, &Self)> {
+        if !self.uses_tint_transform() {
+            return None;
+        }
+        match self.0.as_ref() {
+            ColorSpaceType::Separation(space) => {
+                Some((space.tint_transform(), space.alternate_space()))
+            }
+            ColorSpaceType::DeviceN(space) => {
+                Some((space.tint_transform(), space.alternate_space()))
+            }
+            _ => None,
+        }
+    }
+
     /// The direct device alternate reached by an ordinary tint transform.
     ///
     /// Indexed and uncolored Pattern wrappers preserve the underlying alternate.

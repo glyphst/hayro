@@ -94,6 +94,10 @@ impl DeviceN {
         &self.alternate_space
     }
 
+    pub(super) fn tint_transform(&self) -> &Function {
+        &self.tint_transform
+    }
+
     pub(super) fn tint_components(&self, input: &[f32]) -> Option<super::ColorComponents> {
         if input.len() != usize::from(self.num_components)
             || input.iter().any(|value| !value.is_finite())

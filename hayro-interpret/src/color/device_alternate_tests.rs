@@ -2,6 +2,40 @@ use super::tint_tests::{function_space, space};
 use super::{Color, ColorSpaceKind};
 
 #[test]
+fn borrowed_tint_definition_preserves_branches_and_continuous_input_identity() {
+    let function = "<</FunctionType 3/Domain[0 1]/Range[0 1]/Functions[<</FunctionType 2/Domain[0 1]/C0[0]/C1[0]/N 1>><</FunctionType 2/Domain[0 1]/C0[1]/C1[1]/N 1>><</FunctionType 2/Domain[0 1]/C0[0]/C1[0]/N 1>>]/Bounds[.500008 .500016]/Encode[0 1 0 1 0 1]>>";
+    for family in ["Separation /Spot", "DeviceN [/Spot]"] {
+        let definition = format!("[/{family} /DeviceGray {function}]");
+        let color = space(&definition);
+        let (tint, alternate) = color.tint_transform().expect("ordinary named color");
+        assert_eq!(alternate.kind(), ColorSpaceKind::DeviceGray);
+        assert_eq!(tint.arity(), Some((1, 1)));
+        assert_eq!(tint.stitching_boundaries(), [0.500_008, 0.500_016]);
+        for (input, expected) in [(0.5, 0.0), (0.500_012, 1.0), (0.500_02, 0.0)] {
+            assert_eq!(tint.eval(smallvec::smallvec![input]).unwrap()[0], expected);
+        }
+        assert!(
+            space(&format!("[/Indexed {definition} 1 <00ff>]"))
+                .tint_transform()
+                .is_none()
+        );
+        assert!(
+            space(&format!("[/Pattern {definition}]"))
+                .tint_transform()
+                .is_none()
+        );
+    }
+    for family in ["Separation /All", "Separation /None", "DeviceN [/None]"] {
+        assert!(
+            space(&format!("[/{family} /DeviceGray {function}]"))
+                .tint_transform()
+                .is_none()
+        );
+    }
+    assert!(space("/DeviceGray").tint_transform().is_none());
+}
+
+#[test]
 fn native_alternates_keep_real_values_and_original_identity() {
     for (alternate, kind, start, end, expected) in [
         (

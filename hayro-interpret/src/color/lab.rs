@@ -11,6 +11,14 @@ pub(crate) struct Lab {
 }
 
 impl Lab {
+    pub(super) fn definition(&self) -> super::LabRgbDefinition {
+        self.transform.lab_definition([
+            [0.0, 100.0],
+            [self.range[0], self.range[1]],
+            [self.range[2], self.range[3]],
+        ])
+    }
+
     pub(super) fn new(dict: &Dict<'_>) -> Option<Self> {
         let white = numbers(dict, WHITE_POINT, None)?;
         let black = numbers(dict, BLACK_POINT, Some([0.0; 3]))?;

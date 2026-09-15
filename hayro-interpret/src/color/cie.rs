@@ -9,6 +9,14 @@ pub(super) struct CieRgb {
 }
 
 impl CieRgb {
+    pub(super) fn lab_definition(&self, ranges: [[f32; 2]; 3]) -> super::LabRgbDefinition {
+        super::LabRgbDefinition {
+            ranges,
+            matrix: self.matrix.v,
+            offset: self.offset.v,
+        }
+    }
+
     pub(super) fn definition(
         &self,
         gamma: [f32; 3],

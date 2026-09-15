@@ -11,6 +11,10 @@ pub(crate) struct CalRgb {
 }
 
 impl CalRgb {
+    pub(super) fn definition(&self, input_components: u8) -> super::CalibratedRgbDefinition {
+        self.transform.definition(self.gamma, input_components)
+    }
+
     pub(super) fn new(dict: &Dict<'_>) -> Option<Self> {
         Self::from_dict(dict, false)
     }

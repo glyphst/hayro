@@ -10,6 +10,10 @@ pub(crate) struct CalGray {
 }
 
 impl CalGray {
+    pub(super) fn definition(&self) -> super::CalibratedRgbDefinition {
+        self.transform.definition(1)
+    }
+
     pub(super) fn new(dict: &Dict<'_>) -> Option<Self> {
         Some(Self {
             transform: CalRgb::for_gray(dict)?,

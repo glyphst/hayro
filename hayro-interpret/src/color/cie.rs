@@ -9,6 +9,19 @@ pub(super) struct CieRgb {
 }
 
 impl CieRgb {
+    pub(super) fn definition(
+        &self,
+        gamma: [f32; 3],
+        input_components: u8,
+    ) -> super::CalibratedRgbDefinition {
+        super::CalibratedRgbDefinition {
+            input_components,
+            gamma,
+            matrix: self.matrix.v,
+            offset: self.offset.v,
+        }
+    }
+
     pub(super) fn new(white: [f32; 3], black: [f32; 3]) -> Option<Self> {
         if white[0] <= 0.0
             || white[1] != 1.0

@@ -2,6 +2,7 @@
 
 mod cal_gray;
 mod cal_rgb;
+mod calibrated_definition;
 mod cie;
 mod device_alternate;
 mod device_cmyk;
@@ -29,6 +30,7 @@ use self::lab::Lab;
 use self::pattern::Pattern;
 use self::separation::Separation;
 use crate::cache::{Cache, CacheKey};
+pub use calibrated_definition::CalibratedRgbDefinition;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::Name;
 use hayro_syntax::object::Object;
@@ -708,6 +710,16 @@ impl ColorSpace {
             }
             ColorSpaceType::DeviceRgb(_) => {
                 AlphaColor::new([component(0), component(1), component(2), opacity])
+            }
+            ColorSpaceType::CalGray(gray) => {
+                let [r, g, b] = gray.convert_real(f64::from(c.first().copied().unwrap_or(0.0)));
+                AlphaColor::new([r as f32, g as f32, b as f32, opacity])
+            }
+            ColorSpaceType::CalRgb(rgb) => {
+                let [r, g, b] = rgb.convert_real(core::array::from_fn(|i| {
+                    f64::from(c.get(i).copied().unwrap_or(0.0))
+                }));
+                AlphaColor::new([r as f32, g as f32, b as f32, opacity])
             }
             ColorSpaceType::Lab(lab) => {
                 let [r, g, b] = lab.convert_real(core::array::from_fn(|i| {

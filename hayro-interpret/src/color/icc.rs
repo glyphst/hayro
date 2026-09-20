@@ -5,14 +5,19 @@ use moxcms::{
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, OnceLock};
 
+mod equivalence;
+pub use equivalence::{IccDeviceRgbBounds, IccEquivalenceError};
+
 const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
 
 struct ICCColorRepr {
     number_components: usize,
     src_profile: ColorProfile,
+    matrix_tags_only: bool,
     // Shared source data has only four possible derived transforms. Failed
     // construction is cached too; no mutable global rendering intent exists.
     transforms: [OnceLock<Option<IccTransform>>; 4],
+    equivalence: [OnceLock<Result<IccDeviceRgbBounds, IccEquivalenceError>>; 4],
 }
 
 enum IccTransform {
@@ -55,6 +60,7 @@ impl ICCProfile {
             return None;
         }
         let mut result = Self::new_from_src_profile(source, number_components)?;
+        Arc::get_mut(&mut result.data)?.matrix_tags_only = equivalence::matrix_tags_only(profile);
         result.intent = RenderingIntent::default();
         Some(result)
     }
@@ -71,7 +77,9 @@ impl ICCProfile {
             data: Arc::new(ICCColorRepr {
                 number_components,
                 src_profile,
+                matrix_tags_only: true,
                 transforms: std::array::from_fn(|_| OnceLock::new()),
+                equivalence: std::array::from_fn(|_| OnceLock::new()),
             }),
             intent: RenderingIntent::Perceptual,
         })
@@ -104,7 +112,7 @@ impl ICCProfile {
             .as_ref()
     }
 
-    fn build_transform(&self) -> Option<IccTransform> {
+    fn conversion_profiles(&self) -> Option<(ColorProfile, ColorProfile, TransformOptions)> {
         let mut source = self.data.src_profile.clone();
         let mut destination = ColorProfile::new_srgb();
         let options = TransformOptions {
@@ -159,6 +167,11 @@ impl ICCProfile {
             }
             RenderingIntent::Perceptual => {}
         }
+        Some((source, destination, options))
+    }
+
+    fn build_transform(&self) -> Option<IccTransform> {
+        let (source, destination, options) = self.conversion_profiles()?;
         if self.number_components() == 1 {
             if source.pcs != DataColorSpace::Xyz
                 || (source.lut_a_to_b_perceptual.is_some()

@@ -37,6 +37,7 @@ use hayro_syntax::object::Name;
 use hayro_syntax::object::Object;
 use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
+pub use icc::{IccDeviceRgbBounds, IccEquivalenceError};
 pub use image::ImageColorSpaceError;
 pub use intent::{ColorConversionError, RenderingIntent};
 pub use lab_definition::LabRgbDefinition;
@@ -465,6 +466,22 @@ impl ColorSpace {
     /// Return the number of native components accepted by this color space.
     pub fn component_count(&self) -> usize {
         usize::from(self.num_components())
+    }
+
+    /// Bound both directions of an ICC RGB matrix/TRC conversion to sRGB.
+    ///
+    /// The bound covers every normalized binary32 input to the current byte
+    /// consumer, including quantizer preimages. Unsupported profiles return an
+    /// error; sparse color probes never establish equivalence. This is a
+    /// conversion bound, not a bound on error amplification by arbitrary blends.
+    pub fn icc_device_rgb_bounds(
+        &self,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<IccDeviceRgbBounds, IccEquivalenceError> {
+        let ColorSpaceType::ICCBased(profile) = self.0.as_ref() else {
+            return Err(IccEquivalenceError::Unproved);
+        };
+        profile.device_rgb_bounds(cancelled)
     }
 
     /// Return `true` if the current color space is the pattern color space.

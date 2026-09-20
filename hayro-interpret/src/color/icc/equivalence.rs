@@ -1,6 +1,5 @@
 //! Complete byte-consumer bounds for bidirectional RGB matrix/TRC profiles.
 use super::*;
-use moxcms::ToneReprCurve;
 
 /// Pointwise component error against the corresponding normalized RGB input.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,28 +131,6 @@ fn validate_profile(
     {
         return Err(IccEquivalenceError::Unproved);
     }
-    let [Some(red), Some(green), Some(blue)] =
-        [&profile.red_trc, &profile.green_trc, &profile.blue_trc]
-    else {
-        return Err(IccEquivalenceError::Unproved);
-    };
-    // moxcms 0.8.1's uniform-TRC shortcut uses OR between adjacent equalities.
-    // Do not certify a profile whose unequal curve can be ignored by that path.
-    let same_variant = matches!(
-        (red, green, blue),
-        (
-            ToneReprCurve::Lut(_),
-            ToneReprCurve::Lut(_),
-            ToneReprCurve::Lut(_)
-        ) | (
-            ToneReprCurve::Parametric(_),
-            ToneReprCurve::Parametric(_),
-            ToneReprCurve::Parametric(_)
-        )
-    );
-    if same_variant && (red == green || green == blue) && !(red == green && green == blue) {
-        return Err(IccEquivalenceError::Unproved);
-    }
     // These are the exact 8-bit consumer's input tables, with CICP disabled.
     for channel in 0..3 {
         checkpoint(cancelled)?;
@@ -192,7 +169,8 @@ fn bound_direction(
     // Q2.13 path, normalized linear values and |matrix| <= 3 keep all products
     // and three-term sums inside i32 (the Q1.30 path uses i64 sums). Thus four endpoint combinations enclose
     // every other-byte pair for each of the 256 values of the held component.
-    // This property is tied to moxcms 0.8.1's matrix consumer, not general ICC LUTs.
+    // This property is tied to the pinned moxcms 0.8.1 matrix consumer with
+    // corrected channel equality, not general ICC LUTs.
     let mut input = [0_u8; 768];
     let mut output = [0_u8; 768];
     // This table contains no profile data and is shared by all proof calls.

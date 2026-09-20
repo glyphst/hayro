@@ -1,4 +1,5 @@
 use super::*;
+use moxcms::ToneReprCurve;
 
 fn rgb_profile() -> ColorProfile {
     let mut source = ColorProfile::new_srgb();
@@ -96,7 +97,7 @@ fn bounds_cover_all_rgb_bytes_in_both_directions() {
 }
 
 #[test]
-fn media_white_and_nonmonotone_or_misoptimized_curves_are_not_identity() {
+fn media_white_and_unequal_or_nonmonotone_curves_are_not_identity() {
     let mut source = rgb_profile();
     source.media_white_point = Some(moxcms::Xyzd::new(0.9, 0.7, 0.6));
     let profile = parsed(&source);
@@ -120,9 +121,12 @@ fn media_white_and_nonmonotone_or_misoptimized_curves_are_not_identity() {
 
     let mut source = rgb_profile();
     source.blue_trc = Some(ToneReprCurve::Parametric(vec![1.0]));
-    assert_eq!(
-        parsed(&source).device_rgb_bounds(|| false),
-        Err(IccEquivalenceError::Unproved)
+    assert!(
+        parsed(&source)
+            .device_rgb_bounds(|| false)
+            .unwrap()
+            .max_component_error
+            > 0.1
     );
     let mut curve: Vec<_> = (0_u16..=255).map(|v| v * 257).collect();
     curve[16] = u16::MAX;

@@ -45,7 +45,7 @@ log = { version = "0.4" }
 resvg = { version = "0.47.0" }
 flate2 = { version = "1" }
 phf = { version = "0.13.1", default-features = false }
-moxcms = { version = "0.8.1" }
+moxcms = { version = "=0.8.1", git = "https://github.com/glyphst/moxcms.git", rev = "e8e9afaa42c9bd0fee034d563d30ce7dcb59a420" }
 rustc-hash = { version = "2" }
 siphasher = "1"
 skrifa = { version = "0.46.0" }

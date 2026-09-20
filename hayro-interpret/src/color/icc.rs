@@ -10,6 +10,8 @@ use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
+mod channel_tests;
+#[cfg(test)]
 mod declaration_tests;
 mod equivalence;
 pub use equivalence::{IccDeviceRgbBounds, IccEquivalenceError};

@@ -248,7 +248,12 @@ impl ColorSpaceType {
                     ));
                     let profile = cache.get_or_insert_with(profile_cache_key, || {
                         let decoded = icc_stream.decoded().ok()?;
-                        ICCProfile::new(&decoded, num_components).map(Self::ICCBased)
+                        ICCProfile::new_with_memory(
+                            &decoded,
+                            num_components,
+                            Some(cache.icc_memory()),
+                        )
+                        .map(Self::ICCBased)
                     });
                     return profile;
                 }
@@ -323,7 +328,35 @@ impl ColorSpaceType {
     }
 }
 
-type IntentVariants = [OnceLock<Result<Arc<ColorSpaceType>, ColorConversionError>>; 4];
+#[derive(Default)]
+struct IntentVariant {
+    value: OnceLock<Result<Arc<ColorSpaceType>, ColorConversionError>>,
+    build: std::sync::Mutex<()>,
+}
+
+impl IntentVariant {
+    fn get_or_init(
+        &self,
+        build: impl FnOnce() -> Result<Arc<ColorSpaceType>, ColorConversionError>,
+    ) -> Result<Arc<ColorSpaceType>, ColorConversionError> {
+        if let Some(value) = self.value.get() {
+            return value.clone();
+        }
+        let _guard = self.build.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(value) = self.value.get() {
+            return value.clone();
+        }
+        let value = build();
+        // Quota pressure can disappear when an active page releases its owners.
+        // Keep this retryable through Indexed/tint/pattern wrappers as well.
+        if !matches!(value, Err(ColorConversionError::IccMemoryLimit)) {
+            let _ = self.value.set(value.clone());
+        }
+        value
+    }
+}
+
+type IntentVariants = [IntentVariant; 4];
 
 /// A PDF color space with lazily shared conversions for each rendering intent.
 #[derive(Clone)]
@@ -351,7 +384,7 @@ impl ColorSpace {
         Self(
             Arc::new(kind),
             RenderingIntent::default(),
-            Arc::new(std::array::from_fn(|_| OnceLock::new())),
+            Arc::new(std::array::from_fn(|_| IntentVariant::default())),
         )
     }
 
@@ -362,7 +395,9 @@ impl ColorSpace {
     ) -> Result<Self, ColorConversionError> {
         let key = crate::util::hash128(&("embedded-icc", profile, components));
         cache
-            .get_or_insert_with(key, || ICCProfile::new(profile, components))
+            .get_or_insert_with(key, || {
+                ICCProfile::new_with_memory(profile, components, Some(cache.icc_memory()))
+            })
             .map(|profile| Self::from_kind(ColorSpaceType::ICCBased(profile)))
             .ok_or(ColorConversionError::IccTransform)
     }
@@ -403,7 +438,7 @@ impl ColorSpace {
             };
             Ok(Arc::new(kind))
         });
-        Ok(Self(variant.clone()?, intent, self.2.clone()))
+        Ok(Self(variant?, intent, self.2.clone()))
     }
 
     /// The intent used for conversions and derived resource identity.

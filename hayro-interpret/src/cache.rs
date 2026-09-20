@@ -6,7 +6,12 @@ use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 
-type CacheValue = Option<Box<dyn Any + Send + Sync>>;
+mod memory;
+use memory::MemoryBudget;
+pub(crate) use memory::{IccMemory, MemoryReservation};
+
+// Err denotes transient ICC pressure, distinct from a semantic cached None.
+type CacheValue = Result<Option<Box<dyn Any + Send + Sync>>, ()>;
 
 struct CacheEntry {
     value: Arc<OnceLock<CacheValue>>,
@@ -44,18 +49,24 @@ impl CacheState {
 
     fn evict_to_limit(&mut self) {
         while self.entries.len() > self.max_entries {
-            let Some((id, last_used)) = self.recency.pop_front() else {
+            if self.evict_oldest().is_none() {
                 break;
-            };
+            }
+        }
+    }
+
+    fn evict_oldest(&mut self) -> Option<CacheEntry> {
+        while let Some((id, last_used)) = self.recency.pop_front() {
             let is_current = self
                 .entries
                 .get(&id)
                 .is_some_and(|entry| entry.last_used == last_used);
             if is_current {
-                self.entries.remove(&id);
                 self.evictions = self.evictions.saturating_add(1);
+                return self.entries.remove(&id);
             }
         }
+        None
     }
 }
 
@@ -65,10 +76,12 @@ pub(crate) struct CacheStats {
     pub(crate) hits: u64,
     pub(crate) misses: u64,
     pub(crate) evictions: u64,
+    pub(crate) icc_bytes: u64,
+    pub(crate) icc_memory_refusals: u64,
 }
 
 #[derive(Clone)]
-pub(crate) struct Cache(Arc<Mutex<CacheState>>);
+pub(crate) struct Cache(Arc<Mutex<CacheState>>, Arc<MemoryBudget>);
 
 impl Default for Cache {
     fn default() -> Self {
@@ -82,15 +95,26 @@ impl Cache {
     }
 
     pub(crate) fn with_max_entries(max_entries: usize) -> Self {
-        Self(Arc::new(Mutex::new(CacheState {
-            entries: FxHashMap::default(),
-            recency: VecDeque::new(),
-            clock: 0,
-            max_entries,
-            hits: 0,
-            misses: 0,
-            evictions: 0,
-        })))
+        Self::with_limits(max_entries, u64::MAX)
+    }
+
+    pub(crate) fn with_limits(max_entries: usize, max_icc_bytes: u64) -> Self {
+        Self(
+            Arc::new(Mutex::new(CacheState {
+                entries: FxHashMap::default(),
+                recency: VecDeque::new(),
+                clock: 0,
+                max_entries,
+                hits: 0,
+                misses: 0,
+                evictions: 0,
+            })),
+            Arc::new(MemoryBudget::new(max_icc_bytes)),
+        )
+    }
+
+    pub(crate) fn icc_memory(&self) -> IccMemory {
+        IccMemory::new(Arc::downgrade(&self.0), self.1.clone())
     }
 
     pub(crate) fn get_or_insert_with<T: Clone + Send + Sync + 'static>(
@@ -129,8 +153,35 @@ impl Cache {
         // Initialization happens without holding the map lock. OnceLock makes construction
         // single-flight for a given key while still allowing unrelated keys to initialize in
         // parallel. The local Arc keeps an entry alive if the LRU evicts it during construction.
-        value
-            .get_or_init(|| f().map(|value| Box::new(value) as Box<dyn Any + Send + Sync>))
+        let result = value.get_or_init(|| {
+            let icc_refusals = self.1.refusals();
+            let item = f().map(|value| Box::new(value) as Box<dyn Any + Send + Sync>);
+            if self.1.refusals() == icc_refusals {
+                Ok(item)
+            } else {
+                Err(())
+            }
+        });
+        // A resource refusal depends on current ownership. Do not retain a
+        // failed or partially recovered construction as immutable PDF data.
+        // Concurrent unrelated refusals may conservatively suppress reuse.
+        if result.is_err() {
+            // A waiter may have started after the original refusal. Propagate
+            // the event to its caller too before removing the failed slot.
+            self.1.record_refusal();
+            let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+            if state
+                .entries
+                .get(&id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.value, &value))
+            {
+                state.entries.remove(&id);
+                state.evictions = state.evictions.saturating_add(1);
+            }
+        }
+        result
+            .as_ref()
+            .ok()?
             .as_ref()
             .and_then(|value| value.downcast_ref::<T>().cloned())
     }
@@ -142,6 +193,8 @@ impl Cache {
             hits: state.hits,
             misses: state.misses,
             evictions: state.evictions,
+            icc_bytes: self.1.bytes(),
+            icc_memory_refusals: self.1.refusals(),
         }
     }
 

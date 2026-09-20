@@ -8,9 +8,9 @@ use crate::ocg::OcgState;
 use crate::util::{BezPathExt, Float64Ext};
 use crate::{ClipPath, Device, DrawProps, FillRule, InterpreterSettings, Paint, StrokeProps};
 use hayro_syntax::content::ops::Transform;
-use hayro_syntax::object::Dict;
 use hayro_syntax::object::Name;
 use hayro_syntax::object::dict::keys::{SUBTYPE, TYPE3};
+use hayro_syntax::object::{Dict, Object};
 use hayro_syntax::page::Resources;
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, BezPath, PathEl, Point, Rect, Shape};
@@ -34,6 +34,10 @@ pub struct InterpreterCacheLimits {
     pub max_outline_font_bytes: u64,
     /// Maximum number of decoded or resolved interpreter objects retained by a document.
     pub max_objects: usize,
+    /// Maximum estimated retained ICC profile/transform bytes and transform-build
+    /// scratch. Includes live owners after object-cache eviction. Initial parsing
+    /// retains the CMS parser's separate profile/table limits.
+    pub max_icc_bytes: u64,
 }
 
 impl Default for InterpreterCacheLimits {
@@ -42,6 +46,7 @@ impl Default for InterpreterCacheLimits {
             max_outline_fonts: 512,
             max_outline_font_bytes: 256 * 1024 * 1024,
             max_objects: 8_192,
+            max_icc_bytes: 256 * 1024 * 1024,
         }
     }
 }
@@ -67,6 +72,10 @@ pub struct InterpreterCacheStats {
     pub object_misses: u64,
     /// Number of decoded or resolved object entries evicted since construction.
     pub object_evictions: u64,
+    /// Estimated ICC bytes, including active owners outside the cache.
+    pub icc_bytes: u64,
+    /// ICC memory refusal events, including propagation to waiting cache users.
+    pub icc_memory_refusals: u64,
 }
 
 struct OutlineFontSlot {
@@ -163,7 +172,7 @@ impl SharedInterpreterCache {
                 misses: 0,
                 evictions: 0,
             })),
-            object_cache: Cache::with_max_entries(limits.max_objects),
+            object_cache: Cache::with_limits(limits.max_objects, limits.max_icc_bytes),
         }
     }
 
@@ -192,10 +201,22 @@ impl SharedInterpreterCache {
             object_hits: objects.hits,
             object_misses: objects.misses,
             object_evictions: objects.evictions,
+            icc_bytes: objects.icc_bytes,
+            icc_memory_refusals: objects.icc_memory_refusals,
         }
     }
 
-    /// Drop all currently retained entries while preserving cumulative statistics.
+    /// Resolve a self-contained source color space using this document's cache
+    /// and ICC byte budget. Resolve resource-name aliases before calling this.
+    pub fn resolve_color_space(&self, object: Object<'_>) -> Option<ColorSpace> {
+        self.object_cache
+            .get_or_insert_with(object.cache_key(), || {
+                ColorSpace::new(object, &self.object_cache)
+            })
+    }
+
+    /// Drop cached entries while preserving cumulative statistics. ICC data still
+    /// owned by active pages remains charged until its last owner is dropped.
     pub fn clear(&self) {
         let mut fonts = self
             .outline_fonts
@@ -321,6 +342,7 @@ mod shared_cache_tests {
             max_outline_fonts: 7,
             max_outline_font_bytes: 8_192,
             max_objects: 11,
+            max_icc_bytes: 65_536,
         };
         let cache = SharedInterpreterCache::new(limits);
         assert_eq!(cache.limits(), limits);
@@ -637,13 +659,9 @@ impl<'a> Context<'a> {
         resources: &Resources<'_>,
         name: &Name<'_>,
     ) -> Option<ColorSpace> {
-        let color_space = resources.get_color_space(name).and_then(|cs_object| {
-            self.interpreter_cache
-                .object_cache
-                .get_or_insert_with(cs_object.cache_key(), || {
-                    ColorSpace::new(cs_object.clone(), &self.interpreter_cache.object_cache)
-                })
-        });
+        let color_space = resources
+            .get_color_space(name)
+            .and_then(|cs_object| self.interpreter_cache.shared.resolve_color_space(cs_object));
         if color_space.is_none() {
             (self.settings.warning_sink)(crate::InterpreterWarning::ColorSpaceFailure);
         }

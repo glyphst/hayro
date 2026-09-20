@@ -17,6 +17,8 @@ pub enum IccEquivalenceError {
     Unproved,
     /// The caller cancelled the bounded calculation.
     Cancelled,
+    /// Live ICC ownership leaves insufficient memory for the bounded proof.
+    MemoryLimit,
 }
 
 pub(super) fn matrix_tags_only(bytes: &[u8]) -> bool {
@@ -56,7 +58,10 @@ impl ICCProfile {
         let result = self.calculate_device_rgb_bounds(&mut cancelled);
         // Cancellation belongs to this caller, never to the shared profile.
         // Avoid blocking another caller on an in-progress, cancellable proof.
-        if result != Err(IccEquivalenceError::Cancelled) {
+        if !matches!(
+            result,
+            Err(IccEquivalenceError::Cancelled | IccEquivalenceError::MemoryLimit)
+        ) {
             let _ = cache.set(result);
         }
         result
@@ -71,6 +76,12 @@ impl ICCProfile {
             // generic ICC destinations and multidimensional LUTs are separate.
             return Err(IccEquivalenceError::Unproved);
         }
+        let _proof_memory = self
+            .reserve_memory(memory::construction_bytes(
+                &self.data.src_profile,
+                memory::transform_bytes(&self.data.src_profile, 3, self.intent).saturating_mul(2),
+            ))
+            .map_err(|_| IccEquivalenceError::MemoryLimit)?;
         let (source, destination, options) = self
             .conversion_profiles()
             .ok_or(IccEquivalenceError::Unproved)?;
@@ -87,7 +98,10 @@ impl ICCProfile {
                 return Err(IccEquivalenceError::Unproved);
             }
         }
-        let IccTransform::Rgb(forward) = self.transform().ok_or(IccEquivalenceError::Unproved)?
+        let IccTransform::Rgb(forward) = self.transform().map_err(|error| match error {
+            ColorConversionError::IccMemoryLimit => IccEquivalenceError::MemoryLimit,
+            _ => IccEquivalenceError::Unproved,
+        })?
         else {
             return Err(IccEquivalenceError::Unproved);
         };

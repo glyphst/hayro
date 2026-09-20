@@ -55,6 +55,8 @@ pub enum ColorConversionError {
     InvalidIntent,
     /// The embedded profile or requested transform is invalid or unsupported.
     IccTransform,
+    /// Live ICC profile/transform ownership exceeds the document's byte budget.
+    IccMemoryLimit,
     /// Non-default calibrated/Lab intent conversion is outside the proven subset.
     CalibratedIntent,
 }
@@ -66,6 +68,7 @@ impl std::fmt::Display for ColorConversionError {
             Self::IccTransform => {
                 "ICC profile cannot provide the requested source-to-sRGB transform"
             }
+            Self::IccMemoryLimit => "ICC profile and transform memory exceeds the document limit",
             Self::CalibratedIntent => {
                 "non-default calibrated/Lab rendering intent requires unsupported color conversion"
             }

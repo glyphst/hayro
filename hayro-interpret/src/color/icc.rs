@@ -1,22 +1,32 @@
 use super::{ColorConversionError, RenderingIntent, ToLuma, ToRgb};
+use crate::cache::{IccMemory, MemoryReservation};
 use hayro_syntax::object::{
     Array, Dict, Name, Stream,
     dict::keys::{ICC_BASED, N, RANGE},
 };
 use moxcms::{
-    ColorProfile, DataColorSpace, Layout, ProfileClass, Transform8BitExecutor, TransformOptions,
+    ColorProfile, DataColorSpace, Layout, PcsXyzAdjustment, ProfileClass, Transform8BitExecutor,
+    TransformOptions,
 };
 use std::fmt::{Debug, Formatter};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(test)]
 mod channel_tests;
 #[cfg(test)]
 mod declaration_tests;
 mod equivalence;
+#[cfg(test)]
+mod lut_tests;
+mod memory;
+#[cfg(test)]
+mod memory_tests;
 pub use equivalence::{IccDeviceRgbBounds, IccEquivalenceError};
 
 const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
+// ICC.1:2004-10, 6.3.4.3/Table 12: perceptual reference-medium black.
+const PERCEPTUAL_BLACK: [f64; 3] = [0.003357, 0.003479, 0.002869];
+const TRANSFORM_BATCH_PIXELS: usize = 1024;
 
 pub(super) fn declaration<'a>(array: &Array<'a>) -> Option<(Stream<'a>, usize)> {
     if array.raw_iter().take(3).count() != 2 {
@@ -38,8 +48,16 @@ struct ICCColorRepr {
     matrix_tags_only: bool,
     // Shared source data has only four possible derived transforms. Failed
     // construction is cached too; no mutable global rendering intent exists.
-    transforms: [OnceLock<Option<IccTransform>>; 4],
+    transforms: [OnceLock<Option<OwnedTransform>>; 4],
     equivalence: [OnceLock<Result<IccDeviceRgbBounds, IccEquivalenceError>>; 4],
+    transform_build: Mutex<()>,
+    memory: Option<IccMemory>,
+    _source_reservation: Option<MemoryReservation>,
+}
+
+struct OwnedTransform {
+    value: IccTransform,
+    _reservation: Option<MemoryReservation>,
 }
 
 enum IccTransform {
@@ -85,6 +103,14 @@ impl ICCProfile {
     }
 
     pub(super) fn new(profile: &[u8], number_components: usize) -> Option<Self> {
+        Self::new_with_memory(profile, number_components, None)
+    }
+
+    pub(super) fn new_with_memory(
+        profile: &[u8],
+        number_components: usize,
+        memory: Option<IccMemory>,
+    ) -> Option<Self> {
         let source = ColorProfile::new_from_slice(profile).ok()?;
         if !matches!(profile.get(8), Some(2 | 4))
             || !matches!(
@@ -96,12 +122,26 @@ impl ICCProfile {
                 ProfileClass::InputDevice
                     | ProfileClass::DisplayDevice
                     | ProfileClass::OutputDevice
+                    | ProfileClass::ColorSpace
             )
         {
             return None;
         }
+        // ICC.1:2004-10, 8.7: ColorSpace profiles require both perceptual
+        // directions. Matrix/TRC tags alone do not define this profile class.
+        if source.profile_class == ProfileClass::ColorSpace
+            && (source.lut_a_to_b_perceptual.is_none() || source.lut_b_to_a_perceptual.is_none())
+        {
+            return None;
+        }
         let mut result = Self::new_from_src_profile(source, number_components)?;
-        Arc::get_mut(&mut result.data)?.matrix_tags_only = equivalence::matrix_tags_only(profile);
+        let data = Arc::get_mut(&mut result.data)?;
+        if let Some(memory) = memory {
+            data._source_reservation =
+                Some(memory.reserve(memory::source_bytes(&data.src_profile))?);
+            data.memory = Some(memory);
+        }
+        data.matrix_tags_only = equivalence::matrix_tags_only(profile);
         result.intent = RenderingIntent::default();
         Some(result)
     }
@@ -121,6 +161,9 @@ impl ICCProfile {
                 matrix_tags_only: true,
                 transforms: std::array::from_fn(|_| OnceLock::new()),
                 equivalence: std::array::from_fn(|_| OnceLock::new()),
+                transform_build: Mutex::new(()),
+                memory: None,
+                _source_reservation: None,
             }),
             intent: RenderingIntent::Perceptual,
         })
@@ -134,9 +177,7 @@ impl ICCProfile {
             data: self.data.clone(),
             intent,
         };
-        result
-            .transform()
-            .ok_or(ColorConversionError::IccTransform)?;
+        result.transform()?;
         Ok(result)
     }
 
@@ -147,21 +188,56 @@ impl ICCProfile {
         self.data.src_profile.color_space == DataColorSpace::Lab
     }
 
-    fn transform(&self) -> Option<&IccTransform> {
-        self.data.transforms[self.intent as usize]
-            .get_or_init(|| self.build_transform())
+    fn transform(&self) -> Result<&IccTransform, ColorConversionError> {
+        let slot = &self.data.transforms[self.intent as usize];
+        if slot.get().is_none() {
+            let _guard = self
+                .data
+                .transform_build
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if slot.get().is_none() {
+                let bytes = memory::transform_bytes(
+                    &self.data.src_profile,
+                    self.number_components(),
+                    self.intent,
+                );
+                let reservation = self.reserve_memory(bytes)?;
+                let _construction =
+                    self.reserve_memory(memory::construction_bytes(&self.data.src_profile, bytes))?;
+                let value = self.build_transform().map(|value| OwnedTransform {
+                    value,
+                    _reservation: reservation,
+                });
+                // Resource refusal returns before populating the slot. Invalid
+                // transforms remain cached, as before, while budget can recover.
+                let _ = slot.set(value);
+            }
+        }
+        slot.get()
+            .and_then(Option::as_ref)
+            .map(|value| &value.value)
+            .ok_or(ColorConversionError::IccTransform)
+    }
+
+    fn reserve_memory(
+        &self,
+        bytes: u64,
+    ) -> Result<Option<MemoryReservation>, ColorConversionError> {
+        self.data
+            .memory
             .as_ref()
+            .map(|memory| {
+                memory
+                    .reserve(bytes)
+                    .ok_or(ColorConversionError::IccMemoryLimit)
+            })
+            .transpose()
     }
 
     fn conversion_profiles(&self) -> Option<(ColorProfile, ColorProfile, TransformOptions)> {
         let mut source = self.data.src_profile.clone();
         let mut destination = ColorProfile::new_srgb();
-        let options = TransformOptions {
-            rendering_intent: self.intent.cms(),
-            // Embedded ICC tags, rather than optional CICP shortcuts, define this conversion.
-            allow_use_cicp_transfer: false,
-            ..TransformOptions::default()
-        };
         if self.intent == RenderingIntent::AbsoluteColorimetric {
             let white = if source.version() < moxcms::ProfileVersion::V4_0
                 && source.profile_class == ProfileClass::DisplayDevice
@@ -208,6 +284,35 @@ impl ICCProfile {
             }
             RenderingIntent::Perceptual => {}
         }
+        let adjust_black = source.version() >= moxcms::ProfileVersion::V4_0
+            && match self.intent {
+                RenderingIntent::Perceptual => source.lut_a_to_b_perceptual.is_some(),
+                RenderingIntent::Saturation => source.lut_a_to_b_saturation.is_some(),
+                _ => false,
+            };
+        let pcs_xyz_adjustment = if adjust_black {
+            // The destination's matrix/TRC sRGB black is zero. Map the v4 LUT
+            // reference black to it in XYZ, preserving D50 and signed values
+            // until the destination matrix and final encoding have run.
+            Some(
+                PcsXyzAdjustment::new(
+                    std::array::from_fn(|i| (D50[i] / (D50[i] - PERCEPTUAL_BLACK[i])) as f32),
+                    std::array::from_fn(|i| {
+                        (-PERCEPTUAL_BLACK[i] * D50[i] / (D50[i] - PERCEPTUAL_BLACK[i])) as f32
+                    }),
+                )
+                .ok()?,
+            )
+        } else {
+            None
+        };
+        let options = TransformOptions {
+            rendering_intent: self.intent.cms(),
+            allow_use_cicp_transfer: false,
+            prefer_original_lut: true,
+            pcs_xyz_adjustment,
+            ..TransformOptions::default()
+        };
         Some((source, destination, options))
     }
 
@@ -256,8 +361,23 @@ impl ICCProfile {
 
 impl ToRgb for ICCProfile {
     fn convert(&self, input: &[u8], output: &mut [u8]) -> Option<()> {
-        match self.transform()? {
-            IccTransform::Rgb(transform) => transform.transform(input, output).ok()?,
+        match self.transform().ok()? {
+            IccTransform::Rgb(transform) => {
+                let components = self.number_components();
+                if !input.len().is_multiple_of(components)
+                    || output.len() != (input.len() / components).checked_mul(3)?
+                {
+                    return None;
+                }
+                // Direct CMS stages allocate working vectors for their input.
+                // Keep them bounded independently of decoded image dimensions.
+                for (source, destination) in input
+                    .chunks(components * TRANSFORM_BATCH_PIXELS)
+                    .zip(output.chunks_mut(3 * TRANSFORM_BATCH_PIXELS))
+                {
+                    transform.transform(source, destination).ok()?;
+                }
+            }
             IccTransform::Gray { rgb, .. } => {
                 if output.len() != input.len().checked_mul(3)? {
                     return None;
@@ -287,7 +407,7 @@ impl ToRgb for ICCProfile {
 
 impl ToLuma for ICCProfile {
     fn to_luma(&self, input: &mut [u8]) -> Option<()> {
-        let IccTransform::Gray { rgb, neutral: true } = self.transform()? else {
+        let IccTransform::Gray { rgb, neutral: true } = self.transform().ok()? else {
             return None;
         };
         for value in input {

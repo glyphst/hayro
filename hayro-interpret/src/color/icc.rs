@@ -1,14 +1,34 @@
 use super::{ColorConversionError, RenderingIntent, ToLuma, ToRgb};
+use hayro_syntax::object::{
+    Array, Dict, Name, Stream,
+    dict::keys::{ICC_BASED, N, RANGE},
+};
 use moxcms::{
     ColorProfile, DataColorSpace, Layout, ProfileClass, Transform8BitExecutor, TransformOptions,
 };
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, OnceLock};
 
+#[cfg(test)]
+mod declaration_tests;
 mod equivalence;
 pub use equivalence::{IccDeviceRgbBounds, IccEquivalenceError};
 
 const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
+
+pub(super) fn declaration<'a>(array: &Array<'a>) -> Option<(Stream<'a>, usize)> {
+    if array.raw_iter().take(3).count() != 2 {
+        return None;
+    }
+    let mut iter = array.flex_iter();
+    if iter.next::<Name<'_>>()?.as_ref() != ICC_BASED {
+        return None;
+    }
+    let stream = iter.next::<Stream<'_>>()?;
+    let components = stream.dict().get::<usize>(N)?;
+    ICCProfile::validate_range(stream.dict(), components)?;
+    Some((stream, components))
+}
 
 struct ICCColorRepr {
     number_components: usize,
@@ -43,6 +63,25 @@ impl Debug for ICCProfile {
 }
 
 impl ICCProfile {
+    pub(super) fn validate_range(dict: &Dict<'_>, components: usize) -> Option<()> {
+        if !matches!(components, 1 | 3 | 4) {
+            return None;
+        }
+        // PDF 32000-1 Tables 66/69: the supported Gray/RGB/CMYK profiles
+        // have normalized component ranges. Validate the whole declaration
+        // before profile-cache reuse, including indirect bounds and tails.
+        if dict.is_null_or_absent(RANGE) {
+            return Some(());
+        }
+        let valid = match components {
+            1 => dict.get::<[f64; 2]>(RANGE)? == [0.0, 1.0],
+            3 => dict.get::<[f64; 6]>(RANGE)? == [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            4 => dict.get::<[f64; 8]>(RANGE)? == [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            _ => return None,
+        };
+        valid.then_some(())
+    }
+
     pub(super) fn new(profile: &[u8], number_components: usize) -> Option<Self> {
         let source = ColorProfile::new_from_slice(profile).ok()?;
         if !matches!(profile.get(8), Some(2 | 4))

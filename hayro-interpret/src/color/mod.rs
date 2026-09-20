@@ -35,7 +35,6 @@ pub use calibrated_definition::CalibratedRgbDefinition;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::Name;
 use hayro_syntax::object::Object;
-use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
 pub use icc::{IccDeviceRgbBounds, IccEquivalenceError};
 pub use image::ImageColorSpaceError;
@@ -240,9 +239,7 @@ impl ColorSpaceType {
 
             match name.deref() {
                 ICC_BASED => {
-                    let icc_stream = iter.next::<Stream<'_>>()?;
-                    let dict = icc_stream.dict();
-                    let num_components = dict.get::<usize>(N)?;
+                    let (icc_stream, num_components) = icc::declaration(&color_array)?;
 
                     let profile_cache_key = crate::util::hash128(&(
                         "icc-profile",
@@ -343,6 +340,13 @@ impl std::fmt::Debug for ColorSpace {
 }
 
 impl ColorSpace {
+    /// Check an `ICCBased` array, component count and declared component ranges
+    /// without decoding its profile. Profile bytes and transforms are validated
+    /// separately when constructing and binding the color space.
+    pub fn icc_declaration_is_valid(object: &Object<'_>) -> bool {
+        matches!(object, Object::Array(array) if icc::declaration(array).is_some())
+    }
+
     fn from_kind(kind: ColorSpaceType) -> Self {
         Self(
             Arc::new(kind),

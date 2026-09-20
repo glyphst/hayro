@@ -5,8 +5,8 @@ use hayro_syntax::object::{
     dict::keys::{ICC_BASED, N, RANGE},
 };
 use moxcms::{
-    ColorProfile, DataColorSpace, Layout, PcsXyzAdjustment, ProfileClass, Transform8BitExecutor,
-    TransformOptions,
+    ColorProfile, DataColorSpace, Layout, LutWarehouse, PcsXyzAdjustment, ProfileClass,
+    Transform8BitExecutor, TransformOptions,
 };
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -16,6 +16,8 @@ mod channel_tests;
 #[cfg(test)]
 mod declaration_tests;
 mod equivalence;
+#[cfg(test)]
+mod gray_lut_tests;
 #[cfg(test)]
 mod lut_tests;
 mod memory;
@@ -27,6 +29,20 @@ const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
 // ICC.1:2004-10, 6.3.4.3/Table 12: perceptual reference-medium black.
 const PERCEPTUAL_BLACK: [f64; 3] = [0.003357, 0.003479, 0.002869];
 const TRANSFORM_BATCH_PIXELS: usize = 1024;
+
+fn source_lut(profile: &ColorProfile, intent: RenderingIntent) -> Option<&LutWarehouse> {
+    match intent {
+        RenderingIntent::Perceptual => profile.lut_a_to_b_perceptual.as_ref(),
+        RenderingIntent::RelativeColorimetric | RenderingIntent::AbsoluteColorimetric => profile
+            .lut_a_to_b_colorimetric
+            .as_ref()
+            .or(profile.lut_a_to_b_perceptual.as_ref()),
+        RenderingIntent::Saturation => profile
+            .lut_a_to_b_saturation
+            .as_ref()
+            .or(profile.lut_a_to_b_perceptual.as_ref()),
+    }
+}
 
 pub(super) fn declaration<'a>(array: &Array<'a>) -> Option<(Stream<'a>, usize)> {
     if array.raw_iter().take(3).count() != 2 {
@@ -203,8 +219,11 @@ impl ICCProfile {
                     self.intent,
                 );
                 let reservation = self.reserve_memory(bytes)?;
-                let _construction =
-                    self.reserve_memory(memory::construction_bytes(&self.data.src_profile, bytes))?;
+                let _construction = self.reserve_memory(memory::construction_bytes(
+                    &self.data.src_profile,
+                    bytes,
+                    self.intent,
+                ))?;
                 let value = self.build_transform().map(|value| OwnedTransform {
                     value,
                     _reservation: reservation,
@@ -319,28 +338,34 @@ impl ICCProfile {
     fn build_transform(&self) -> Option<IccTransform> {
         let (source, destination, options) = self.conversion_profiles()?;
         if self.number_components() == 1 {
-            if source.pcs != DataColorSpace::Xyz
-                || (source.lut_a_to_b_perceptual.is_some()
-                    || source.lut_a_to_b_colorimetric.is_some()
-                    || source.lut_a_to_b_saturation.is_some())
-            {
-                return None;
-            }
-            // The CMS gray shortcut bypasses the destination matrix. Replicating
-            // gray through a neutral RGB matrix with the original TRC preserves
-            // PCS luminance and permits absolute media-white tinting.
-            let trc = source.gray_trc.clone()?;
-            let mut neutral = ColorProfile::new_srgb();
-            neutral.red_trc = Some(trc.clone());
-            neutral.green_trc = Some(trc.clone());
-            neutral.blue_trc = Some(trc);
-            neutral.cicp = None;
-            let transform = neutral
-                .create_transform_8bit(Layout::Rgb, &destination, Layout::Rgb, options)
-                .ok()?;
-            let input: Vec<u8> = (0..=255_u8).flat_map(|v| [v; 3]).collect();
             let mut output = [0_u8; 768];
-            transform.transform(&input, &mut output).ok()?;
+            if source_lut(&source, self.intent).is_some() {
+                let transform = source
+                    .create_transform_8bit(Layout::Gray, &destination, Layout::Rgb, options)
+                    .ok()?;
+                let input = std::array::from_fn::<_, 256, _>(|i| i as u8);
+                transform.transform(&input, &mut output).ok()?;
+            } else {
+                if source.pcs != DataColorSpace::Xyz {
+                    return None;
+                }
+                // The CMS gray shortcut bypasses the destination matrix.
+                // Replicating gray through a neutral RGB matrix with the
+                // original TRC preserves absolute media-white tinting.
+                let trc = source.gray_trc.clone()?;
+                let mut neutral = ColorProfile::new_srgb();
+                neutral.red_trc = Some(trc.clone());
+                neutral.green_trc = Some(trc.clone());
+                neutral.blue_trc = Some(trc);
+                neutral.cicp = None;
+                let transform = neutral
+                    .create_transform_8bit(Layout::Rgb, &destination, Layout::Rgb, options)
+                    .ok()?;
+                let input = std::array::from_fn::<_, 768, _>(|i| (i / 3) as u8);
+                transform.transform(&input, &mut output).ok()?;
+            }
+            // Retain only the complete byte-domain table, independently of
+            // profile/LUT size and subsequent image dimensions.
             let rgb = Box::new(std::array::from_fn(|i| {
                 [output[i * 3], output[i * 3 + 1], output[i * 3 + 2]]
             }));

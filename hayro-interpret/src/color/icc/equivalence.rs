@@ -80,6 +80,7 @@ impl ICCProfile {
             .reserve_memory(memory::construction_bytes(
                 &self.data.src_profile,
                 memory::transform_bytes(&self.data.src_profile, 3, self.intent).saturating_mul(2),
+                self.intent,
             ))
             .map_err(|_| IccEquivalenceError::MemoryLimit)?;
         let (source, destination, options) = self

@@ -1,9 +1,10 @@
 //! Conservative bounds for the pinned moxcms 0.8.1 byte-to-sRGB paths.
 //! Keep these with its feature/pin compatibility review: they are requested
 //! allocation estimates, not process RSS or general ICC executor introspection.
-use super::{ICCColorRepr, RenderingIntent};
+use super::{ICCColorRepr, RenderingIntent, source_lut};
 use moxcms::{
-    ColorProfile, LutStore, LutWarehouse, PointeeSizeExpressible, ProfileText, ToneReprCurve,
+    ColorProfile, DataColorSpace, LutStore, LutWarehouse, PointeeSizeExpressible, ProfileText,
+    ToneReprCurve,
 };
 
 fn capacity<T>(values: &Vec<T>) -> u64 {
@@ -119,8 +120,8 @@ pub(super) fn source_bytes(profile: &ColorProfile) -> u64 {
 
 fn expanded_curve(curve: &ToneReprCurve) -> u64 {
     // moxcms ToneReprCurve::to_clut uses 16384 entries for identity and
-    // the f32 input-table capacity for parametric curves (the consumer slices
-    // off its last entry). Explicit LUTs retain their length.
+    // the f32 input-table capacity for parametric curves. Explicit LUTs retain
+    // their length.
     let entries = match curve {
         ToneReprCurve::Lut(values) if !values.is_empty() => values.len(),
         ToneReprCurve::Lut(_) => 16384,
@@ -137,22 +138,15 @@ pub(super) fn transform_bytes(
     if components == 1 {
         return 1024;
     }
+    executor_bytes(profile, intent)
+}
+
+fn executor_bytes(profile: &ColorProfile, intent: RenderingIntent) -> u64 {
     // Three 65536-entry u8 output tables, 256-entry input tables, executor
     // boxes, Arc headers, matrices and stage vectors fit within 256 KiB.
     // Raw LUT/curve storage is added separately, even if a stage can elide it.
     let fixed = 256 * 1024_u64;
-    let lut = match intent {
-        RenderingIntent::Perceptual => profile.lut_a_to_b_perceptual.as_ref(),
-        RenderingIntent::RelativeColorimetric | RenderingIntent::AbsoluteColorimetric => profile
-            .lut_a_to_b_colorimetric
-            .as_ref()
-            .or(profile.lut_a_to_b_perceptual.as_ref()),
-        RenderingIntent::Saturation => profile
-            .lut_a_to_b_saturation
-            .as_ref()
-            .or(profile.lut_a_to_b_perceptual.as_ref()),
-    };
-    match lut {
+    match source_lut(profile, intent) {
         None => fixed,
         Some(LutWarehouse::Lut(lut)) => [&lut.input_table, &lut.clut_table, &lut.output_table]
             .into_iter()
@@ -170,12 +164,25 @@ pub(super) fn transform_bytes(
     }
 }
 
-pub(super) fn construction_bytes(profile: &ColorProfile, transform: u64) -> u64 {
+pub(super) fn construction_bytes(
+    profile: &ColorProfile,
+    transform: u64,
+    intent: RenderingIntent,
+) -> u64 {
     // The conversion clones the source plus at most one missing intent tag.
     // Curve normalization can temporarily duplicate retained stage tables;
     // one MiB also covers individual curve/gamma construction work arrays.
+    // Gray LUT execution is temporary: only its 256-entry RGB table survives.
+    // Charge both the executor and its construction workspace here rather than
+    // mistaking the retained table's 1024-byte allowance for either allocation.
+    let transient =
+        if profile.color_space == DataColorSpace::Gray && source_lut(profile, intent).is_some() {
+            executor_bytes(profile, intent).saturating_mul(2)
+        } else {
+            transform
+        };
     source_bytes(profile)
         .saturating_mul(2)
-        .saturating_add(transform)
+        .saturating_add(transient)
         .saturating_add(1024 * 1024)
 }

@@ -17,6 +17,8 @@ mod channel_tests;
 mod declaration_tests;
 mod equivalence;
 #[cfg(test)]
+mod gray_lab_trc_tests;
+#[cfg(test)]
 mod gray_lut_tests;
 #[cfg(test)]
 mod lut_tests;
@@ -336,10 +338,19 @@ impl ICCProfile {
     }
 
     fn build_transform(&self) -> Option<IccTransform> {
-        let (source, destination, options) = self.conversion_profiles()?;
+        let (mut source, destination, options) = self.conversion_profiles()?;
         if self.number_components() == 1 {
             let mut output = [0_u8; 768];
-            if source_lut(&source, self.intent).is_some() {
+            let selected_lut = source_lut(&source, self.intent).is_some();
+            if selected_lut || source.pcs == DataColorSpace::Lab {
+                if !selected_lut {
+                    // Unselected intent tags must not suppress the Gray TRC.
+                    // Lab curves encode L*: the CMS applies Lab-to-XYZ before
+                    // the destination matrix, including absolute-white tint.
+                    source.lut_a_to_b_perceptual = None;
+                    source.lut_a_to_b_colorimetric = None;
+                    source.lut_a_to_b_saturation = None;
+                }
                 let transform = source
                     .create_transform_8bit(Layout::Gray, &destination, Layout::Rgb, options)
                     .ok()?;

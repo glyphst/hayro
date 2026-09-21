@@ -193,15 +193,22 @@ pub(super) fn profile_bytes(version: u8, components: usize, separate_intents: bo
 }
 
 fn expected(pixel: &[u8], version: u8, separate_intents: bool, intent: usize) -> [u8; 3] {
+    let values: Vec<_> = pixel.iter().map(|v| f64::from(*v) / 255.0).collect();
+    expected_native(&values, version, separate_intents, intent)
+}
+
+pub(super) fn expected_native(
+    pixel: &[f64],
+    version: u8,
+    separate_intents: bool,
+    intent: usize,
+) -> [u8; 3] {
     let exponent = if separate_intents {
         [1, 2, 3, 2][intent]
     } else {
         1
     };
-    let values: Vec<_> = pixel
-        .iter()
-        .map(|v| (f64::from(*v) / 255.0).powi(exponent))
-        .collect();
+    let values: Vec<_> = pixel.iter().map(|v| v.powi(exponent)).collect();
     let mut rgb = std::array::from_fn(|i| {
         if pixel.len() == 3 {
             values[i]

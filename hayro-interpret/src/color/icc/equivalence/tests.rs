@@ -1,14 +1,14 @@
 use super::*;
 use moxcms::ToneReprCurve;
 
-fn rgb_profile() -> ColorProfile {
+pub(super) fn rgb_profile() -> ColorProfile {
     let mut source = ColorProfile::new_srgb();
     source.media_white_point = Some(moxcms::Xyzd::new(D50[0], D50[1], D50[2]));
     source.cicp = None;
     source
 }
 
-fn parsed(source: &ColorProfile) -> ICCProfile {
+pub(super) fn parsed(source: &ColorProfile) -> ICCProfile {
     let mut bytes = source.encode().unwrap();
     bytes[8..12].copy_from_slice(&[4, 0x20, 0, 0]);
     ICCProfile::new(&bytes, 3).unwrap()

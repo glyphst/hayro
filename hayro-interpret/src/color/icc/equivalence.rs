@@ -1,10 +1,12 @@
-//! Complete byte-consumer bounds for bidirectional RGB matrix/TRC profiles.
+//! Complete byte and native-image bounds for ICC RGB matrix/TRC consumers.
 use super::*;
+
+mod native;
 
 /// Pointwise component error against the corresponding normalized RGB input.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IccDeviceRgbBounds {
-    /// Maximum error in either direction, including input byte rounding.
+    /// Maximum error in the certified directions, including input quantization.
     pub max_component_error: f64,
     /// Number of scalar and batched color evaluations used by the proof.
     pub evaluated_colors: u32,
@@ -134,18 +136,7 @@ fn validate_profile(
     profile: &ColorProfile,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), IccEquivalenceError> {
-    if profile.color_space != DataColorSpace::Rgb
-        || profile.pcs != DataColorSpace::Xyz
-        || !profile.is_matrix_shaper()
-        || profile.lut_a_to_b_perceptual.is_some()
-        || profile.lut_a_to_b_colorimetric.is_some()
-        || profile.lut_a_to_b_saturation.is_some()
-        || profile.lut_b_to_a_perceptual.is_some()
-        || profile.lut_b_to_a_colorimetric.is_some()
-        || profile.lut_b_to_a_saturation.is_some()
-    {
-        return Err(IccEquivalenceError::Unproved);
-    }
+    validate_matrix_shaper(profile)?;
     // These are the exact 8-bit consumer's input tables, with CICP disabled.
     for channel in 0..3 {
         checkpoint(cancelled)?;
@@ -169,6 +160,22 @@ fn validate_profile(
         if gamma[..4096].windows(2).any(|p| p[0] > p[1]) {
             return Err(IccEquivalenceError::Unproved);
         }
+    }
+    Ok(())
+}
+
+fn validate_matrix_shaper(profile: &ColorProfile) -> Result<(), IccEquivalenceError> {
+    if profile.color_space != DataColorSpace::Rgb
+        || profile.pcs != DataColorSpace::Xyz
+        || !profile.is_matrix_shaper()
+        || profile.lut_a_to_b_perceptual.is_some()
+        || profile.lut_a_to_b_colorimetric.is_some()
+        || profile.lut_a_to_b_saturation.is_some()
+        || profile.lut_b_to_a_perceptual.is_some()
+        || profile.lut_b_to_a_colorimetric.is_some()
+        || profile.lut_b_to_a_saturation.is_some()
+    {
+        return Err(IccEquivalenceError::Unproved);
     }
     Ok(())
 }

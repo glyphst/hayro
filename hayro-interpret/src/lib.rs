@@ -42,6 +42,11 @@ mod ocg;
 mod types;
 mod x_object;
 
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../hayro-syntax/src/filter/jpx_opacity_fixtures.rs"]
+mod jpx_opacity_fixtures;
+
 pub mod color;
 pub mod encode;
 pub mod font;

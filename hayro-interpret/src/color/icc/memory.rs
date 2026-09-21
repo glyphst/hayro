@@ -1,4 +1,4 @@
-//! Conservative bounds for the pinned moxcms 0.8.1 byte-to-sRGB paths.
+//! Conservative bounds for the pinned moxcms 0.8.1 byte/native-to-sRGB paths.
 //! Keep these with its feature/pin compatibility review: they are requested
 //! allocation estimates, not process RSS or general ICC executor introspection.
 use super::{ICCColorRepr, RenderingIntent, source_lut};
@@ -74,7 +74,7 @@ fn text_heap(text: &ProfileText) -> u64 {
 }
 
 pub(super) fn source_bytes(profile: &ColorProfile) -> u64 {
-    // Include Arc/cache bookkeeping and the four shared intent wrappers, in
+    // Include Arc/cache bookkeeping and the byte/native intent wrappers, in
     // addition to the parsed profile's exact owned capacities below.
     let mut bytes = (size_of::<ICCColorRepr>() + 2 * size_of::<usize>() + 4096) as u64;
     for curve in [
@@ -162,6 +162,21 @@ fn executor_bytes(profile: &ColorProfile, intent: RenderingIntent) -> u64 {
                 .fold(bytes, u64::saturating_add)
         }
     }
+}
+
+pub(super) fn native_transform_bytes(profile: &ColorProfile, intent: RenderingIntent) -> u64 {
+    // The f64 input path uses up to three 65536-entry f32 linear tables
+    // and three 65536-entry f64 destination tables. Original LUT stages still
+    // retain f32 curves/CLUTs, accounted by executor_bytes. Destination is
+    // the fixed matrix/TRC sRGB profile, never an arbitrary destination LUT.
+    executor_bytes(profile, intent).saturating_add(3 * 1024 * 1024)
+}
+
+pub(super) fn native_construction_bytes(profile: &ColorProfile, transform: u64) -> u64 {
+    source_bytes(profile)
+        .saturating_mul(2)
+        .saturating_add(transform.saturating_mul(2))
+        .saturating_add(1024 * 1024)
 }
 
 pub(super) fn construction_bytes(

@@ -513,6 +513,7 @@ impl ColorSpace {
     /// consumer, including quantizer preimages. Unsupported profiles return an
     /// error; sparse color probes never establish equivalence. This is a
     /// conversion bound, not a bound on error amplification by arbitrary blends.
+    /// It does not certify the separate native-component ICC image converter.
     pub fn icc_device_rgb_bounds(
         &self,
         cancelled: impl FnMut() -> bool,
@@ -521,6 +522,24 @@ impl ColorSpace {
             return Err(IccEquivalenceError::Unproved);
         };
         profile.device_rgb_bounds(cancelled)
+    }
+
+    /// Bound the native-component ICC RGB image conversion to byte sRGB.
+    ///
+    /// The forward-only bound covers every normalized binary64 input to the
+    /// current matrix/TRC image consumer, including its actual quantizer bins
+    /// and final byte encoding. Combine it with [`Self::icc_device_rgb_bounds`]
+    /// when replacing a group space that also has byte or reverse consumers.
+    /// Unsupported profiles return an error; this does not establish a bound
+    /// on amplification by arbitrary blends or on a native inverse conversion.
+    pub fn icc_image_device_rgb_bounds(
+        &self,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<IccDeviceRgbBounds, IccEquivalenceError> {
+        let ColorSpaceType::ICCBased(profile) = self.0.as_ref() else {
+            return Err(IccEquivalenceError::Unproved);
+        };
+        profile.image_device_rgb_bounds(cancelled)
     }
 
     /// Return `true` if the current color space is the pattern color space.

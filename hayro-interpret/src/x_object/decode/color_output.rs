@@ -1,5 +1,6 @@
 //! Bounded output conversion after native source sample recovery.
 use super::DecodeContext;
+use crate::cache::MemoryReservation;
 use crate::color::{ColorSpace, ColorSpaceKind, ToRgb};
 use crate::x_object::image::ImageXObject;
 use crate::{CmykData, ImageData, LumaData, RgbData};
@@ -16,6 +17,9 @@ pub(super) struct ColorOutput<'a> {
     space: &'a ColorSpace,
     data: Vec<u8>,
     batch: Vec<u8>,
+    native_batch: Vec<f64>,
+    icc_space: Option<&'a ColorSpace>,
+    _native_batch_reservation: Option<MemoryReservation>,
     batch_length: usize,
     remaining: usize,
     native: bool,
@@ -60,15 +64,31 @@ impl<'a> ColorOutput<'a> {
             3
         };
         data.try_reserve_exact(count.checked_mul(channels)?).ok()?;
-        let batch_length = count.min(CONVERSION_BATCH_PIXELS).checked_mul(components)?;
+        let icc_space = space.image_icc_space();
+        let batch_components =
+            icc_space.map_or(components, |space| usize::from(space.num_components()));
+        let batch_length = count
+            .min(CONVERSION_BATCH_PIXELS)
+            .checked_mul(batch_components)?;
         let mut batch = Vec::new();
-        if !native {
+        let mut native_batch = Vec::new();
+        let native_batch_reservation = if let Some(icc_space) = icc_space {
+            let reservation = icc_space.reserve_icc_image_samples(batch_length)?;
+            native_batch.try_reserve_exact(batch_length).ok()?;
+            reservation
+        } else {
+            None
+        };
+        if !native && icc_space.is_none() {
             batch.try_reserve_exact(batch_length).ok()?;
         }
         Some(Self {
             space,
             data,
             batch,
+            native_batch,
+            icc_space,
+            _native_batch_reservation: native_batch_reservation,
             batch_length,
             remaining: count,
             native,
@@ -118,6 +138,17 @@ impl<'a> ColorOutput<'a> {
                 pixel
             };
             self.data.extend(pixel);
+        } else if let Some(icc_space) = self.icc_space {
+            self.native_batch
+                .extend(self.space.image_icc_components(values)?);
+            if self.native_batch.len() == self.batch_length || self.remaining == 0 {
+                let start = self.data.len();
+                let length = (self.native_batch.len() / usize::from(icc_space.num_components()))
+                    .checked_mul(3)?;
+                self.data.resize(start.checked_add(length)?, 0);
+                icc_space.convert_icc_image_samples(&self.native_batch, &mut self.data[start..])?;
+                self.native_batch.clear();
+            }
         } else if self.native {
             let rgb = self.space.image_rgb_f64(values)?;
             self.data.extend(
@@ -126,7 +157,7 @@ impl<'a> ColorOutput<'a> {
                     .map(|value| (value * 255.0).round() as u8),
             );
         } else {
-            // Preserve the existing byte-input ICC policy, after recovery.
+            // Other byte-based spaces retain their existing conversion policy.
             self.batch.extend(
                 values
                     .iter()

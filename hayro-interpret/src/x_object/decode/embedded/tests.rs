@@ -3,9 +3,7 @@ use crate::cache::Cache;
 use hayro_syntax::Pdf;
 use hayro_syntax::object::{ObjectIdentifier, Stream};
 
-#[allow(dead_code)]
-#[path = "../../../../../hayro-syntax/src/filter/jpx_opacity_fixtures.rs"]
-mod fixtures;
+use crate::jpx_opacity_fixtures as fixtures;
 
 fn with_image<T>(
     data: &[u8],

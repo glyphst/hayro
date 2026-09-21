@@ -103,8 +103,12 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
 
     fn decode_image(&mut self) -> Option<ImageData> {
         let dict = self.obj.stream.dict();
-        if self.ctx.color_space.uses_tint_transform()
-            && super::tint::needs_native_samples(&self.ctx)
+        let native_icc = self.ctx.color_space.image_icc_space().is_some()
+            && (self.ctx.color_space.uses_tint_transform()
+                || super::tint::needs_native_samples(&self.ctx));
+        if native_icc
+            || (self.ctx.color_space.uses_tint_transform()
+                && super::tint::needs_native_samples(&self.ctx))
         {
             return super::tint::decode(self.obj, &self.ctx);
         }

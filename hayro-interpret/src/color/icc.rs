@@ -25,6 +25,7 @@ mod lut_tests;
 mod memory;
 #[cfg(test)]
 mod memory_tests;
+mod native;
 pub use equivalence::{IccDeviceRgbBounds, IccEquivalenceError};
 
 const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
@@ -64,10 +65,12 @@ struct ICCColorRepr {
     number_components: usize,
     src_profile: ColorProfile,
     matrix_tags_only: bool,
-    // Shared source data has only four possible derived transforms. Failed
-    // construction is cached too; no mutable global rendering intent exists.
+    // Shared source data has four intent slots for each byte/native consumer.
+    // Semantic failures are cached too; rendering intent is never global.
     transforms: [OnceLock<Option<OwnedTransform>>; 4],
+    native_transforms: [OnceLock<Option<native::OwnedNativeTransform>>; 4],
     equivalence: [OnceLock<Result<IccDeviceRgbBounds, IccEquivalenceError>>; 4],
+    image_equivalence: [OnceLock<Result<IccDeviceRgbBounds, IccEquivalenceError>>; 4],
     transform_build: Mutex<()>,
     memory: Option<IccMemory>,
     _source_reservation: Option<MemoryReservation>,
@@ -178,7 +181,9 @@ impl ICCProfile {
                 src_profile,
                 matrix_tags_only: true,
                 transforms: std::array::from_fn(|_| OnceLock::new()),
+                native_transforms: std::array::from_fn(|_| OnceLock::new()),
                 equivalence: std::array::from_fn(|_| OnceLock::new()),
+                image_equivalence: std::array::from_fn(|_| OnceLock::new()),
                 transform_build: Mutex::new(()),
                 memory: None,
                 _source_reservation: None,

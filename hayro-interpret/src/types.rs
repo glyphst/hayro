@@ -136,6 +136,11 @@ impl RasterImage<'_> {
 
     /// Perform some operation with the RGB and alpha channel of the image.
     ///
+    /// ICC images preserve native samples through Decode, tint evaluation,
+    /// and opacity recovery before conversion to byte RGB. Retained transforms
+    /// and bounded conversion buffers share the interpreter's ICC memory quota.
+    /// Ordinary normalized byte images retain the existing byte conversion path.
+    ///
     /// The second argument allows you to give the image decoder a hint for
     /// what resolution of the image you want to have. Note that this does not
     /// mean that the resulting image will have that dimension. Instead, it allows

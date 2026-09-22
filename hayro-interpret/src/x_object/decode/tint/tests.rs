@@ -40,12 +40,6 @@ fn with_image<T>(
         None,
     )
     .unwrap();
-    // Existing raw-transfer wide arithmetic admission is not inferred from the
-    // ordinary tint conversion's binary32 function evaluation.
-    assert!(matches!(
-        super::super::decode_rgb_f64(&image, u64::MAX, || true),
-        Err(crate::FloatImageError::Unsupported)
-    ));
     callback(&image)
 }
 

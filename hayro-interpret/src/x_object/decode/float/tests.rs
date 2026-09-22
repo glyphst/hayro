@@ -14,7 +14,20 @@ fn decode(
     })
 }
 
-fn with_image<T>(header: &str, data: &[u8], run: impl FnOnce(&ImageXObject<'_>) -> T) -> T {
+pub(super) fn with_image<T>(
+    header: &str,
+    data: &[u8],
+    run: impl FnOnce(&ImageXObject<'_>) -> T,
+) -> T {
+    with_image_objects(header, data, &[], run)
+}
+
+pub(super) fn with_image_objects<T>(
+    header: &str,
+    data: &[u8],
+    objects: &[u8],
+    run: impl FnOnce(&ImageXObject<'_>) -> T,
+) -> T {
     let mut bytes = format!(
         "%PDF-1.7\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
         2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
@@ -24,7 +37,9 @@ fn with_image<T>(header: &str, data: &[u8], run: impl FnOnce(&ImageXObject<'_>) 
     )
     .into_bytes();
     bytes.extend_from_slice(data);
-    bytes.extend_from_slice(b"\nendstream\nendobj\ntrailer <</Root 1 0 R>>\n%%EOF");
+    bytes.extend_from_slice(b"\nendstream\nendobj\n");
+    bytes.extend_from_slice(objects);
+    bytes.extend_from_slice(b"\ntrailer <</Root 1 0 R>>\n%%EOF");
     let pdf = Pdf::new(bytes).unwrap();
     let stream = pdf
         .xref()

@@ -146,6 +146,11 @@ pub(super) fn decode_context_rgb<const BYTES: usize>(
         )?;
         return Ok(output);
     }
+    // Named colors can have more source components than the three RGB outputs.
+    // The color-space arity is a u8; keep its bounded scratch on the stack and
+    // reuse it without allocating or quantizing each pixel's native samples.
+    let mut storage = [0.0_f64; u8::MAX as usize];
+    let values = &mut storage[..components];
     let mut index = 0;
     for _ in 0..context.height {
         for _ in 0..context.width {
@@ -153,11 +158,10 @@ pub(super) fn decode_context_rgb<const BYTES: usize>(
                 return Err(Error::Cancelled);
             }
             index += 1;
-            let mut values = [0.0_f64; 3];
-            samples.read(&mut values[..components])?;
+            samples.read(values)?;
             let rgb = context
                 .color_space
-                .image_rgb_f64(&values[..components])
+                .image_rgb_f64(values)
                 .ok_or(Error::Decode)?;
             for value in rgb {
                 output.extend_from_slice(&encode(value));
@@ -196,3 +200,6 @@ fn valid_decode(array: &Array<'_>, components: usize) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tint_tests;

@@ -509,13 +509,19 @@ impl ColorSpace {
 
     /// Source arity for the unquantized RGB image conversion families.
     ///
-    /// Includes matrix/TRC ICC sources and their palette/tint alternates. This
+    /// Includes matrix/TRC ICC sources and their palette/tint alternates, and
+    /// ordinary tint images with direct Gray/RGB alternates. This
     /// describes the available converter, not successful image decoding or a
     /// bound on amplification by subsequent transfer functions. Masks, profile
     /// construction, memory limits and decoder restrictions are checked later.
     pub fn float_rgb_component_count(&self) -> Option<usize> {
         (self.is_all_colorants()
             || self.image_float_icc_space().is_some()
+            || (self.uses_tint_transform()
+                && matches!(
+                    self.device_alternate_kind(),
+                    Some(ColorSpaceKind::DeviceGray | ColorSpaceKind::DeviceRgb)
+                ))
             || matches!(
                 self.kind(),
                 ColorSpaceKind::DeviceGray

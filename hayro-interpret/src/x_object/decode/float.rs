@@ -3,10 +3,13 @@ use super::samples::Samples;
 #[cfg(test)]
 use super::samples::decode_sample;
 use super::{DecodeContext, decode_context};
+#[cfg(test)]
 use crate::color::ColorSpaceKind;
 use crate::x_object::image::{ImageKind, ImageXObject, uses_jpx_decode};
 use crate::{FloatImageError as Error, RgbF32Data, RgbF64Data};
 use hayro_syntax::object::{Array, Object};
+
+mod icc;
 
 pub(crate) fn decode_rgb_f32(
     obj: &ImageXObject<'_>,
@@ -57,17 +60,11 @@ fn decode_rgb<const BYTES: usize>(
     }
     let dict = obj.stream.dict();
     let jpx = uses_jpx_decode(dict);
-    let components = match obj.color_space.as_ref().map(|space| {
-        if space.is_all_colorants() {
-            ColorSpaceKind::DeviceGray
-        } else {
-            space.kind()
-        }
-    }) {
-        Some(ColorSpaceKind::DeviceGray | ColorSpaceKind::CalGray) => 1,
-        Some(ColorSpaceKind::DeviceRgb | ColorSpaceKind::CalRgb | ColorSpaceKind::Lab) => 3,
-        _ => return Err(Error::Unsupported),
-    };
+    let components = obj
+        .color_space
+        .as_ref()
+        .and_then(|space| space.float_rgb_component_count())
+        .ok_or(Error::Unsupported)?;
     if obj.kind != ImageKind::Image
         || obj.transfer_function.is_some()
         || dict.contains_key(b"Mask")
@@ -120,15 +117,10 @@ pub(super) fn decode_context_rgb<const BYTES: usize>(
     mut checkpoint: impl FnMut() -> bool,
     encode: impl Fn(f64) -> [u8; BYTES],
 ) -> Result<Vec<u8>, Error> {
-    let components = match if context.color_space.is_all_colorants() {
-        ColorSpaceKind::DeviceGray
-    } else {
-        context.color_space.kind()
-    } {
-        ColorSpaceKind::DeviceGray | ColorSpaceKind::CalGray => 1,
-        ColorSpaceKind::DeviceRgb | ColorSpaceKind::CalRgb | ColorSpaceKind::Lab => 3,
-        _ => return Err(Error::Unsupported),
-    };
+    let components = context
+        .color_space
+        .float_rgb_component_count()
+        .ok_or(Error::Unsupported)?;
     if context
         .decoded
         .image_data
@@ -143,6 +135,17 @@ pub(super) fn decode_context_rgb<const BYTES: usize>(
     output
         .try_reserve_exact(capacity)
         .map_err(|_| Error::Allocation)?;
+    if let Some(space) = context.color_space.image_icc_space() {
+        icc::decode(
+            context,
+            space,
+            &mut samples,
+            &mut output,
+            checkpoint,
+            encode,
+        )?;
+        return Ok(output);
+    }
     let mut index = 0;
     for _ in 0..context.height {
         for _ in 0..context.width {

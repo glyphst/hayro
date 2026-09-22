@@ -44,6 +44,10 @@ mod x_object;
 
 #[cfg(test)]
 #[allow(dead_code)]
+#[path = "../../hayro-syntax/src/filter/jpx_fixtures.rs"]
+mod jpx_fixtures;
+#[cfg(test)]
+#[allow(dead_code)]
 #[path = "../../hayro-syntax/src/filter/jpx_opacity_fixtures.rs"]
 mod jpx_opacity_fixtures;
 

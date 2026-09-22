@@ -25,7 +25,18 @@ pub(super) struct OwnedNativeTransform {
 
 impl ICCProfile {
     pub(super) fn native_transform(&self) -> Result<&OwnedNativeTransform, ColorConversionError> {
-        let slot = &self.data.native_transforms[self.intent as usize];
+        self.native_transform_for(false)
+    }
+
+    fn native_transform_for(
+        &self,
+        unquantized: bool,
+    ) -> Result<&OwnedNativeTransform, ColorConversionError> {
+        let slot = if unquantized {
+            &self.data.float_transforms[self.intent as usize]
+        } else {
+            &self.data.native_transforms[self.intent as usize]
+        };
         if slot.get().is_none() {
             let _guard = self
                 .data
@@ -33,19 +44,24 @@ impl ICCProfile {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             if slot.get().is_none() {
-                let bytes = memory::native_transform_bytes(&self.data.src_profile, self.intent);
+                let mut bytes = memory::native_transform_bytes(&self.data.src_profile, self.intent);
+                if unquantized {
+                    // The opt-in converter owns copies of original curves,
+                    // whose lengths need not match the sampled table capacity.
+                    bytes = bytes.saturating_add(memory::source_bytes(&self.data.src_profile));
+                }
                 let reservation = self.reserve_memory(bytes)?;
                 let _construction = self.reserve_memory(memory::native_construction_bytes(
                     &self.data.src_profile,
                     bytes,
                 ))?;
-                let value = self
-                    .build_native_transform()
-                    .map(|(executor, replicate_gray)| OwnedNativeTransform {
-                        executor,
-                        replicate_gray,
-                        _reservation: reservation,
-                    });
+                let value =
+                    self.build_native_transform(unquantized)
+                        .map(|(executor, replicate_gray)| OwnedNativeTransform {
+                            executor,
+                            replicate_gray,
+                            _reservation: reservation,
+                        });
                 // A quota refusal returns before setting the slot. Keep the
                 // same shared ownership and retry contract as byte transforms.
                 let _ = slot.set(value);
@@ -56,7 +72,13 @@ impl ICCProfile {
             .ok_or(ColorConversionError::IccTransform)
     }
 
-    fn build_native_transform(&self) -> Option<(Arc<TransformF64Executor>, bool)> {
+    fn build_native_transform(
+        &self,
+        unquantized: bool,
+    ) -> Option<(Arc<TransformF64Executor>, bool)> {
+        if unquantized && !self.has_float_image_conversion() {
+            return None;
+        }
         let (mut source, destination, options) = self.conversion_profiles()?;
         let mut replicate_gray = false;
         let layout = match self.number_components() {
@@ -86,13 +108,41 @@ impl ICCProfile {
             4 => Layout::Rgba,
             _ => return None,
         };
-        let executor = source
-            .create_transform_f64(layout, &destination, Layout::Rgb, options)
-            .ok()?;
+        let executor = if unquantized {
+            source.create_transform_f64_to_linear_rgb(layout, &destination, Layout::Rgb)
+        } else {
+            source.create_transform_f64(layout, &destination, Layout::Rgb, options)
+        }
+        .ok()?;
         Some((executor, replicate_gray))
     }
 
     fn convert_native(&self, input: &[f64], output: &mut [u8]) -> Option<()> {
+        self.convert_native_into(input, output, false, encode_component)
+    }
+
+    fn convert_native_f64(&self, input: &[f64], output: &mut [f64]) -> Option<()> {
+        self.convert_native_into(input, output, true, |value| {
+            // The fixed output device is sRGB. Apply its transfer curve to
+            // the original linear result, without a sampled output table.
+            value.is_finite().then(|| {
+                let value = value.clamp(0.0, 1.0);
+                if value <= 0.0031308 {
+                    12.92 * value
+                } else {
+                    1.055 * value.powf(1.0 / 2.4) - 0.055
+                }
+            })
+        })
+    }
+
+    fn convert_native_into<T>(
+        &self,
+        input: &[f64],
+        output: &mut [T],
+        unquantized: bool,
+        encode: impl Fn(f64) -> Option<T>,
+    ) -> Option<()> {
         let components = self.number_components();
         if !input.len().is_multiple_of(components)
             || output.len() != (input.len() / components).checked_mul(3)?
@@ -100,7 +150,12 @@ impl ICCProfile {
         {
             return None;
         }
-        let transform = self.native_transform().ok()?;
+        let transform = if unquantized {
+            self.native_transform_for(true)
+        } else {
+            self.native_transform()
+        }
+        .ok()?;
         // Charge each concurrent conversion's bounded buffers and the CMS
         // intermediate stage vectors independently of its retained executor.
         let _scratch = self.reserve_memory(CONVERSION_SCRATCH_BYTES).ok()?;
@@ -130,10 +185,16 @@ impl ICCProfile {
             converted.resize(pixels.len(), 0.0);
             transform.executor.transform(&source, &mut converted).ok()?;
             for (destination, &value) in pixels.iter_mut().zip(&converted) {
-                *destination = encode_component(value)?;
+                *destination = encode(value)?;
             }
         }
         Some(())
+    }
+
+    fn has_float_image_conversion(&self) -> bool {
+        self.data.matrix_tags_only
+            && matches!(self.number_components(), 1 | 3)
+            && source_lut(&self.data.src_profile, self.intent).is_none()
     }
 }
 
@@ -144,6 +205,14 @@ pub(super) fn encode_component(value: f64) -> Option<u8> {
 }
 
 impl ColorSpace {
+    pub(crate) fn image_float_icc_space(&self) -> Option<&Self> {
+        let space = self.image_icc_space()?;
+        let ColorSpaceType::ICCBased(profile) = space.0.as_ref() else {
+            return None;
+        };
+        profile.has_float_image_conversion().then_some(space)
+    }
+
     /// Find the selected ICC alternate without evaluating or quantizing samples.
     pub(crate) fn image_icc_space(&self) -> Option<&Self> {
         if self.is_non_marking() || self.is_all_colorants() {
@@ -215,5 +284,16 @@ impl ColorSpace {
             return None;
         };
         profile.convert_native(input, output)
+    }
+
+    pub(crate) fn convert_icc_image_samples_f64(
+        &self,
+        input: &[f64],
+        output: &mut [f64],
+    ) -> Option<()> {
+        let ColorSpaceType::ICCBased(profile) = self.0.as_ref() else {
+            return None;
+        };
+        profile.convert_native_f64(input, output)
     }
 }

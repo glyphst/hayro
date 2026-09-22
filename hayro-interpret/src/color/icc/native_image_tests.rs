@@ -7,6 +7,36 @@ fn image_pixels(
     size: (u32, u32),
     profile: &[u8],
 ) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    with_image(
+        header,
+        samples,
+        extra,
+        size,
+        profile,
+        &Cache::new(),
+        |image| {
+            let decoded = image.decoded_image(None)?;
+            assert_eq!((decoded.image.width(), decoded.image.height()), size);
+            let rgb = match decoded.image {
+                crate::ImageData::Rgb(rgb) => rgb.data,
+                crate::ImageData::Luma(gray) => {
+                    gray.data.into_iter().flat_map(|v| [v; 3]).collect()
+                }
+            };
+            Some((rgb, decoded.alpha.map(|alpha| alpha.data)))
+        },
+    )
+}
+
+pub(super) fn with_image<T>(
+    header: &str,
+    samples: &[u8],
+    extra: Option<Vec<u8>>,
+    size: (u32, u32),
+    profile: &[u8],
+    cache: &Cache,
+    run: impl FnOnce(&crate::x_object::ImageXObject<'_>) -> T,
+) -> T {
     use crate::x_object::ImageXObject;
     use hayro_syntax::{
         Pdf,
@@ -48,16 +78,9 @@ fn image_pixels(
         .get::<Stream<'_>>(ObjectIdentifier::new(4, 0))
         .unwrap();
     let warning: crate::WarningSinkFn = Arc::new(|_| {});
-    let cache = Cache::new();
     let image =
-        ImageXObject::new(&stream, pdf.pages()[0].resources(), &warning, &cache, None).unwrap();
-    let decoded = image.decoded_image(None)?;
-    assert_eq!((decoded.image.width(), decoded.image.height()), size);
-    let rgb = match decoded.image {
-        crate::ImageData::Rgb(rgb) => rgb.data,
-        crate::ImageData::Luma(gray) => gray.data.into_iter().flat_map(|v| [v; 3]).collect(),
-    };
-    Some((rgb, decoded.alpha.map(|alpha| alpha.data)))
+        ImageXObject::new(&stream, pdf.pages()[0].resources(), &warning, cache, None).unwrap();
+    run(&image)
 }
 
 fn stream(header: &str, data: &[u8]) -> Vec<u8> {

@@ -750,7 +750,7 @@ dependencies = [
  "image",
  "kurbo",
  "log",
- "moxcms 0.8.1 (git+https://github.com/glyphst/moxcms.git?rev=6755eb195f6534119c51a67b0450909748aaf4ae)",
+ "moxcms 0.8.1 (git+https://github.com/glyphst/moxcms.git?rev=3f940e087e8ae3e6b6f8e340354083d97fc1224d)",
  "phf",
  "rustc-hash",
  "siphasher",
@@ -782,7 +782,7 @@ dependencies = [
  "image",
  "indicatif",
  "log",
- "moxcms 0.8.1 (git+https://github.com/glyphst/moxcms.git?rev=6755eb195f6534119c51a67b0450909748aaf4ae)",
+ "moxcms 0.8.1 (git+https://github.com/glyphst/moxcms.git?rev=3f940e087e8ae3e6b6f8e340354083d97fc1224d)",
  "rayon",
  "serde",
  "serde_json",
@@ -1104,7 +1104,7 @@ dependencies = [
 [[package]]
 name = "moxcms"
 version = "0.8.1"
-source = "git+https://github.com/glyphst/moxcms.git?rev=6755eb195f6534119c51a67b0450909748aaf4ae#6755eb195f6534119c51a67b0450909748aaf4ae"
+source = "git+https://github.com/glyphst/moxcms.git?rev=3f940e087e8ae3e6b6f8e340354083d97fc1224d#3f940e087e8ae3e6b6f8e340354083d97fc1224d"
 dependencies = [
  "num-traits",
  "pxfm",

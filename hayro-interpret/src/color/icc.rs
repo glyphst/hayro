@@ -69,6 +69,7 @@ struct ICCColorRepr {
     // Semantic failures are cached too; rendering intent is never global.
     transforms: [OnceLock<Option<OwnedTransform>>; 4],
     native_transforms: [OnceLock<Option<native::OwnedNativeTransform>>; 4],
+    float_transforms: [OnceLock<Option<native::OwnedNativeTransform>>; 4],
     equivalence: [OnceLock<Result<IccDeviceRgbBounds, IccEquivalenceError>>; 4],
     image_equivalence: [OnceLock<Result<IccDeviceRgbBounds, IccEquivalenceError>>; 4],
     transform_build: Mutex<()>,
@@ -182,6 +183,7 @@ impl ICCProfile {
                 matrix_tags_only: true,
                 transforms: std::array::from_fn(|_| OnceLock::new()),
                 native_transforms: std::array::from_fn(|_| OnceLock::new()),
+                float_transforms: std::array::from_fn(|_| OnceLock::new()),
                 equivalence: std::array::from_fn(|_| OnceLock::new()),
                 image_equivalence: std::array::from_fn(|_| OnceLock::new()),
                 transform_build: Mutex::new(()),

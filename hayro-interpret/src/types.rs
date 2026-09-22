@@ -70,11 +70,15 @@ impl CacheKey for StencilImage<'_, '_> {
 pub struct RasterImage<'a>(pub(crate) ImageXObject<'a>);
 
 impl RasterImage<'_> {
-    /// Decode unmasked direct/calibrated Gray/RGB to unquantized output RGB.
+    /// Decode supported unmasked image colors to unquantized output RGB.
     ///
     /// Samples retain their full 1/2/4/8/16-bit precision through Decode and
     /// color conversion. Transfer functions must be deferred by the caller.
-    /// JPEG 2000 is refused because its current decoder narrows samples to bytes.
+    /// Direct/calibrated Gray/RGB, Lab and matrix/TRC ICC spaces are accepted,
+    /// including ICC palette/tint alternates. The PDF tint executor keeps its
+    /// binary32 arithmetic. Explicit PDF spaces on JPEG 2000 images retain
+    /// uniform 1–16-bit samples; embedded opacity is unsupported here.
+    /// ICC transforms and bounded conversion batches share the ICC memory quota.
     /// `max_bytes` bounds the output before allocation; `checkpoint` is called
     /// before decoding and at most every 1024 output pixels. General filter
     /// decoding still has its existing allocation and cancellation contract.
@@ -86,7 +90,7 @@ impl RasterImage<'_> {
         crate::x_object::decode_rgb_f32(&self.0, max_bytes, checkpoint)
     }
 
-    /// Decode normalized RGB as binary64, preserving Decode and calibrated
+    /// Decode normalized RGB as binary64, preserving Decode and color
     /// conversion results without an intervening binary32 rounding step.
     ///
     /// This has the same source restrictions and cancellation checkpoints as
@@ -124,6 +128,13 @@ impl RasterImage<'_> {
     /// changing the source provenance returned by [`Self::color_space_properties`].
     pub fn device_alternate_kind(&self) -> Option<ColorSpaceKind> {
         self.0.color_space.as_ref()?.device_alternate_kind()
+    }
+
+    /// Source arity for the available unquantized RGB converter, if any.
+    ///
+    /// The precise decoder still validates masks, sample data and resource limits.
+    pub fn float_rgb_component_count(&self) -> Option<usize> {
+        self.0.color_space.as_ref()?.float_rgb_component_count()
     }
 
     /// Whether the effective source space addresses every output colorant.

@@ -3,9 +3,7 @@ mod embedded;
 mod float;
 mod image;
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../../hayro-syntax/src/filter/jpx_fixtures.rs"]
-mod jpx_fixtures;
+use crate::jpx_fixtures;
 mod mask;
 mod matte;
 mod samples;

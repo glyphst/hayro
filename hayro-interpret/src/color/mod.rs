@@ -507,6 +507,26 @@ impl ColorSpace {
         usize::from(self.num_components())
     }
 
+    /// Source arity for the unquantized RGB image conversion families.
+    ///
+    /// Includes matrix/TRC ICC sources and their palette/tint alternates. This
+    /// describes the available converter, not successful image decoding or a
+    /// bound on amplification by subsequent transfer functions. Masks, profile
+    /// construction, memory limits and decoder restrictions are checked later.
+    pub fn float_rgb_component_count(&self) -> Option<usize> {
+        (self.is_all_colorants()
+            || self.image_float_icc_space().is_some()
+            || matches!(
+                self.kind(),
+                ColorSpaceKind::DeviceGray
+                    | ColorSpaceKind::DeviceRgb
+                    | ColorSpaceKind::CalGray
+                    | ColorSpaceKind::CalRgb
+                    | ColorSpaceKind::Lab
+            ))
+        .then(|| self.component_count())
+    }
+
     /// Bound both directions of an ICC RGB matrix/TRC conversion to sRGB.
     ///
     /// The bound covers every normalized binary32 input to the current byte

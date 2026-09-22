@@ -29,6 +29,10 @@ fn profile_bytes(lab: bool, gamma: u16) -> Vec<u8> {
 }
 
 fn expected(lab: bool, gamma: u16, sample: f64) -> u8 {
+    (expected_float(lab, gamma, sample) * 255.0).round() as u8
+}
+
+fn expected_float(lab: bool, gamma: u16, sample: f64) -> f64 {
     let curve = sample.powi(i32::from(gamma));
     let linear = if lab {
         let lightness = curve * 100.0;
@@ -40,12 +44,11 @@ fn expected(lab: bool, gamma: u16, sample: f64) -> u8 {
     } else {
         curve
     };
-    let encoded = if linear <= 0.0031308 {
+    if linear <= 0.0031308 {
         linear * 12.92
     } else {
         1.055 * linear.powf(1.0 / 2.4) - 0.055
-    };
-    (encoded * 255.0).round() as u8
+    }
 }
 
 #[test]
@@ -132,6 +135,9 @@ fn native_transform_and_conversion_pressure_retry_without_losing_owners() {
 
 #[path = "native_image_tests.rs"]
 mod image;
+
+#[path = "native_float_tests.rs"]
+mod float;
 
 #[test]
 fn concurrent_native_conversions_share_one_owned_executor() {

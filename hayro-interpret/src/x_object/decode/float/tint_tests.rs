@@ -188,22 +188,13 @@ fn sampled_and_stitched_tints_keep_sub_byte_source_boundaries() {
 
 #[test]
 fn unsupported_tint_alternates_and_invalid_image_boundaries_still_refuse() {
-    for (alternate, end) in [
-        ("/DeviceCMYK", "0 0 0 1"),
-        ("[/CalGray<</WhitePoint[.95047 1 1.08883]>>]", "1"),
-        ("[/CalRGB<</WhitePoint[.95047 1 1.08883]>>]", "1 1 1"),
-        ("[/Lab<</WhitePoint[.95047 1 1.08883]>>]", "100 0 0"),
-    ] {
-        let header = format!(
-            "/Width 1/Height 1/BitsPerComponent 8/ColorSpace[/Separation/Ink {alternate}<</FunctionType 2/Domain[0 1]/C0[{end}]/C1[{end}]/N 1>>]"
-        );
-        with_image(&header, &[128], |image| {
-            assert!(matches!(
-                decode_rgb_f64(image, 24, || true),
-                Err(Error::Unsupported)
-            ));
-        });
-    }
+    let cmyk = "/Width 1/Height 1/BitsPerComponent 8/ColorSpace[/Separation/Ink/DeviceCMYK<</FunctionType 2/Domain[0 1]/C0[0 0 0 1]/C1[0 0 0 1]/N 1>>]";
+    with_image(cmyk, &[128], |image| {
+        assert!(matches!(
+            decode_rgb_f64(image, 24, || true),
+            Err(Error::Unsupported)
+        ));
+    });
     let header = format!(
         "/Width 2/Height 1/BitsPerComponent 16/ColorSpace[/Separation/Ink/DeviceGray {IDENTITY}]"
     );

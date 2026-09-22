@@ -75,8 +75,9 @@ impl RasterImage<'_> {
     /// Samples retain their full 1/2/4/8/16-bit precision through Decode and
     /// color conversion. Transfer functions must be deferred by the caller.
     /// Direct/calibrated Gray/RGB, Lab and matrix/TRC ICC spaces are accepted,
-    /// including ICC palette/tint alternates and ordinary Gray/RGB tint images
-    /// with Indexed wrappers. The PDF tint executor keeps its
+    /// including ICC palette/tint alternates and ordinary tint images with
+    /// direct/calibrated Gray/RGB or Lab alternates and Indexed wrappers.
+    /// The PDF tint executor keeps its
     /// binary32 arithmetic. Explicit PDF spaces on JPEG 2000 images retain
     /// uniform 1–16-bit samples; embedded opacity is unsupported here.
     /// ICC transforms and bounded conversion batches share the ICC memory quota.

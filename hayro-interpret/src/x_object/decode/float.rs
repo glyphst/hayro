@@ -151,6 +151,7 @@ pub(super) fn decode_context_rgb<const BYTES: usize>(
     // reuse it without allocating or quantizing each pixel's native samples.
     let mut storage = [0.0_f64; u8::MAX as usize];
     let values = &mut storage[..components];
+    let cie_tint = context.color_space.image_cie_tint_alternate().is_some();
     let mut index = 0;
     for _ in 0..context.height {
         for _ in 0..context.width {
@@ -159,10 +160,12 @@ pub(super) fn decode_context_rgb<const BYTES: usize>(
             }
             index += 1;
             samples.read(values)?;
-            let rgb = context
-                .color_space
-                .image_rgb_f64(values)
-                .ok_or(Error::Decode)?;
+            let rgb = if cie_tint {
+                context.color_space.image_cie_tint_rgb(values)
+            } else {
+                context.color_space.image_rgb_f64(values)
+            }
+            .ok_or(Error::Decode)?;
             for value in rgb {
                 output.extend_from_slice(&encode(value));
             }
@@ -203,3 +206,6 @@ mod tests;
 
 #[cfg(test)]
 mod tint_tests;
+
+#[cfg(test)]
+mod cie_tint_tests;

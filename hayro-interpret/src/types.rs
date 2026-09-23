@@ -74,7 +74,7 @@ impl RasterImage<'_> {
     ///
     /// Samples retain their full 1/2/4/8/16-bit precision through Decode and
     /// color conversion. Transfer functions must be deferred by the caller.
-    /// Direct/calibrated Gray/RGB, Lab and matrix/TRC ICC spaces are accepted,
+    /// Direct/calibrated Gray/RGB, Lab, matrix/TRC ICC and Gray/XYZ LUT16 ICC are accepted,
     /// including ICC palette/tint alternates and ordinary tint images with
     /// direct/calibrated Gray/RGB or Lab alternates and Indexed wrappers.
     /// The PDF tint executor keeps its

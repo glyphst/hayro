@@ -2,7 +2,7 @@
 use super::{ICCProfile, memory, source_lut};
 use crate::cache::MemoryReservation;
 use crate::color::{ColorConversionError, ColorSpace, ColorSpaceType};
-use moxcms::{ColorProfile, DataColorSpace, Layout, TransformF64Executor};
+use moxcms::{ColorProfile, DataColorSpace, Layout, LutType, LutWarehouse, TransformF64Executor};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -46,8 +46,8 @@ impl ICCProfile {
             if slot.get().is_none() {
                 let mut bytes = memory::native_transform_bytes(&self.data.src_profile, self.intent);
                 if unquantized {
-                    // The opt-in converter owns copies of original curves,
-                    // whose lengths need not match the sampled table capacity.
+                    // The opt-in converters own original curves or integer
+                    // LUT tables, independent of sampled executor capacity.
                     bytes = bytes.saturating_add(memory::source_bytes(&self.data.src_profile));
                 }
                 let reservation = self.reserve_memory(bytes)?;
@@ -109,7 +109,16 @@ impl ICCProfile {
             _ => return None,
         };
         let executor = if unquantized {
-            source.create_transform_f64_to_linear_rgb(layout, &destination, Layout::Rgb)
+            if source_lut(&source, self.intent).is_some() {
+                source.create_transform_f64_lut_to_linear_rgb(
+                    layout,
+                    &destination,
+                    Layout::Rgb,
+                    options,
+                )
+            } else {
+                source.create_transform_f64_to_linear_rgb(layout, &destination, Layout::Rgb)
+            }
         } else {
             source.create_transform_f64(layout, &destination, Layout::Rgb, options)
         }
@@ -192,9 +201,20 @@ impl ICCProfile {
     }
 
     fn has_float_image_conversion(&self) -> bool {
-        self.data.matrix_tags_only
+        (self.data.matrix_tags_only
             && matches!(self.number_components(), 1 | 3)
-            && source_lut(&self.data.src_profile, self.intent).is_none()
+            && source_lut(&self.data.src_profile, self.intent).is_none())
+            || (self.data.original_lut_tags_only
+                && self.number_components() == 1
+                && self.data.src_profile.color_space == DataColorSpace::Gray
+                && self.data.src_profile.pcs == DataColorSpace::Xyz
+                && matches!(
+                    source_lut(&self.data.src_profile, self.intent),
+                    Some(LutWarehouse::Lut(lut)) if lut.lut_type == LutType::Lut16
+                        && lut.num_input_channels == 1
+                        && lut.num_output_channels == 3
+                        && lut.matrix == moxcms::Matrix3d::IDENTITY
+                ))
     }
 }
 

@@ -169,6 +169,9 @@ pub(super) fn native_transform_bytes(profile: &ColorProfile, intent: RenderingIn
     // and three 65536-entry f64 destination tables. Original LUT stages still
     // retain f32 curves/CLUTs, accounted by executor_bytes. Destination is
     // the fixed matrix/TRC sRGB profile, never an arbitrary destination LUT.
+    // Opt-in original binary64 converters fit below this conservative bound;
+    // native_transform_for separately adds source_bytes for their original
+    // integer LUT/curve copies, without sampling those tables into f32.
     executor_bytes(profile, intent).saturating_add(3 * 1024 * 1024)
 }
 

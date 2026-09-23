@@ -139,6 +139,9 @@ mod image;
 #[path = "native_float_tests.rs"]
 mod float;
 
+#[path = "native_lut_float_tests.rs"]
+mod lut_float;
+
 #[test]
 fn concurrent_native_conversions_share_one_owned_executor() {
     let cache = Cache::with_limits(4, 32 * 1024 * 1024);

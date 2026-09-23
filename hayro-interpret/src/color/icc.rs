@@ -65,6 +65,7 @@ struct ICCColorRepr {
     number_components: usize,
     src_profile: ColorProfile,
     matrix_tags_only: bool,
+    original_lut_tags_only: bool,
     // Shared source data has four intent slots for each byte/native consumer.
     // Semantic failures are cached too; rendering intent is never global.
     transforms: [OnceLock<Option<OwnedTransform>>; 4],
@@ -164,6 +165,7 @@ impl ICCProfile {
             data.memory = Some(memory);
         }
         data.matrix_tags_only = equivalence::matrix_tags_only(profile);
+        data.original_lut_tags_only = equivalence::original_lut_tags_only(profile);
         result.intent = RenderingIntent::default();
         Some(result)
     }
@@ -181,6 +183,7 @@ impl ICCProfile {
                 number_components,
                 src_profile,
                 matrix_tags_only: true,
+                original_lut_tags_only: true,
                 transforms: std::array::from_fn(|_| OnceLock::new()),
                 native_transforms: std::array::from_fn(|_| OnceLock::new()),
                 float_transforms: std::array::from_fn(|_| OnceLock::new()),

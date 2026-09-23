@@ -509,7 +509,7 @@ impl ColorSpace {
 
     /// Source arity for the unquantized RGB image conversion families.
     ///
-    /// Includes matrix/TRC ICC sources and their palette/tint alternates, and
+    /// Includes matrix/TRC and Gray/XYZ LUT16 ICC sources and their palette/tint alternates, and
     /// ordinary tint images with direct Gray/RGB or CalGray/CalRGB/Lab
     /// alternates. This
     /// describes the available converter, not successful image decoding or a

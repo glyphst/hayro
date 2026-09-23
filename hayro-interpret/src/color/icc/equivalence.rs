@@ -23,21 +23,19 @@ pub enum IccEquivalenceError {
     MemoryLimit,
 }
 
-pub(super) fn matrix_tags_only(bytes: &[u8]) -> bool {
-    let Some(count) = bytes
+fn tag_declarations(bytes: &[u8]) -> Option<&[u8]> {
+    let count = bytes
         .get(128..132)
         .and_then(|b| b.try_into().ok())
-        .map(u32::from_be_bytes)
-    else {
-        return false;
-    };
-    let Some(end) = (count as usize)
+        .map(u32::from_be_bytes)?;
+    let end = (count as usize)
         .checked_mul(12)
-        .and_then(|n| n.checked_add(132))
-    else {
-        return false;
-    };
-    let Some(tags) = bytes.get(132..end) else {
+        .and_then(|n| n.checked_add(132))?;
+    bytes.get(132..end)
+}
+
+pub(super) fn matrix_tags_only(bytes: &[u8]) -> bool {
+    let Some(tags) = tag_declarations(bytes) else {
         return false;
     };
     // Inspect declarations as well as parsed fields: an unrecognized LUT tag
@@ -45,6 +43,45 @@ pub(super) fn matrix_tags_only(bytes: &[u8]) -> bool {
     !tags
         .chunks_exact(12)
         .any(|tag| matches!(&tag[..3], b"A2B" | b"B2A" | b"D2B" | b"B2D"))
+}
+
+pub(super) fn original_lut_tags_only(bytes: &[u8]) -> bool {
+    let Some(tags) = tag_declarations(bytes) else {
+        return false;
+    };
+    let mut seen = 0_u8;
+    for tag in tags.chunks_exact(12) {
+        let destination = match &tag[..3] {
+            b"A2B" => false,
+            b"B2A" => true,
+            b"D2B" | b"B2D" => return false,
+            _ => continue,
+        };
+        // Unknown or duplicate intent declarations must not disappear into
+        // the parsed profile and then select a different fallback transform.
+        if !matches!(tag[3], b'0'..=b'2') {
+            return false;
+        }
+        let bit = 1 << (tag[3] - b'0' + if destination { 3 } else { 0 });
+        if seen & bit != 0 {
+            return false;
+        }
+        seen |= bit;
+        let offset = u32::from_be_bytes(tag[4..8].try_into().unwrap()) as usize;
+        let length = u32::from_be_bytes(tag[8..12].try_into().unwrap()) as usize;
+        let Some(data) = offset
+            .checked_add(length)
+            .and_then(|end| bytes.get(offset..end))
+        else {
+            return false;
+        };
+        let supported = matches!(data.get(..4), Some(b"mft1" | b"mft2"))
+            || data.get(..4) == Some(if destination { b"mBA " } else { b"mAB " });
+        if !supported {
+            return false;
+        }
+    }
+    true
 }
 
 impl ICCProfile {

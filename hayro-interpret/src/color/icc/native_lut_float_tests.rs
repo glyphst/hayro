@@ -10,6 +10,12 @@ mod references;
 #[path = "native_lut_float_tests/images.rs"]
 mod images;
 
+#[path = "native_lut_float_tests/formats.rs"]
+mod formats;
+
+#[path = "native_lut_float_tests/mab.rs"]
+mod mab;
+
 #[test]
 fn gray_lut_float_domains_preserve_intents_without_changing_byte_conversion() {
     let profile = ICCProfile::new(PROFILE, 1).unwrap();
@@ -85,14 +91,7 @@ fn gray_lut_float_intent_fallback_and_unsupported_formats_are_explicit() {
         assert_eq!(actual, expected);
     }
     let mut invalid = Vec::new();
-    let mut source = ColorProfile::new_from_slice(PROFILE).unwrap();
-    source.pcs = DataColorSpace::Lab;
-    invalid.push((source, 1));
-    invalid.push((
-        crate::color::icc::gray_lut_tests::parametric_gray_profile(),
-        1,
-    ));
-    for kind in [LutType::Lut8, LutType::LutMab, LutType::LutMba] {
+    for kind in [LutType::LutMab, LutType::LutMba] {
         let mut source = ColorProfile::new_from_slice(PROFILE).unwrap();
         let Some(LutWarehouse::Lut(lut)) = source.lut_a_to_b_perceptual.as_mut() else {
             unreachable!()

@@ -207,14 +207,27 @@ impl ICCProfile {
             || (self.data.original_lut_tags_only
                 && self.number_components() == 1
                 && self.data.src_profile.color_space == DataColorSpace::Gray
-                && self.data.src_profile.pcs == DataColorSpace::Xyz
                 && matches!(
-                    source_lut(&self.data.src_profile, self.intent),
-                    Some(LutWarehouse::Lut(lut)) if lut.lut_type == LutType::Lut16
-                        && lut.num_input_channels == 1
-                        && lut.num_output_channels == 3
-                        && lut.matrix == moxcms::Matrix3d::IDENTITY
-                ))
+                    self.data.src_profile.pcs,
+                    DataColorSpace::Xyz | DataColorSpace::Lab
+                )
+                && match source_lut(&self.data.src_profile, self.intent) {
+                    Some(LutWarehouse::Lut(lut)) => {
+                        matches!(lut.lut_type, LutType::Lut8 | LutType::Lut16)
+                            && lut.num_input_channels == 1
+                            && lut.num_output_channels == 3
+                            && lut.matrix == moxcms::Matrix3d::IDENTITY
+                    }
+                    Some(LutWarehouse::Multidimensional(lut)) => {
+                        self.data.src_profile.version() >= moxcms::ProfileVersion::V4_0
+                            && lut.num_input_channels == 1
+                            && lut.num_output_channels == 3
+                    }
+                    // An unselected intent LUT must not hide the Gray TRC.
+                    // The native builder already clears those unused LUTs
+                    // before constructing its original-curve executor.
+                    None => self.data.src_profile.gray_trc.is_some(),
+                })
     }
 }
 

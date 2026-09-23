@@ -13,7 +13,7 @@ fn unequal_channels_match_independent_gamma_controls_across_intents_and_consumer
                 Some(if version == 2 {
                     ToneReprCurve::Lut(vec![gamma * 256])
                 } else {
-                    ToneReprCurve::Parametric(vec![f32::from(gamma)])
+                    ToneReprCurve::Parametric(vec![f64::from(gamma)])
                 })
             });
             let mut bytes = source.encode().unwrap();

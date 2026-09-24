@@ -40,7 +40,7 @@ pub(crate) mod state;
 pub(crate) mod text;
 
 pub use dash::DashPattern;
-pub use state::{ActiveTransferFunction, read_alpha_constant};
+pub use state::{ActiveTransferFunction, read_alpha_constant, read_blend_mode};
 
 const KNOWN_MARKED_CONTENT_KEYS: [&[u8]; 11] = [
     MCID,
@@ -414,6 +414,8 @@ pub enum InterpreterWarning {
     StrokeParameterFailure,
     /// A selected alpha constant has the wrong type or is nonfinite.
     AlphaConstantFailure,
+    /// A selected blend mode is not a name or a complete array of names.
+    BlendModeFailure,
     /// An inherited pattern cannot be mapped into a retained invocation.
     PatternTransformFailure,
     /// A selected soft mask could not be constructed completely.

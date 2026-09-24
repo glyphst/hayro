@@ -22,6 +22,28 @@ pub fn read_alpha_constant(number: Number) -> Option<f32> {
     value.is_finite().then(|| value.clamp(0.0, 1.0) as f32)
 }
 
+/// Select a PDF blend mode from a name or a complete array of names. The first
+/// recognized array member wins; an unrecognized selection uses `Normal`.
+/// Malformed members invalidate the declaration, including an unread tail.
+pub fn read_blend_mode(object: &Object<'_>) -> Option<BlendMode> {
+    match object {
+        Object::Name(name) => Some(convert_blend_mode(name.as_str()).unwrap_or_default()),
+        Object::Array(array) => {
+            let mut selected = None;
+            let mut names = array.iter::<Name<'_>>();
+            for entry in array.raw_iter() {
+                entry.ok()?;
+                let name = names.next()?;
+                if selected.is_none() {
+                    selected = convert_blend_mode(name.as_str());
+                }
+            }
+            Some(selected.unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
 /// A transfer function.
 #[derive(Clone, Debug)]
 pub enum ActiveTransferFunction {
@@ -484,24 +506,15 @@ pub(crate) fn handle_gs_single<'a>(
             }
         }
         "BM" => {
-            if let Some(name) = dict.get::<Name<'_>>(key.as_ref()) {
-                if let Some(bm) = convert_blend_mode(name.as_str()) {
-                    context.get_mut().graphics_state.blend_mode = bm;
-
-                    return Some(());
-                }
-            } else if let Some(arr) = dict.get::<Array<'_>>(key) {
-                for name in arr.iter::<Name<'_>>() {
-                    if let Some(bm) = convert_blend_mode(name.as_str()) {
-                        context.get_mut().graphics_state.blend_mode = bm;
-
-                        return Some(());
-                    }
-                }
+            if let Some(mode) = dict
+                .get::<Object<'_>>(key)
+                .as_ref()
+                .and_then(read_blend_mode)
+            {
+                context.get_mut().graphics_state.blend_mode = mode;
+            } else {
+                (context.settings.warning_sink)(crate::InterpreterWarning::BlendModeFailure);
             }
-
-            warn!("unknown blend mode, defaulting to Normal");
-            context.get_mut().graphics_state.blend_mode = BlendMode::Normal;
         }
         "Font" => {
             if let Some((font_dict, size)) = dict
@@ -560,8 +573,47 @@ pub(crate) fn convert_blend_mode(name: &str) -> Option<BlendMode> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_alpha_constant;
-    use hayro_syntax::object::{FromBytes, Number};
+    use super::{read_alpha_constant, read_blend_mode};
+    use crate::types::BlendMode;
+    use hayro_syntax::object::{FromBytes, Number, Object};
+
+    #[test]
+    fn blend_modes_select_the_first_supported_name_from_a_complete_declaration() {
+        for (source, expected) in [
+            ("/Normal", BlendMode::Normal),
+            ("/Compatible", BlendMode::Normal),
+            ("/FutureBlend", BlendMode::Normal),
+            ("[]", BlendMode::Normal),
+            ("[/FutureBlend /OtherBlend]", BlendMode::Normal),
+            ("[/Normal /Multiply]", BlendMode::Normal),
+            ("[/FutureBlend /Multiply /Screen]", BlendMode::Multiply),
+            ("[/Screen /Multiply]", BlendMode::Screen),
+            ("[/Compatible /Multiply]", BlendMode::Normal),
+            ("[/#4dultiply /Screen]", BlendMode::Multiply),
+        ] {
+            let object = Object::from_bytes(source.as_bytes()).expect("authored blend mode");
+            assert_eq!(read_blend_mode(&object), Some(expected), "{source}");
+        }
+        for source in [
+            "1",
+            "1.0",
+            "true",
+            "false",
+            "(Multiply)",
+            "<< >>",
+            "null",
+            "[1 /Multiply]",
+            "[/Multiply 1]",
+            "[/Multiply false]",
+            "[/Multiply null]",
+            "[/Multiply << >>]",
+            "[999 0 R /Multiply]",
+            "[/Multiply 999 0 R]",
+        ] {
+            let object = Object::from_bytes(source.as_bytes()).expect("authored bad blend mode");
+            assert_eq!(read_blend_mode(&object), None, "{source}");
+        }
+    }
 
     #[test]
     fn alpha_constants_normalize_before_binary32_conversion() {

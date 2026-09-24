@@ -15,6 +15,13 @@ use kurbo::{Affine, BezPath, Vec2};
 use smallvec::smallvec;
 use std::ops::Deref;
 
+/// Read an `ExtGState` alpha constant, normalizing its PDF range before retaining
+/// the existing binary32 scalar. Nonfinite source values cannot be retained.
+pub fn read_alpha_constant(number: Number) -> Option<f32> {
+    let value = number.as_f64();
+    value.is_finite().then(|| value.clamp(0.0, 1.0) as f32)
+}
+
 /// A transfer function.
 #[derive(Clone, Debug)]
 pub enum ActiveTransferFunction {
@@ -435,8 +442,18 @@ pub(crate) fn handle_gs_single<'a>(
                 .stroke_props
                 .automatic_adjustment = dict.get::<bool>(key)?;
         }
-        "CA" => context.get_mut().graphics_state.stroke_alpha = dict.get::<f32>(key)?,
-        "ca" => context.get_mut().graphics_state.non_stroke_alpha = dict.get::<f32>(key)?,
+        "CA" | "ca" => {
+            if let Some(alpha) = dict.get::<Number>(&key).and_then(read_alpha_constant) {
+                let state = &mut context.get_mut().graphics_state;
+                if key.as_ref() == b"CA" {
+                    state.stroke_alpha = alpha;
+                } else {
+                    state.non_stroke_alpha = alpha;
+                }
+            } else {
+                (context.settings.warning_sink)(crate::InterpreterWarning::AlphaConstantFailure);
+            }
+        }
         "AIS" => context.get_mut().graphics_state.alpha_is_shape = dict.get::<bool>(key)?,
         "TK" => context.get_mut().graphics_state.text_knockout = dict.get::<bool>(key)?,
         "TR" | "TR2" => {
@@ -539,4 +556,29 @@ pub(crate) fn convert_blend_mode(name: &str) -> Option<BlendMode> {
     };
 
     Some(bm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_alpha_constant;
+    use hayro_syntax::object::{FromBytes, Number};
+
+    #[test]
+    fn alpha_constants_normalize_before_binary32_conversion() {
+        for (source, expected) in [
+            ("-.25", 0.0),
+            ("1.25", 1.0),
+            ("99999999999999999999999999999999999999999999999999", 1.0),
+            ("-99999999999999999999999999999999999999999999999999", 0.0),
+            ("0", 0.0),
+            ("0.5", 0.5),
+            ("1.0", 1.0),
+        ] {
+            let number = Number::from_bytes(source.as_bytes()).expect("authored number");
+            assert_eq!(read_alpha_constant(number), Some(expected), "{source}");
+        }
+        for value in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(read_alpha_constant(Number::from_f32(value)), None);
+        }
+    }
 }

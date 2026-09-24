@@ -39,6 +39,7 @@ mod device;
 mod function;
 mod interpret;
 mod ocg;
+mod stroke_parameters;
 mod types;
 mod x_object;
 

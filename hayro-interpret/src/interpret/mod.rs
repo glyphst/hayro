@@ -5,7 +5,6 @@ use crate::annotation::{
 };
 use crate::color::ColorSpace;
 use crate::context::Context;
-use crate::convert::{convert_line_cap, convert_line_join};
 use crate::device::{
     Device, MarkedContentMetadata, MarkedContentProperties, MarkedContentProperty,
     MarkedContentPropertyValue,
@@ -411,6 +410,8 @@ pub enum InterpreterWarning {
     TransferFunctionFailure,
     /// A selected line dash declaration could not be decoded completely.
     DashPatternFailure,
+    /// A selected scalar stroke parameter has the wrong type or cannot be retained.
+    StrokeParameterFailure,
     /// An inherited pattern cannot be mapped into a retained invocation.
     PatternTransformFailure,
     /// A selected soft mask could not be constructed completely.
@@ -634,16 +635,16 @@ pub fn interpret<'a>(
                 context.get_mut().graphics_state.stroke_pattern = None;
             }
             TypedInstruction::LineWidth(w) => {
-                context.get_mut().graphics_state.stroke_props.line_width = w.0.as_f32();
+                context.set_stroke_parameter(b"LW", Some(w.0));
             }
             TypedInstruction::LineCap(c) => {
-                context.get_mut().graphics_state.stroke_props.line_cap = convert_line_cap(c);
+                context.set_stroke_parameter(b"LC", Some(c.0));
             }
             TypedInstruction::LineJoin(j) => {
-                context.get_mut().graphics_state.stroke_props.line_join = convert_line_join(j);
+                context.set_stroke_parameter(b"LJ", Some(j.0));
             }
             TypedInstruction::MiterLimit(l) => {
-                context.get_mut().graphics_state.stroke_props.miter_limit = l.0.as_f32();
+                context.set_stroke_parameter(b"ML", Some(l.0));
             }
             TypedInstruction::Transform(t) => {
                 context.pre_concat_transform(t);

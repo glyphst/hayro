@@ -1,7 +1,6 @@
 use crate::StrokeProps;
 use crate::color::{AlphaColor, ColorComponents, ColorSpace};
 use crate::context::Context;
-use crate::convert::{convert_line_cap, convert_line_join};
 use crate::font::{Font, UNITS_PER_EM};
 use crate::function::{Function, TransferFunction};
 use crate::interpret::text::TextRenderingMode;
@@ -9,7 +8,6 @@ use crate::pattern::Pattern;
 use crate::types::BlendMode;
 use crate::util::OptionLog;
 use crate::x_object::soft_mask::SoftMask;
-use hayro_syntax::content::ops::{LineCap, LineJoin};
 use hayro_syntax::object::dict::keys::{FONT, SMASK};
 use hayro_syntax::object::{Array, Dict, Name, Number, Object};
 use hayro_syntax::page::Resources;
@@ -426,16 +424,10 @@ pub(crate) fn handle_gs_single<'a>(
                 (context.settings.warning_sink)(crate::InterpreterWarning::ColorConversion(error));
             }
         },
-        "LW" => context.get_mut().graphics_state.stroke_props.line_width = dict.get::<f32>(key)?,
-        "LC" => {
-            context.get_mut().graphics_state.stroke_props.line_cap =
-                convert_line_cap(LineCap(dict.get::<Number>(key)?));
+        "LW" | "LC" | "LJ" | "ML" => {
+            let number = dict.get::<Number>(&key);
+            context.set_stroke_parameter(key.as_ref(), number);
         }
-        "LJ" => {
-            context.get_mut().graphics_state.stroke_props.line_join =
-                convert_line_join(LineJoin(dict.get::<Number>(key)?));
-        }
-        "ML" => context.get_mut().graphics_state.stroke_props.miter_limit = dict.get::<f32>(key)?,
         "SA" => {
             context
                 .get_mut()

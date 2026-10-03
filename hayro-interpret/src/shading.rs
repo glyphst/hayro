@@ -6,7 +6,7 @@ use crate::CacheKey;
 use crate::cache::Cache;
 use crate::color::{ColorComponents, ColorSpace};
 use crate::function::{CalculatorFunction, Function, StitchingBounds, Values, interpolate};
-use crate::util::{Float32Ext, PointExt, RectExt};
+use crate::util::{PointExt, RectExt};
 use hayro_syntax::bit_reader::BitReader;
 use hayro_syntax::object::Array;
 use hayro_syntax::object::Dict;
@@ -198,14 +198,20 @@ impl Shading {
                 let extend = dict.get::<[bool; 2]>(EXTEND).unwrap_or([false, false]);
                 let (coords, invalid) = if shading_num == 2 {
                     let read = dict.get::<[f32; 4]>(COORDS)?;
-                    let invalid = (read[0] - read[2]).is_nearly_zero()
-                        && (read[1] - read[3]).is_nearly_zero();
+                    // Geometry has no absolute minimum size: the pattern or
+                    // caller matrix can magnify a small, representable axis.
+                    let invalid = read[0] == read[2] && read[1] == read[3];
                     ([read[0], read[1], read[2], read[3], 0.0, 0.0], invalid)
                 } else {
-                    let read = dict.get::<[f32; 6]>(COORDS)?;
-                    let invalid = (read[0] - read[3]).is_nearly_zero()
-                        && (read[1] - read[4]).is_nearly_zero()
-                        && (read[2] - read[5]).is_nearly_zero();
+                    let source = dict.get::<[f64; 6]>(COORDS)?;
+                    let read = source.map(|value| value as f32);
+                    // Table 81 defines two literal zero radii as no paint, even
+                    // for identical centers. Preserve that geometry and its Background.
+                    let zero_radii = source[2] == 0.0 && source[5] == 0.0;
+                    let invalid = read[0] == read[3]
+                        && read[1] == read[4]
+                        && read[2] == read[5]
+                        && !zero_radii;
                     (read, invalid)
                 };
 

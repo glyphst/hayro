@@ -418,6 +418,8 @@ pub enum InterpreterWarning {
     BlendModeFailure,
     /// An inherited pattern cannot be mapped into a retained invocation.
     PatternTransformFailure,
+    /// A selected pattern's defining resource owner has no initial-state snapshot.
+    PatternResourceStateFailure,
     /// A selected soft mask could not be constructed completely.
     SoftMaskFailure,
     /// An image color-space declaration or selected default could not be resolved.
@@ -844,20 +846,14 @@ pub fn interpret<'a>(
             TypedInstruction::NonStrokeColorNamed(n) => {
                 context.get_mut().graphics_state.non_stroke_color =
                     n.0.into_iter().map(|n| n.as_f32()).collect();
-                context.get_mut().graphics_state.non_stroke_pattern = n.1.and_then(|name| {
-                    resources
-                        .get_pattern(name)
-                        .and_then(|d| Pattern::new(d, context, resources))
-                });
+                context.get_mut().graphics_state.non_stroke_pattern =
+                    n.1.and_then(|name| Pattern::from_resource(name, context, resources));
             }
             TypedInstruction::StrokeColorNamed(n) => {
                 context.get_mut().graphics_state.stroke_color =
                     n.0.into_iter().map(|n| n.as_f32()).collect();
-                context.get_mut().graphics_state.stroke_pattern = n.1.and_then(|name| {
-                    resources
-                        .get_pattern(name)
-                        .and_then(|d| Pattern::new(d, context, resources))
-                });
+                context.get_mut().graphics_state.stroke_pattern =
+                    n.1.and_then(|name| Pattern::from_resource(name, context, resources));
             }
             TypedInstruction::BeginMarkedContentWithProperties(bdc) => {
                 // Properties can be either:

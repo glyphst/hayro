@@ -1,7 +1,7 @@
 use super::xobject_oc;
 use crate::cache::CacheKey;
 use crate::color::{ColorSpace, ColorSpaceKind};
-use crate::context::Context;
+use crate::context::{Context, ResourceTransferState};
 use crate::device::Device;
 use crate::interpret::state::State;
 use crate::util::hash128;
@@ -95,6 +95,7 @@ impl FormGroupProperties {
 pub struct FormInvocation<'a> {
     form: FormXObject<'a>,
     resources: Resources<'a>,
+    parent_resource_transfer_state: ResourceTransferState,
     state: State<'a>,
     instance_transform: Affine,
     settings: InterpreterSettings,
@@ -186,10 +187,12 @@ impl<'a> FormInvocation<'a> {
             form_key,
             format!("{normalized_state:?}"),
             context.settings.defer_transfer_functions,
+            context.resource_transfer_state.cache_key(),
         ));
         Self {
             form: form.clone(),
             resources,
+            parent_resource_transfer_state: context.resource_transfer_state.clone(),
             state,
             instance_transform,
             settings: context.settings.clone(),
@@ -273,6 +276,7 @@ impl<'a> FormInvocation<'a> {
             state,
             self.nesting_depth,
         );
+        context.inherit_resource_transfer_state(&self.parent_resource_transfer_state);
 
         if self.group_properties.is_some() {
             device.push_transparency_group_with_alpha_source(

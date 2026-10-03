@@ -2,7 +2,7 @@
 
 use crate::cache::Cache;
 use crate::color::{Color, ColorSpace};
-use crate::context::{Context, InterpreterCache};
+use crate::context::{Context, InterpreterCache, ResourceTransferState};
 use crate::device::Device;
 use crate::font::GlyphRun;
 use crate::interpret::state::{ActiveTransferFunction, State};
@@ -17,7 +17,7 @@ use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::{
     BBOX, EXT_G_STATE, MATRIX, PAINT_TYPE, RESOURCES, SHADING, TILING_TYPE, X_STEP, Y_STEP,
 };
-use hayro_syntax::object::{Object, dict_or_stream};
+use hayro_syntax::object::{Name, Object, dict_or_stream};
 use hayro_syntax::page::Resources;
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, BezPath, Rect, Shape};
@@ -34,10 +34,30 @@ pub enum Pattern<'a> {
 }
 
 impl<'a> Pattern<'a> {
+    pub(crate) fn from_resource(
+        name: &Name<'_>,
+        ctx: &Context<'a>,
+        resources: &Resources<'a>,
+    ) -> Option<Self> {
+        let (object, owner) = resources.get_pattern_with_owner(name)?;
+        let mut current = resources;
+        let mut initial = &ctx.resource_transfer_state;
+        while !std::ptr::eq(current, owner) {
+            current = current.parent()?;
+            let Some(parent) = initial.parent() else {
+                (ctx.settings.warning_sink)(crate::InterpreterWarning::PatternResourceStateFailure);
+                return None;
+            };
+            initial = parent;
+        }
+        Self::new(object, ctx, resources, initial.initial().cloned())
+    }
+
     pub(crate) fn new(
         object: Object<'a>,
         ctx: &Context<'a>,
         resources: &Resources<'a>,
+        initial_transfer: Option<ActiveTransferFunction>,
     ) -> Option<Self> {
         let mut pattern = match object {
             Object::Dict(dict) => {
@@ -45,14 +65,17 @@ impl<'a> Pattern<'a> {
                     &dict,
                     &ctx.interpreter_cache.object_cache,
                     ctx.get().graphics_state.non_stroke_alpha,
-                    ctx.initial_transfer_function.clone(),
+                    initial_transfer,
                     &ctx.settings.warning_sink,
                 )?;
                 pattern.defer_transfer_function = ctx.settings.defer_transfer_functions;
                 Some(Self::Shading(pattern))
             }
             Object::Stream(stream) => Some(Self::Tiling(Box::new(TilingPattern::new(
-                stream, ctx, resources,
+                stream,
+                ctx,
+                resources,
+                initial_transfer,
             )?))),
             _ => None,
         }?;
@@ -242,6 +265,7 @@ pub struct TilingPattern<'a> {
     nesting_depth: u32,
     rendering_intent: crate::color::RenderingIntent,
     transfer_function: Option<ActiveTransferFunction>,
+    parent_resource_transfer_state: ResourceTransferState,
     deferred_base_transfer_function: Option<ActiveTransferFunction>,
 }
 
@@ -263,6 +287,7 @@ impl<'a> TilingPattern<'a> {
         stream: Stream<'a>,
         ctx: &Context<'a>,
         resources: &Resources<'a>,
+        initial_transfer: Option<ActiveTransferFunction>,
     ) -> Option<Self> {
         let cache_key = stream.cache_key();
         let dict = stream.dict();
@@ -333,7 +358,8 @@ impl<'a> TilingPattern<'a> {
             xref: ctx.xref,
             nesting_depth,
             rendering_intent: state.graphics_state.rendering_intent,
-            transfer_function: ctx.initial_transfer_function.clone(),
+            transfer_function: initial_transfer,
+            parent_resource_transfer_state: ctx.resource_transfer_state.clone(),
             deferred_base_transfer_function: None,
         })
     }
@@ -415,6 +441,7 @@ impl<'a> TilingPattern<'a> {
             state,
             self.nesting_depth,
         );
+        context.inherit_resource_transfer_state(&self.parent_resource_transfer_state);
 
         let decoded = self.stream.decoded().ok()?;
         let resources = Resources::from_parent(
@@ -461,6 +488,7 @@ impl CacheKey for TilingPattern<'_> {
         hash128(&(
             self.cache_key,
             self.rendering_intent,
+            self.parent_resource_transfer_state.cache_key(),
             self.transfer_function.as_ref().map(CacheKey::cache_key),
             self.deferred_base_transfer_function
                 .as_ref()

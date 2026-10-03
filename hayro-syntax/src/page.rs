@@ -629,8 +629,19 @@ impl<'a> Resources<'a> {
 
     /// Get a pattern by name.
     pub fn get_pattern(&self, name: &Name<'_>) -> Option<Object<'a>> {
+        self.get_pattern_with_owner(name).map(|(object, _)| object)
+    }
+
+    /// Get a pattern and the resource layer that defines it. Interpreters use
+    /// the owner to select that content stream's initial graphics state.
+    pub fn get_pattern_with_owner(&self, name: &Name<'_>) -> Option<(Object<'a>, &Self)> {
         self.get_resource::<Object<'_>>(name, &self.patterns)
-            .or_else(|| self.parent.as_ref().and_then(|p| p.get_pattern(name)))
+            .map(|object| (object, self))
+            .or_else(|| {
+                self.parent
+                    .as_ref()
+                    .and_then(|p| p.get_pattern_with_owner(name))
+            })
     }
 
     /// Get an x object by name.

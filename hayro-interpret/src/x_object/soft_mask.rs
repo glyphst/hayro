@@ -2,7 +2,7 @@ use super::form::{
     FormGroupProperties, FormXObject, resources_cache_key, resources_contain_color_space,
 };
 use crate::color::{Color, ColorComponents, ColorSpace, ColorSpaceKind};
-use crate::context::{Context, InterpreterCache};
+use crate::context::{Context, InterpreterCache, ResourceTransferState};
 use crate::device::Device;
 use crate::function::{Function, TransferFunction};
 use crate::interpret::state::State;
@@ -37,6 +37,7 @@ struct Repr<'a> {
     group: FormXObject<'a>,
     mask_type: MaskType,
     parent_resources: Resources<'a>,
+    parent_resource_transfer_state: ResourceTransferState,
     root_transform: Affine,
     bbox: kurbo::Rect,
     interpreter_cache: InterpreterCache<'a>,
@@ -149,6 +150,7 @@ impl<'a> SoftMask<'a> {
             context.get().ctm.cache_key(),
             context.bbox().cache_key(),
             context.settings.defer_transfer_functions,
+            context.resource_transfer_state.cache_key(),
         ));
 
         Some(Self(Rc::new(Repr {
@@ -166,6 +168,7 @@ impl<'a> SoftMask<'a> {
             group_color_space: cs,
             group_color_space_default_overridden,
             parent_resources,
+            parent_resource_transfer_state: context.resource_transfer_state.clone(),
             nesting_depth,
         })))
     }
@@ -182,6 +185,9 @@ impl<'a> SoftMask<'a> {
             state,
             self.0.nesting_depth,
         );
+        // This temporary context still addresses the captured parent resources;
+        // the group's Form invocation adds its own reset initial-state layer.
+        ctx.resource_transfer_state = self.0.parent_resource_transfer_state.clone();
         self.0
             .group
             .draw(&self.0.parent_resources, &mut ctx, device);

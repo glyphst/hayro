@@ -315,6 +315,7 @@ impl<'a> Type3<'a> {
             state,
             glyph.nesting_depth,
         );
+        context.inherit_resource_transfer_state(&glyph.parent_resource_transfer_state);
 
         let mut resources = Resources::from_parent(
             self.dict.get(RESOURCES).unwrap_or_default(),
@@ -324,6 +325,8 @@ impl<'a> Type3<'a> {
         // Technically not valid, but also support by Adobe Acrobat. See PDFBOX-5294.
         if let Some(procs_resources) = program.dict().get::<Dict<'_>>(RESOURCES) {
             resources = Resources::from_parent(procs_resources, resources);
+            let font_resources = context.resource_transfer_state.clone();
+            context.inherit_resource_transfer_state(&font_resources);
         }
 
         if is_shape_glyph {

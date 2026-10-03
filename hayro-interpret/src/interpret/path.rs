@@ -1,6 +1,6 @@
 use crate::context::{Context, path_as_rect};
 use crate::device::Device;
-use crate::util::{BezPathExt, Float32Ext};
+use crate::util::BezPathExt;
 use crate::{DrawMode, FillRule, StrokeProps};
 use kurbo::{BezPath, Cap, Join, PathEl};
 
@@ -70,10 +70,9 @@ pub(crate) fn fill_path_impl<'a>(
         // pdf.js issue 4260: Replace zero-sized paths with a small stroke instead.
         let bbox = path.fast_bounding_box();
 
-        match (
-            (bbox.width() as f32).is_nearly_zero(),
-            (bbox.height() as f32).is_nearly_zero(),
-        ) {
+        // A caller matrix can magnify any nonzero source-space fill. An
+        // absolute epsilon here would replace real coverage with a stroke.
+        match (bbox.width() == 0.0, bbox.height() == 0.0) {
             (false, false) => {
                 let draw_mode = DrawMode::Fill(fill_rule);
                 if let Some(rect) = path_as_rect(path) {

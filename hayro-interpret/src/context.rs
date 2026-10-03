@@ -350,9 +350,50 @@ mod shared_cache_tests {
     }
 }
 
+/// Initial transfer states parallel to the resource-owner chain. Shared parent
+/// nodes keep nested invocation captures bounded without rebinding a pattern
+/// inherited from another content stream.
+#[derive(Clone)]
+pub(crate) struct ResourceTransferState(Rc<ResourceTransferNode>);
+
+struct ResourceTransferNode {
+    initial: Option<crate::ActiveTransferFunction>,
+    parent: Option<ResourceTransferState>,
+    key: u128,
+}
+
+impl ResourceTransferState {
+    fn new(initial: Option<crate::ActiveTransferFunction>, parent: Option<Self>) -> Self {
+        let key = crate::util::hash128(&(
+            initial.as_ref().map(CacheKey::cache_key),
+            parent.as_ref().map(CacheKey::cache_key),
+        ));
+        Self(Rc::new(ResourceTransferNode {
+            initial,
+            parent,
+            key,
+        }))
+    }
+
+    pub(crate) fn initial(&self) -> Option<&crate::ActiveTransferFunction> {
+        self.0.initial.as_ref()
+    }
+
+    pub(crate) fn parent(&self) -> Option<&Self> {
+        self.0.parent.as_ref()
+    }
+}
+
+impl CacheKey for ResourceTransferState {
+    fn cache_key(&self) -> u128 {
+        self.0.key
+    }
+}
+
 /// A per-page interpretation context that borrows shared data from an [`InterpreterCache`].
 pub struct Context<'a> {
     pub(crate) initial_transfer_function: Option<crate::ActiveTransferFunction>,
+    pub(crate) resource_transfer_state: ResourceTransferState,
     states: Vec<State<'a>>,
     path: BezPath,
     sub_path_start: Point,
@@ -400,6 +441,10 @@ impl<'a> Context<'a> {
 
         Self {
             initial_transfer_function: state.graphics_state.transfer_function.clone(),
+            resource_transfer_state: ResourceTransferState::new(
+                state.graphics_state.transfer_function.clone(),
+                None,
+            ),
             states: vec![state],
             settings,
             xref,
@@ -414,6 +459,14 @@ impl<'a> Context<'a> {
             nesting_depth,
             glyph_scratch: Vec::new(),
         }
+    }
+
+    /// Add this content stream's resource layer above its captured parent.
+    pub(crate) fn inherit_resource_transfer_state(&mut self, parent: &ResourceTransferState) {
+        self.resource_transfer_state = ResourceTransferState::new(
+            self.initial_transfer_function.clone(),
+            Some(parent.clone()),
+        );
     }
 
     pub(crate) fn save_state(&mut self) {

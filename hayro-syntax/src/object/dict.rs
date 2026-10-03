@@ -1258,4 +1258,59 @@ mod tests {
         assert!(dict.contains_key("Null"));
         assert!(dict.contains_key("Undefined"));
     }
+    #[test]
+    fn null_classification_preserves_declared_objects_through_repair() {
+        let objects: &[&[u8]] = &[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [] /Count 0 >>",
+            b"<< /Direct null /Indirect 4 0 R /Undefined 99 0 R /Unreadable 5 0 R /WrongGeneration 5 1 R /WrongType 6 0 R >>",
+            b"null",
+            b"[1",
+            b"/Wrong",
+        ];
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            bytes.extend_from_slice(object);
+            bytes.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!(
+                "trailer\n<< /Root 1 0 R /Size {} >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        let pdf = crate::Pdf::new(bytes).expect("document with a valid cross-reference table");
+        let id = crate::object::ObjectIdentifier::new(5, 0);
+        assert!(pdf.xref().contains_object(id));
+        for _ in 0..3 {
+            let dict = pdf
+                .xref()
+                .get::<Dict<'_>>(crate::object::ObjectIdentifier::new(3, 0))
+                .expect("probe dictionary survives repair");
+            assert!(!dict.is_null_or_absent(b"Unreadable"));
+            assert!(pdf.xref().get::<crate::object::Object<'_>>(id).is_none());
+            assert!(pdf.xref().contains_object(id));
+            for key in [
+                "Missing",
+                "Direct",
+                "Indirect",
+                "Undefined",
+                "WrongGeneration",
+            ] {
+                assert!(dict.is_null_or_absent(key), "{key}");
+            }
+            assert!(!dict.is_null_or_absent(b"WrongType"));
+        }
+    }
 }

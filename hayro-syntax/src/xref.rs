@@ -499,7 +499,13 @@ impl XRef {
         let mut locked = r.map.try_put().unwrap();
         assert!(!locked.repaired);
 
-        let (xref_map, _) = fallback_xref_map(r.data.get(), &r.password);
+        let (mut xref_map, _) = fallback_xref_map(r.data.get(), &r.password);
+        // Repair can recover usable offsets, but cannot turn an originally
+        // declared, unreadable object into an undefined reference. Keep those
+        // declarations so dictionary null/default handling still rejects them.
+        for (id, entry) in &locked.xref_map {
+            xref_map.entry(*id).or_insert(*entry);
+        }
         locked.xref_map = xref_map;
         locked.repaired = true;
     }

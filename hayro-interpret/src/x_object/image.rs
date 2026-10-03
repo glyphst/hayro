@@ -357,7 +357,9 @@ impl<'a> ImageXObject<'a> {
     fn has_mask(&self) -> bool {
         let dict = self.stream.dict();
 
-        embedded_alpha_mode(dict).is_some() || dict.contains_key(SMASK) || dict.contains_key(MASK)
+        embedded_alpha_mode(dict).is_some()
+            || !dict.is_null_or_absent(SMASK)
+            || !dict.is_null_or_absent(MASK)
     }
 }
 

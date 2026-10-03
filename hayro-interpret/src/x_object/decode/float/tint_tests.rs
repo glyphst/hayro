@@ -198,9 +198,10 @@ fn unsupported_tint_alternates_and_invalid_image_boundaries_still_refuse() {
     let header = format!(
         "/Width 2/Height 1/BitsPerComponent 16/ColorSpace[/Separation/Ink/DeviceGray {IDENTITY}]"
     );
+    super::tests::assert_null_masks_are_omitted(&header, &[0; 4]);
     for extra in [
         "/Mask[0 1]",
-        "/SMask null",
+        "/SMask false",
         "/Decode[0 false]",
         "/Decode[0 1 0 1]",
     ] {

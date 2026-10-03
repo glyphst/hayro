@@ -229,8 +229,8 @@ fn invalid_matte_arrays_samples_and_mask_dictionaries_fail_closed() {
         "/BitsPerComponent 8/Matte[0 0 2]",
         "/BitsPerComponent 8/Matte[0 0 0]/Decode[0 1 false]",
         "/BitsPerComponent 8/Matte[0 0 0]/ImageMask true",
-        "/BitsPerComponent 8/Matte[0 0 0]/Mask null",
-        "/BitsPerComponent 8/Matte[0 0 0]/SMask null",
+        "/BitsPerComponent 8/Matte[0 0 0]/Mask [0 0]",
+        "/BitsPerComponent 8/Matte[0 0 0]/SMask false",
         "/BitsPerComponent 8/Matte[0 0 0]/ColorSpace/DeviceRGB",
         "/BitsPerComponent 8/Matte[0 0 0]/Width 2",
         "/BitsPerComponent 3/Matte[0 0 0]",
@@ -274,6 +274,40 @@ fn invalid_matte_arrays_samples_and_mask_dictionaries_fail_closed() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn optional_mask_entries_preserve_null_and_undefined_omission() {
+    for key in ["Mask", "SMask"] {
+        for value in ["null", "999 0 R"] {
+            let image = decoded(
+                "/DeviceRGB",
+                1,
+                1,
+                "/BitsPerComponent 8",
+                &[128; 3],
+                &format!("/BitsPerComponent 8 /Matte [0 0 0] /{key} {value}"),
+                &[128],
+            )
+            .expect("null nested mask is absent");
+            assert_eq!(rgb(&image), [255; 3]);
+            assert_eq!(image.alpha.unwrap().data, [128]);
+        }
+    }
+    for value in ["null", "999 0 R"] {
+        let image = decoded(
+            "/DeviceRGB",
+            1,
+            1,
+            "/BitsPerComponent 8",
+            &[64, 128, 192],
+            &format!("/BitsPerComponent 8 /Matte {value}"),
+            &[128],
+        )
+        .expect("null Matte does not select recovery");
+        assert_eq!(rgb(&image), [64, 128, 192]);
+        assert_eq!(image.alpha.unwrap().data, [128]);
+    }
 }
 
 #[test]

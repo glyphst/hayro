@@ -67,8 +67,8 @@ fn decode_rgb<const BYTES: usize>(
         .ok_or(Error::Unsupported)?;
     if obj.kind != ImageKind::Image
         || obj.transfer_function.is_some()
-        || dict.contains_key(b"Mask")
-        || dict.contains_key(b"SMask")
+        || !dict.is_null_or_absent(b"Mask")
+        || !dict.is_null_or_absent(b"SMask")
         || obj.embedded_alpha_mode().is_some()
     {
         return Err(Error::Unsupported);

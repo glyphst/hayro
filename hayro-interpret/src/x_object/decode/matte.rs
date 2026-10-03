@@ -55,8 +55,8 @@ fn decode_output<'a>(
             .or_else(|| dict.get::<Name<'_>>(CS))?
             .as_ref()
             != b"DeviceGray"
-        || dict.contains_key(MASK)
-        || dict.contains_key(SMASK)
+        || !dict.is_null_or_absent(MASK)
+        || !dict.is_null_or_absent(SMASK)
         || (dict.contains_key(TYPE) && dict.get::<Name<'_>>(TYPE)?.as_ref() != b"XObject")
     {
         return None;

@@ -113,8 +113,8 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
             return super::tint::decode(self.obj, &self.ctx);
         }
         if self.ctx.color_space.kind() == ColorSpaceKind::Lab
-            && !dict.contains_key(MASK)
-            && !dict.contains_key(SMASK)
+            && dict.is_null_or_absent(MASK)
+            && dict.is_null_or_absent(SMASK)
             && self.obj.embedded_alpha_mode().is_none()
         {
             super::float::validate_decode(self.obj, 3).ok()?;
@@ -347,7 +347,7 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
                 .stream
                 .dict()
                 .get::<Stream<'_>>(SMASK)
-                .is_some_and(|mask| mask.dict().contains_key(MATTE))
+                .is_some_and(|mask| !mask.dict().is_null_or_absent(MATTE))
     }
 
     fn decode_color_key_mask(&self) -> Option<LumaData> {

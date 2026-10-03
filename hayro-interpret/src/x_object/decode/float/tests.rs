@@ -65,6 +65,35 @@ fn floats(image: &RgbF32Data) -> Vec<f32> {
         .collect()
 }
 
+pub(super) fn assert_null_masks_are_omitted(header: &str, data: &[u8]) {
+    let expected = with_image(header, data, |image| {
+        (
+            decode_rgb_f32(image, u64::MAX, || true).unwrap().data,
+            decode_rgb_f64(image, u64::MAX, || true).unwrap().data,
+        )
+    });
+    for entries in [
+        "/SMask null",
+        "/Mask null",
+        "/SMask 999 0 R",
+        "/Mask 999 0 R",
+        "/SMask null /Mask null",
+    ] {
+        with_image(&format!("{header} {entries}"), data, |image| {
+            assert_eq!(
+                decode_rgb_f32(image, u64::MAX, || true).unwrap().data,
+                expected.0,
+                "{entries}"
+            );
+            assert_eq!(
+                decode_rgb_f64(image, u64::MAX, || true).unwrap().data,
+                expected.1,
+                "{entries}"
+            );
+        });
+    }
+}
+
 #[test]
 fn direct_sixteen_bit_and_decode_components_do_not_round_to_bytes() {
     let header = "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 16";
@@ -161,6 +190,7 @@ fn packed_sample_rows_and_calibrated_conversion_preserve_real_values() {
 #[test]
 fn malformed_truncated_unproved_and_over_budget_images_have_no_output() {
     let header = "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 16";
+    assert_null_masks_are_omitted(header, &[0; 4]);
     assert!(matches!(
         decode(header, &[0; 3], 24, || true),
         Err(Error::Decode)
@@ -179,7 +209,7 @@ fn malformed_truncated_unproved_and_over_budget_images_have_no_output() {
         "/Decode [0 false]",
         "/Decode false",
         "/Mask [0 1]",
-        "/SMask null",
+        "/SMask false",
     ] {
         assert!(
             matches!(
@@ -558,6 +588,7 @@ fn lab_sixteen_bit_neighbors_survive_transfer_cut_and_invalid_inputs_fail_closed
         .into_iter()
         .flat_map(u16::to_be_bytes)
         .collect();
+    assert_null_masks_are_omitted(header, &data);
     with_image(header, &data, |image| {
         let wide = decode_rgb_f64(image, 48, || true).unwrap();
         let samples: Vec<f64> = wide
@@ -579,7 +610,7 @@ fn lab_sixteen_bit_neighbors_survive_transfer_cut_and_invalid_inputs_fail_closed
         "/Decode [0 100 0 0 0 0 false]",
         "/Decode false",
         "/Mask [0 0 0 0 0 0]",
-        "/SMask null",
+        "/SMask false",
     ] {
         with_image(&format!("{header} {extra}"), &data, |image| {
             assert!(

@@ -182,6 +182,7 @@ fn gray_lut_images_keep_mask_limits_cancellation_and_scratch_ownership() {
     let cache = Cache::with_limits(4, 32 * 1024 * 1024);
     let samples = vec![128; 2050];
     let header = "/BitsPerComponent 16/ColorSpace[/ICCBased 5 0 R]";
+    let mut expected = Vec::new();
     image::with_image(
         header,
         &samples,
@@ -224,6 +225,7 @@ fn gray_lut_images_keep_mask_limits_cancellation_and_scratch_ownership() {
                 complete.data
             );
             assert_eq!(cache.stats().icc_bytes, retained);
+            expected = complete.data;
         },
     );
     cache.clear();
@@ -242,6 +244,13 @@ fn gray_lut_images_keep_mask_limits_cancellation_and_scratch_ownership() {
             PROFILE,
             &cache,
             |image| {
+                if extra == "/SMask null" {
+                    assert_eq!(
+                        decode_rgb_f64(image, 24600, || true).unwrap().data,
+                        expected
+                    );
+                    return;
+                }
                 assert!(
                     matches!(
                         decode_rgb_f64(image, 24600, || true),

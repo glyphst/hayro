@@ -7,7 +7,7 @@ use crate::device::Device;
 use crate::font::GlyphRun;
 use crate::interpret::state::{ActiveTransferFunction, State};
 use crate::shading::Shading;
-use crate::util::{Float32Ext, RectExt, hash128};
+use crate::util::{RectExt, hash128};
 use crate::x_object::soft_mask::SoftMask;
 use crate::{BlendMode, CacheKey, ClipPath, DrawMode, DrawProps, Image, ImageDrawProps};
 use crate::{FillRule, InterpreterSettings, Paint, interpret};
@@ -296,7 +296,14 @@ impl<'a> TilingPattern<'a> {
         let x_step = dict.get::<f32>(X_STEP)?;
         let y_step = dict.get::<f32>(Y_STEP)?;
 
-        if x_step.is_nearly_zero() || y_step.is_nearly_zero() || bbox.is_zero_area() {
+        // Nonzero cell spacing may be arbitrarily small: the pattern matrix
+        // can expand it into ordinary device-space tiles (PDF 1.7, Table 75).
+        if !x_step.is_finite()
+            || x_step == 0.0
+            || !y_step.is_finite()
+            || y_step == 0.0
+            || bbox.is_zero_area()
+        {
             return None;
         }
 

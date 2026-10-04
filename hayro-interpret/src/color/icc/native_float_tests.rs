@@ -122,6 +122,7 @@ fn icc_float_images_reject_masks_truncation_and_limits_and_release_batch_quota()
     let header = "/BitsPerComponent 16/ColorSpace[/ICCBased 5 0 R]";
     let samples = vec![128; 2050];
     let cache = Cache::with_limits(4, 32 * 1024 * 1024);
+    let mut expected = Vec::new();
     image::with_image(
         header,
         &samples,
@@ -166,6 +167,7 @@ fn icc_float_images_reject_masks_truncation_and_limits_and_release_batch_quota()
                 complete.data
             );
             assert_eq!(cache.stats().icc_bytes, retained);
+            expected = complete.data;
         },
     );
     cache.clear();
@@ -184,6 +186,13 @@ fn icc_float_images_reject_masks_truncation_and_limits_and_release_batch_quota()
             &profile,
             &cache,
             |image| {
+                if extra == "/SMask null" {
+                    assert_eq!(
+                        decode_rgb_f64(image, 24600, || true).unwrap().data,
+                        expected
+                    );
+                    return;
+                }
                 assert!(
                     matches!(
                         decode_rgb_f64(image, 24600, || true),

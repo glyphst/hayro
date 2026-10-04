@@ -396,7 +396,7 @@ where
                 // in the raw dictionary. Prefix recovery must not truncate the
                 // image before consumers can validate its typed parameters.
                 crate::object::name::skip_name_like(r, false)?;
-            } else if ctx.in_content_stream() {
+            } else if ctx.in_content_stream() && start_tag.is_some() {
                 r.skip::<Object<'_>>(ctx.in_content_stream())?;
             } else {
                 r.skip::<MaybeRef<Object<'_>>>(ctx.in_content_stream())?;
@@ -1195,6 +1195,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(dict.get_dict().len(), 5);
+    }
+
+    #[test]
+    fn inline_indirect_values_retain_following_parameters_for_validation() {
+        let bytes = b"/BPC 9 0 R /W 1 /H 1 ID ";
+        let dict = Reader::new(bytes)
+            .read_without_context::<InlineImageDict<'_>>()
+            .unwrap();
+        let dict = dict.get_dict();
+        assert_eq!(dict.len(), 3);
+        assert_eq!(dict.get_ref(b"BPC"), Some(crate::object::ObjRef::new(9, 0)));
+        assert_eq!(dict.get::<u32>(b"W"), Some(1));
+        assert_eq!(dict.get::<u32>(b"H"), Some(1));
     }
 
     #[test]

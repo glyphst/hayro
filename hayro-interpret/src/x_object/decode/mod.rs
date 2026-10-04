@@ -17,11 +17,11 @@ pub(crate) use mask::{DecodedMask, decode_mask};
 use crate::InterpreterWarning;
 use crate::color::ColorSpace;
 use crate::function::interpolate;
-use crate::x_object::image::{ImageKind, ImageXObject};
+use crate::x_object::image::{ImageKind, ImageXObject, image_entry_is_omitted};
 use hayro_syntax::bit_reader::BitReader;
-use hayro_syntax::object::Array;
 use hayro_syntax::object::dict::keys::*;
 use hayro_syntax::object::stream::{FilterResult, ImageColorSpace, ImageDecodeParams};
+use hayro_syntax::object::{Array, Dict};
 use smallvec::SmallVec;
 use std::iter;
 
@@ -138,15 +138,11 @@ fn decode_context<'a>(
     {
         return None;
     }
-    let ignore_decode = jpx && obj.kind != ImageKind::StencilMask;
-    let decode_arr = (!ignore_decode)
-        .then(|| {
-            dict.get::<Array<'_>>(D)
-                .or_else(|| dict.get::<Array<'_>>(DECODE))
-        })
-        .flatten()
-        .map(|a| a.iter::<(f32, f32)>().collect::<SmallVec<_>>())
-        .unwrap_or(color_space.default_decode_arr(bits_per_component as f32));
+    let decode_arr = image_decode_array(dict, &color_space, bits_per_component, obj.kind, jpx)
+        .or_else(|| {
+            (obj.warning_sink)(InterpreterWarning::ImageDecodeFailure);
+            None
+        })?;
 
     Some(DecodeContext {
         decoded,
@@ -157,6 +153,116 @@ fn decode_context<'a>(
         bits_per_component,
         decode_arr,
     })
+}
+
+fn image_decode_array(
+    dict: &Dict<'_>,
+    color_space: &ColorSpace,
+    bits_per_component: u8,
+    kind: ImageKind,
+    jpx: bool,
+) -> Option<SmallVec<[(f32, f32); 4]>> {
+    let default = || color_space.default_decode_arr(bits_per_component as f32);
+    if jpx && kind != ImageKind::StencilMask {
+        return Some(default());
+    }
+    let count = usize::from(color_space.num_components()) * 2;
+    let mut selected = None;
+    for key in [D, DECODE] {
+        if image_entry_is_omitted(dict, key) {
+            continue;
+        }
+        let array = dict.get::<Array<'_>>(key)?;
+        if array.raw_iter().take(count + 1).count() != count {
+            return None;
+        }
+        // Read individual members through the array's resolving iterator. A
+        // tuple reader cannot resolve references embedded within each pair.
+        let mut values = array.iter::<f64>();
+        let mut pairs = SmallVec::new();
+        for _ in 0..count / 2 {
+            let (low, high) = (values.next()?, values.next()?);
+            if !(low as f32).is_finite()
+                || !(high as f32).is_finite()
+                || (kind == ImageKind::StencilMask
+                    && !matches!([low, high], [0.0, 1.0] | [1.0, 0.0]))
+            {
+                return None;
+            }
+            pairs.push((low as f32, high as f32));
+        }
+        selected.get_or_insert(pairs);
+    }
+    Some(selected.unwrap_or_else(default))
+}
+
+#[cfg(test)]
+mod declaration_tests {
+    use super::{ColorSpace, ImageKind, image_decode_array};
+    use hayro_syntax::object::{Dict, FromBytes};
+
+    #[test]
+    fn decode_arrays_require_complete_finite_pairs_and_preserve_defaults() {
+        for (entries, valid) in [
+            ("", true),
+            ("/D null /Decode [1 0]", true),
+            ("/D [0 1]", true),
+            ("/D []", false),
+            ("/D [0]", false),
+            ("/D [0 1 0 1]", false),
+            ("/D [0 null]", false),
+            ("/D [0 garbage]", false),
+            ("/D garbage /Decode [0 1]", false),
+            ("/D [0 1] /Decode false", false),
+        ] {
+            let bytes = format!("<< {entries} >>");
+            let dict = Dict::from_bytes(bytes.as_bytes()).unwrap();
+            assert_eq!(
+                image_decode_array(
+                    &dict,
+                    &ColorSpace::device_gray(),
+                    8,
+                    ImageKind::Image,
+                    false
+                )
+                .is_some(),
+                valid,
+                "{entries}"
+            );
+            assert!(
+                image_decode_array(&dict, &ColorSpace::device_gray(), 8, ImageKind::Image, true)
+                    .is_some(),
+                "JPX ignores {entries}"
+            );
+        }
+    }
+
+    #[test]
+    fn stencil_decode_requires_canonical_polarity_even_for_jpx() {
+        for (pairs, valid) in [
+            ("[0 1]", true),
+            ("[1 0]", true),
+            ("[.5 1]", false),
+            ("[0 1.000000001]", false),
+        ] {
+            let bytes = format!("<< /Decode {pairs} >>");
+            let dict = Dict::from_bytes(bytes.as_bytes()).unwrap();
+            for jpx in [false, true] {
+                assert_eq!(
+                    image_decode_array(
+                        &dict,
+                        &ColorSpace::device_gray(),
+                        1,
+                        ImageKind::StencilMask,
+                        jpx
+                    )
+                    .is_some(),
+                    valid,
+                    "{pairs}/{jpx}"
+                );
+            }
+        }
+    }
 }
 
 #[must_use]

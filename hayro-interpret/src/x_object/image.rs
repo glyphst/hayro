@@ -14,7 +14,7 @@ use crate::{
     RasterImage, StencilImage,
 };
 use hayro_syntax::object::dict::keys::*;
-use hayro_syntax::object::{Array, Dict, Name, Object, Stream};
+use hayro_syntax::object::{Array, Dict, Name, Number, Object, Stream};
 use hayro_syntax::page::Resources;
 use kurbo::Affine;
 
@@ -123,6 +123,29 @@ impl<'a> ImageXObject<'a> {
             kind = ImageKind::StencilMask;
         }
 
+        if !uses_jpx_decode(dict)
+            && ((!is_stencil_mask
+                && [BPC, BITS_PER_COMPONENT]
+                    .into_iter()
+                    .all(|key| image_entry_is_omitted(dict, key)))
+                || [BPC, BITS_PER_COMPONENT].into_iter().any(|key| {
+                    !image_entry_is_omitted(dict, key)
+                        && dict
+                            .get::<Number>(key)
+                            .and_then(|value| value.as_i64_exact())
+                            .is_none_or(|value| {
+                                if is_stencil_mask {
+                                    value != 1
+                                } else {
+                                    !matches!(value, 1 | 2 | 4 | 8 | 16)
+                                }
+                            })
+                }))
+        {
+            (warning_sink)(crate::InterpreterWarning::ImageDecodeFailure);
+            return None;
+        }
+
         let (image_cs, color_space_properties) = if kind.is_mask() {
             // Masks are always single-channel.
             (
@@ -165,12 +188,14 @@ impl<'a> ImageXObject<'a> {
             .or_else(|| dict.get::<bool>(INTERPOLATE))
             .unwrap_or(false);
 
-        let width = dict.get::<u32>(W).or_else(|| dict.get::<u32>(WIDTH))?;
-        let height = dict.get::<u32>(H).or_else(|| dict.get::<u32>(HEIGHT))?;
-
-        if width == 0 || height == 0 {
+        let (width, height) = (
+            image_dimension(dict, [W, WIDTH]),
+            image_dimension(dict, [H, HEIGHT]),
+        );
+        let (Some(width), Some(height)) = (width, height) else {
+            (warning_sink)(crate::InterpreterWarning::ImageDecodeFailure);
             return None;
-        }
+        };
 
         Some(Self {
             width,
@@ -363,6 +388,27 @@ impl<'a> ImageXObject<'a> {
     }
 }
 
+pub(crate) fn image_entry_is_omitted(dict: &Dict<'_>, key: &[u8]) -> bool {
+    dict.is_null_or_absent(key)
+        && (dict.get::<Object<'_>>(key).is_none()
+            || dict.get::<hayro_syntax::object::Null>(key).is_some())
+}
+
+fn image_dimension(dict: &Dict<'_>, keys: [&[u8]; 2]) -> Option<u32> {
+    let mut selected = None;
+    for key in keys {
+        if image_entry_is_omitted(dict, key) {
+            continue;
+        }
+        let value = u32::try_from(dict.get::<Number>(key)?.as_i64_exact()?).ok()?;
+        if value == 0 {
+            return None;
+        }
+        selected.get_or_insert(value);
+    }
+    selected
+}
+
 fn mask_color_space_properties() -> ImageColorSpaceProperties {
     ImageColorSpaceProperties {
         has_color_space: false,
@@ -415,6 +461,32 @@ mod tests {
     use super::embedded_alpha_mode;
     use crate::EmbeddedImageAlphaMode;
     use hayro_syntax::object::{Dict, FromBytes};
+
+    #[test]
+    fn image_dimensions_require_exact_positive_integers_and_validate_both_spellings() {
+        for (entries, expected) in [
+            ("", None),
+            ("/W null", None),
+            ("/Width 1", Some(1)),
+            ("/W 2 /Width 1", Some(2)),
+            ("/W null /Width 1", Some(1)),
+            ("/W 0", None),
+            ("/W -1", None),
+            ("/W 1.0", None),
+            ("/W 1.5", None),
+            ("/W 4294967296", None),
+            ("/W garbage /Width 1", None),
+            ("/W 1 /Width false", None),
+        ] {
+            let bytes = format!("<< {entries} >>");
+            let dict = Dict::from_bytes(bytes.as_bytes()).unwrap();
+            assert_eq!(
+                super::image_dimension(&dict, [b"W", b"Width"]),
+                expected,
+                "{entries}"
+            );
+        }
+    }
 
     #[test]
     fn embedded_alpha_requires_jpx_and_a_supported_mode() {

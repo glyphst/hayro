@@ -4,8 +4,8 @@ use crate::color::{ColorSpaceKind, ToLuma, ToRgb};
 use crate::interpret::state::ActiveTransferFunction;
 use crate::x_object::image::ImageXObject;
 use crate::{CmykData, ImageData, LumaData, RgbData};
-use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::*;
+use hayro_syntax::object::{Array, Number, Object, Stream};
 use smallvec::SmallVec;
 
 pub(crate) struct DecodedImage {
@@ -43,7 +43,43 @@ struct ImageDecoder<'a, 'b> {
 impl<'a, 'b> ImageDecoder<'a, 'b> {
     fn new(obj: &'a ImageXObject<'b>, target_dimension: Option<(u32, u32)>) -> Option<Self> {
         let ctx = decode_context(obj, target_dimension)?;
-        let color_key_mask = obj.stream.dict().get::<SmallVec<[u16; 4]>>(MASK);
+        let dict = obj.stream.dict();
+        let color_key_mask = if obj.embedded_alpha_mode().is_none()
+            && dict.is_null_or_absent(SMASK)
+            && matches!(dict.get::<Object<'_>>(MASK), Some(Object::Array(_)))
+        {
+            let array = dict.get::<Array<'_>>(MASK)?;
+            let components = ctx.color_space.num_components() as usize;
+            let maximum = (1_u32.checked_shl(u32::from(ctx.bits_per_component))? - 1)
+                .min(u32::from(u16::MAX));
+            let mut values = SmallVec::<[u16; 4]>::new();
+            let mut numbers = array.iter::<Number>();
+            for entry in array.raw_iter() {
+                let value = entry
+                    .ok()
+                    .and_then(|_| numbers.next())
+                    .and_then(|value| value.as_i64_exact());
+                let Some(value) = value.filter(|value| (0..=i64::from(maximum)).contains(value))
+                else {
+                    (obj.warning_sink)(crate::InterpreterWarning::ImageDecodeFailure);
+                    return None;
+                };
+                if values.len() == 2 * components {
+                    (obj.warning_sink)(crate::InterpreterWarning::ImageDecodeFailure);
+                    return None;
+                }
+                values.push(value as u16);
+            }
+            if values.len() != 2 * components
+                || values.chunks_exact(2).any(|pair| pair[0] > pair[1])
+            {
+                (obj.warning_sink)(crate::InterpreterWarning::ImageDecodeFailure);
+                return None;
+            }
+            Some(values)
+        } else {
+            None
+        };
 
         Some(Self {
             obj,

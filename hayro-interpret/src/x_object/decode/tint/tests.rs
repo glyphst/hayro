@@ -116,6 +116,60 @@ fn sixteen_bit_neighbors_do_not_collapse_to_one_tint() {
 }
 
 #[test]
+fn color_key_masks_validate_decoded_arity_integer_ranges_and_jpx_depth() {
+    use crate::x_object::decode::jpx_fixtures;
+    for (space, components) in [
+        ("/DeviceGray".to_owned(), 1),
+        ("/DeviceRGB".to_owned(), 3),
+        ("/DeviceCMYK".to_owned(), 4),
+        (format!("[/Separation /Spot /DeviceGray {RAMP}]"), 1),
+    ] {
+        let base = format!("/Width 1/Height 1/BitsPerComponent 8/ColorSpace {space}");
+        let data = vec![64; components];
+        let ranges = "0 255 ".repeat(components);
+        let image = decode(&format!("{base}/Mask[{ranges}]"), &data, b"").unwrap();
+        assert_eq!(image.alpha.unwrap().data, [0]);
+        for ranges in [
+            String::new(),
+            "0 255 ".repeat(components - 1),
+            "0 255 ".repeat(components + 1),
+            format!("65 64 {}", "0 255 ".repeat(components - 1)),
+            format!("-1 255 {}", "0 255 ".repeat(components - 1)),
+            format!("0 256 {}", "0 255 ".repeat(components - 1)),
+            format!("0 255.0 {}", "0 255 ".repeat(components - 1)),
+            format!("0 garbage {}", "0 255 ".repeat(components - 1)),
+        ] {
+            assert!(
+                decode(&format!("{base}/Mask[{ranges}]"), &data, b"").is_none(),
+                "{space}: {ranges}"
+            );
+        }
+        let mask = b"5 0 obj <</Type/XObject/Subtype/Image/Width 1/Height 1/BitsPerComponent 8/ColorSpace/DeviceGray/Length 1>>stream\n\x80\nendstream\nendobj";
+        let image = decode(&format!("{base}/Mask[]/SMask 5 0 R"), &data, mask).unwrap();
+        assert_eq!(image.alpha.unwrap().data, [128]);
+    }
+    for (bits, data) in [
+        (1, jpx_fixtures::DEPTH_1),
+        (3, jpx_fixtures::DEPTH_3),
+        (8, jpx_fixtures::DEPTH_8),
+        (16, jpx_fixtures::DEPTH_16),
+    ] {
+        let base = "/Width 3/Height 2/Filter/JPXDecode/ColorSpace/DeviceGray/BitsPerComponent 1";
+        let maximum = (1_u32 << bits) - 1;
+        let image = decode(&format!("{base}/Mask[0 {maximum}]"), data, b"").unwrap();
+        assert_eq!(image.alpha.unwrap().data, [0; 6]);
+        assert!(decode(&format!("{base}/Mask[0 {}]", maximum + 1), data, b"").is_none());
+    }
+    let image = decode(
+        "/Width 1/Height 1/Filter/JPXDecode/ColorSpace/DeviceRGB/SMaskInData 1/Mask[]",
+        crate::jpx_opacity_fixtures::RGB8,
+        b"",
+    )
+    .unwrap();
+    assert_eq!(image.alpha.unwrap().data, [128]);
+}
+
+#[test]
 fn tint_decode_preserves_color_key_and_soft_mask_alpha() {
     let base = format!(
         "/Width 3/Height 1/BitsPerComponent 2/ColorSpace[/Separation /Spot /DeviceGray {RAMP}]/Decode[.5 .501]"

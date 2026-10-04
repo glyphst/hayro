@@ -391,7 +391,12 @@ where
             // attempt to read an object stream before having resolved the encryption dictionary).
             on_entry(name, offset, r)?;
 
-            if ctx.in_content_stream() {
+            if start_tag.is_none() && matches!(r.peek_byte(), Some(b'n' | b't' | b'f')) {
+                // Keep the whole inline keyword, including malformed suffixes,
+                // in the raw dictionary. Prefix recovery must not truncate the
+                // image before consumers can validate its typed parameters.
+                crate::object::name::skip_name_like(r, false)?;
+            } else if ctx.in_content_stream() {
                 r.skip::<Object<'_>>(ctx.in_content_stream())?;
             } else {
                 r.skip::<MaybeRef<Object<'_>>>(ctx.in_content_stream())?;
@@ -1190,6 +1195,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(dict.get_dict().len(), 5);
+    }
+
+    #[test]
+    fn inline_keyword_suffixes_retain_the_dictionary_and_following_parameters() {
+        for token in ["nulljunk", "truejunk", "falsejunk", "nonsense"] {
+            let bytes = format!("/IM {token} /W 1 /H 1 /BPC 1 ID ");
+            let dict = Reader::new(bytes.as_bytes())
+                .read_without_context::<InlineImageDict<'_>>()
+                .expect("retain malformed inline keyword");
+            let dict = dict.get_dict();
+            assert_eq!(dict.len(), 4);
+            assert_eq!(dict.get::<u32>(b"W"), Some(1));
+            assert!(dict.get::<bool>(b"IM").is_none());
+            assert!(dict.get::<crate::object::Null>(b"IM").is_none());
+            assert_eq!(dict.data(), &bytes.as_bytes()[..bytes.len() - 1]);
+        }
+        for token in ["true", "false", "null"] {
+            let bytes = format!("/IM {token} /W 1 ID ");
+            let dict = Reader::new(bytes.as_bytes())
+                .read_without_context::<InlineImageDict<'_>>()
+                .expect("valid inline keyword");
+            let dict = dict.get_dict();
+            assert_eq!(dict.get::<u32>(b"W"), Some(1));
+            if token == "null" {
+                assert!(dict.get::<crate::object::Null>(b"IM").is_some());
+            } else {
+                assert_eq!(dict.get::<bool>(b"IM"), Some(token == "true"));
+            }
+        }
     }
 
     #[test]

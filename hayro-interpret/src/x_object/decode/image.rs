@@ -343,30 +343,13 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
         // still be returned (see PDFJS-19611).
         let dict = self.obj.stream.dict();
 
-        if self.obj.embedded_alpha_mode().is_some() {
-            let mut data = self
-                .ctx
-                .decoded
-                .image_data
-                .as_mut()
-                .and_then(|image| image.alpha.take())?;
-            fix_image_length(&mut data, self.ctx.width, &mut self.ctx.height, 0, 1)?;
-
-            Some(LumaData {
-                data,
-                width: self.ctx.width,
-                height: self.ctx.height,
-                interpolate: self.obj.interpolate,
-                scale_factors: self.ctx.scale_factors,
-            })
-            // Note: `SMASK` field takes precedence over `MASK`, so order matters here.
-        } else if let Some(s_mask) = dict
-            .get::<Stream<'_>>(SMASK)
-            .or_else(|| dict.get::<Stream<'_>>(MASK))
+        if self.obj.embedded_alpha_mode().is_some()
+            || dict
+                .get::<Stream<'_>>(SMASK)
+                .or_else(|| dict.get::<Stream<'_>>(MASK))
+                .is_some()
         {
-            let obj = ImageXObject::new_mask(&s_mask, &self.obj.warning_sink, &self.obj.cache)?;
-
-            decode_mask(&obj, self.target_dimension).map(|decoded| decoded.luma)
+            decode_image_alpha(self.obj, &mut self.ctx, self.target_dimension)
         } else if self.color_key_mask.is_some() {
             self.decoded_color_key_mask
                 .take()
@@ -420,5 +403,35 @@ impl<'a, 'b> ImageDecoder<'a, 'b> {
             interpolate: self.obj.interpolate,
             scale_factors: self.ctx.scale_factors,
         })
+    }
+}
+
+pub(super) fn decode_image_alpha(
+    obj: &ImageXObject<'_>,
+    ctx: &mut DecodeContext<'_>,
+    target_dimension: Option<(u32, u32)>,
+) -> Option<LumaData> {
+    if obj.embedded_alpha_mode().is_some() {
+        let mut data = ctx
+            .decoded
+            .image_data
+            .as_mut()
+            .and_then(|image| image.alpha.take())?;
+        fix_image_length(&mut data, ctx.width, &mut ctx.height, 0, 1)?;
+        Some(LumaData {
+            data,
+            width: ctx.width,
+            height: ctx.height,
+            interpolate: obj.interpolate,
+            scale_factors: ctx.scale_factors,
+        })
+    } else {
+        let dict = obj.stream.dict();
+        // Associated SMask takes precedence over an explicit image Mask.
+        let stream = dict
+            .get::<Stream<'_>>(SMASK)
+            .or_else(|| dict.get::<Stream<'_>>(MASK))?;
+        let mask = ImageXObject::new_mask(&stream, &obj.warning_sink, &obj.cache)?;
+        decode_mask(&mask, target_dimension).map(|decoded| decoded.luma)
     }
 }

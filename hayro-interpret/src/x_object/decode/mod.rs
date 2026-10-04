@@ -12,6 +12,7 @@ mod tint;
 pub(crate) use float::{decode_rgb_f32, decode_rgb_f64};
 
 pub(crate) use image::{DecodedCmykImage, DecodedImage, decode_device_cmyk_image, decode_image};
+pub(crate) use mask::decode_stencil_alpha;
 pub(crate) use mask::{DecodedMask, decode_mask};
 
 use crate::InterpreterWarning;

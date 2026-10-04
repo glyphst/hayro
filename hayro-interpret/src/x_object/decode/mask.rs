@@ -25,6 +25,65 @@ pub(crate) fn decode_mask(
     target_dimension: Option<(u32, u32)>,
 ) -> Option<DecodedMask> {
     let ctx = decode_context(obj, target_dimension)?;
+    decode_mask_context(obj, ctx)
+}
+
+pub(crate) fn decode_stencil_alpha(
+    obj: &ImageXObject<'_>,
+    target_dimension: Option<(u32, u32)>,
+) -> Option<(DecodedMask, Option<LumaData>)> {
+    use crate::x_object::image::image_entry_is_omitted;
+    use hayro_syntax::object::dict::keys::*;
+    use hayro_syntax::object::{Name, Stream};
+    let dict = obj.stream.dict();
+    let result = || {
+        if !image_entry_is_omitted(dict, MASK) {
+            return None;
+        }
+        let embedded = obj.embedded_alpha_mode().is_some();
+        if !embedded && !image_entry_is_omitted(dict, SMASK) {
+            let stream = dict.get::<Stream<'_>>(SMASK)?;
+            let mask = stream.dict();
+            if mask.get::<Name<'_>>(SUBTYPE)?.as_ref() != b"Image"
+                || (!image_entry_is_omitted(mask, TYPE)
+                    && mask.get::<Name<'_>>(TYPE)?.as_ref() != b"XObject")
+                || mask
+                    .get::<Name<'_>>(CS)
+                    .or_else(|| mask.get::<Name<'_>>(COLORSPACE))?
+                    .as_ref()
+                    != b"DeviceGray"
+                || [IM, IMAGE_MASK].into_iter().any(|key| {
+                    !image_entry_is_omitted(mask, key) && mask.get::<bool>(key) != Some(false)
+                })
+                || [MASK, SMASK, MATTE]
+                    .into_iter()
+                    .any(|key| !image_entry_is_omitted(mask, key))
+                || hayro_syntax::object::stream::embedded_image_alpha_mode(mask)
+                    .ok()?
+                    .is_some()
+            {
+                return None;
+            }
+        }
+        let mut ctx = decode_context(obj, target_dimension)?;
+        let alpha = if embedded || !image_entry_is_omitted(dict, SMASK) {
+            Some(super::image::decode_image_alpha(
+                obj,
+                &mut ctx,
+                target_dimension,
+            )?)
+        } else {
+            None
+        };
+        Some((decode_mask_context(obj, ctx)?, alpha))
+    };
+    result().or_else(|| {
+        (obj.warning_sink)(crate::InterpreterWarning::ImageDecodeFailure);
+        None
+    })
+}
+
+fn decode_mask_context(obj: &ImageXObject<'_>, ctx: DecodeContext<'_>) -> Option<DecodedMask> {
     let width = ctx.width;
     let scale_factors = ctx.scale_factors;
 
@@ -47,6 +106,9 @@ pub(crate) fn decode_mask(
         },
     })
 }
+
+#[cfg(test)]
+mod tests;
 
 fn decode_mask_data(mut ctx: DecodeContext<'_>, invert: bool) -> Option<(Vec<u8>, u32)> {
     let default_decode = ctx

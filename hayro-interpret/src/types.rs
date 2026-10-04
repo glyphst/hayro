@@ -30,7 +30,8 @@ pub struct StencilImage<'a, 'b> {
 }
 
 impl<'a, 'b> StencilImage<'a, 'b> {
-    /// Perform some operation with the stencil data of the image.
+    /// Perform some operation with the intrinsic stencil data of the image.
+    /// Use [`Self::with_stencil_alpha`] to include associated opacity.
     ///
     /// The second argument allows you to give the image decoder a hint for
     /// what resolution of the image you want to have. Note that this does not
@@ -44,6 +45,23 @@ impl<'a, 'b> StencilImage<'a, 'b> {
     ) {
         if let Some(decoded) = self.image_xobject.decoded_mask(target_dimension) {
             func(decoded.luma, &self.paint);
+        }
+    }
+
+    /// Decode intrinsic stencil coverage and its independent associated opacity.
+    ///
+    /// Both planes map to the image's unit square and keep their own dimensions
+    /// and interpolation flags. An associated SMask replaces graphics-state
+    /// masking; embedded JPX opacity takes precedence over an external SMask.
+    /// Stencil source-space Matte recovery is unsupported. The callback is not
+    /// called when a selected opacity source cannot be decoded.
+    pub fn with_stencil_alpha(
+        &self,
+        func: impl FnOnce(LumaData, Option<LumaData>, &Paint<'a>),
+        target_dimension: Option<(u32, u32)>,
+    ) {
+        if let Some((decoded, alpha)) = self.image_xobject.decoded_stencil_alpha(target_dimension) {
+            func(decoded.luma, alpha, &self.paint);
         }
     }
 

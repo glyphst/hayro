@@ -1,6 +1,6 @@
 use super::decode::{
     DecodedCmykImage, DecodedImage, DecodedMask, decode_device_cmyk_image, decode_image,
-    decode_mask,
+    decode_mask, decode_stencil_alpha,
 };
 use super::xobject_oc;
 use crate::WarningSinkFn;
@@ -339,6 +339,16 @@ impl<'a> ImageXObject<'a> {
         }
 
         decode_mask(self, target_dimension)
+    }
+
+    pub(crate) fn decoded_stencil_alpha(
+        &self,
+        target_dimension: Option<(u32, u32)>,
+    ) -> Option<(DecodedMask, Option<crate::LumaData>)> {
+        if self.kind != ImageKind::StencilMask {
+            return None;
+        }
+        decode_stencil_alpha(self, target_dimension)
     }
 
     pub(crate) fn decoded_image(

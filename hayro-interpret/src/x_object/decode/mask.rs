@@ -94,7 +94,18 @@ fn decode_mask_context(obj: &ImageXObject<'_>, ctx: DecodeContext<'_>) -> Option
     // fully opaque. For stencil masks, it's the other way around: 1 means the
     // paint is visible, while 0 means it's invisible.
     let invert = obj.kind == ImageKind::StencilMask;
-    let (data, height) = decode_mask_data(ctx, invert)?;
+    let (data, height) = if invert && obj.embedded_alpha_mode().is_some() {
+        // Active JPX opacity keeps native channels instead of packed bytes.
+        // Recover those channels through the shared sample/Decode path before
+        // converting the stencil's opposite polarity into coverage.
+        let mut data = super::embedded::components(obj, &ctx)?;
+        for sample in &mut data {
+            *sample = 255 - *sample;
+        }
+        (data, ctx.height)
+    } else {
+        decode_mask_data(ctx, invert)?
+    };
 
     Some(DecodedMask {
         luma: LumaData {

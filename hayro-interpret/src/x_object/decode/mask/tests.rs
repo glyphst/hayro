@@ -6,8 +6,17 @@ use hayro_syntax::{
 };
 
 fn decoded(main: &str, mask: &str, samples: &[u8]) -> Option<(LumaData, Option<LumaData>)> {
-    let mut bytes = format!("%PDF-1.7\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 32 32]/Resources<<>>>>endobj\n4 0 obj<</Type/XObject/Subtype/Image/W 2/H 2/ImageMask true/BPC 1/SMask 5 0 R {main}/Length 2>>stream\n").into_bytes();
-    bytes.extend_from_slice(&[0x40, 0x80]);
+    decoded_samples(main, &[0x40, 0x80], mask, samples)
+}
+
+fn decoded_samples(
+    main: &str,
+    stencil: &[u8],
+    mask: &str,
+    samples: &[u8],
+) -> Option<(LumaData, Option<LumaData>)> {
+    let mut bytes = format!("%PDF-1.7\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 32 32]/Resources<<>>>>endobj\n4 0 obj<</Type/XObject/Subtype/Image/W 2/H 2/ImageMask true/BPC 1/SMask 5 0 R {main}/Length {}>>stream\n", stencil.len()).into_bytes();
+    bytes.extend_from_slice(stencil);
     bytes.extend_from_slice(format!("\nendstream\nendobj\n5 0 obj<</Type/XObject/Subtype/Image/W 3/H 1/ColorSpace/DeviceGray/BPC 8 {mask}/Length {}>>stream\n", samples.len()).as_bytes());
     bytes.extend_from_slice(samples);
     bytes.extend_from_slice(b"\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF");
@@ -26,6 +35,35 @@ fn decoded(main: &str, mask: &str, samples: &[u8]) -> Option<(LumaData, Option<L
     )?;
     let (shape, alpha) = decode_stencil_alpha(&image, None)?;
     Some((shape.luma, alpha))
+}
+
+#[test]
+fn embedded_jpx_stencil_channels_preserve_shape_decode_and_external_precedence() {
+    for mode in [1, 2] {
+        for (decode, expected) in [("[0 1]", 255), ("[1 0]", 0)] {
+            let entries = format!(
+                "/W 1 /H 1 /BPC garbage /Filter /JPXDecode /SMaskInData {mode} /D {decode} /SMask garbage"
+            );
+            let (shape, alpha) = decoded_samples(
+                &entries,
+                crate::jpx_opacity_fixtures::GRAY_ALPHA_1,
+                "/Matte garbage",
+                &[],
+            )
+            .unwrap();
+            assert_eq!(shape.data, [expected]);
+            assert_eq!(alpha.unwrap().data, [255]);
+            assert!(
+                decoded_samples(
+                    &format!("{entries} /Mask [0 1]"),
+                    crate::jpx_opacity_fixtures::GRAY_ALPHA_1,
+                    "",
+                    &[]
+                )
+                .is_none()
+            );
+        }
+    }
 }
 
 #[test]

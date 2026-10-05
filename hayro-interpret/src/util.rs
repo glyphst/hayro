@@ -90,25 +90,6 @@ impl Float64Ext for f64 {
     }
 }
 
-pub(crate) trait PointExt: Sized {
-    fn x(&self) -> f32;
-    fn y(&self) -> f32;
-
-    fn nearly_same(&self, other: Self) -> bool {
-        self.x().is_nearly_equal(other.x()) && self.y().is_nearly_equal(other.y())
-    }
-}
-
-impl PointExt for kurbo::Point {
-    fn x(&self) -> f32 {
-        self.x as f32
-    }
-
-    fn y(&self) -> f32 {
-        self.y as f32
-    }
-}
-
 /// Calculate a 128-bit siphash of a value.
 pub(crate) fn hash128<T: Hash + ?Sized>(value: &T) -> u128 {
     let mut state = SipHasher13::new();

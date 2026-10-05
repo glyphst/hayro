@@ -6,7 +6,7 @@ use crate::CacheKey;
 use crate::cache::Cache;
 use crate::color::{ColorComponents, ColorSpace};
 use crate::function::{CalculatorFunction, Function, StitchingBounds, Values, interpolate};
-use crate::util::{PointExt, RectExt};
+use crate::util::RectExt;
 use hayro_syntax::bit_reader::BitReader;
 use hayro_syntax::object::Array;
 use hayro_syntax::object::Dict;
@@ -647,7 +647,10 @@ fn read_free_form_triangles(
 
         let (p0, p1, p2) = (a.clone()?, b.clone()?, c.clone()?);
 
-        if p0.point.nearly_same(p1.point) || p1.point.nearly_same(p2.point) {
+        // Any distinct decoded edge can become visible after the caller's
+        // matrix magnifies it. Only coincident vertices are safe to discard;
+        // retain the decoded connection state even for those empty triangles.
+        if p0.point == p1.point || p1.point == p2.point {
             continue;
         }
 
@@ -1126,3 +1129,7 @@ fn read_function(dict: &Dict<'_>, color_space: &ColorSpace) -> Option<ShadingFun
         None
     }
 }
+
+#[cfg(test)]
+#[path = "shading_tests.rs"]
+mod tests;

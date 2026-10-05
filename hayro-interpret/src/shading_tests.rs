@@ -3,6 +3,42 @@ use hayro_syntax::bit_reader::BitReader;
 use kurbo::Point;
 
 #[test]
+fn analytic_shading_coordinates_retain_source_origin_offsets() {
+    use super::{Shading, ShadingType};
+    use crate::cache::Cache;
+    use hayro_syntax::object::{Dict, FromBytes};
+
+    let warning: crate::interpret::WarningSinkFn =
+        std::sync::Arc::new(|warning| panic!("unexpected shading warning: {warning:?}"));
+    for origin in [0_i64, 1 << 24, 1 << 40] {
+        for kind in [2, 3] {
+            let expected = if kind == 2 {
+                vec![origin + 17, -origin + 49, origin + 81, -origin + 49]
+            } else {
+                vec![origin + 47, -origin + 49, 8, origin + 47, -origin + 49, 24]
+            };
+            let coordinates = expected
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let source = format!(
+                "<< /ShadingType {kind} /ColorSpace /DeviceGray /Coords [{coordinates}] /Function << /FunctionType 2 /Domain [0 1] /N 1 >> >>"
+            );
+            let dictionary = Dict::from_bytes(source.as_bytes()).expect("shading dictionary");
+            let shading = Shading::new(&dictionary, None, &Cache::new(), &warning)
+                .expect("valid translated shading");
+            let ShadingType::RadialAxial { coords, .. } = shading.shading_type.as_ref() else {
+                panic!("distinct source coordinates must retain geometry: {source}");
+            };
+            for (actual, expected) in coords.iter().zip(expected) {
+                assert_eq!(*actual, expected as f64, "type {kind}, origin {origin}");
+            }
+        }
+    }
+}
+
+#[test]
 fn free_form_meshes_keep_distinct_vertices_at_small_source_scales() {
     // Three byte-aligned vertices with an eight-bit gray component. Decode
     // endpoints make every coordinate exact at each power-of-two scale.

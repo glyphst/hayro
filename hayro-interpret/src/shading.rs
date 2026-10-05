@@ -106,7 +106,7 @@ pub enum ShadingType {
         ///
         /// For radial shadings, the coordinates contain the x/y coordinates as well as the radius
         /// for both circles.
-        coords: [f32; 6],
+        coords: [f64; 6],
         /// The domain of the shading.
         domain: [f32; 2],
         /// The function forming the basis of the shading.
@@ -197,17 +197,16 @@ impl Shading {
                 let function = read_function(dict, &color_space)?;
                 let extend = dict.get::<[bool; 2]>(EXTEND).unwrap_or([false, false]);
                 let (coords, invalid) = if shading_num == 2 {
-                    let read = dict.get::<[f32; 4]>(COORDS)?;
+                    let read = dict.get::<[f64; 4]>(COORDS)?;
                     // Geometry has no absolute minimum size: the pattern or
                     // caller matrix can magnify a small, representable axis.
                     let invalid = read[0] == read[2] && read[1] == read[3];
                     ([read[0], read[1], read[2], read[3], 0.0, 0.0], invalid)
                 } else {
-                    let source = dict.get::<[f64; 6]>(COORDS)?;
-                    let read = source.map(|value| value as f32);
+                    let read = dict.get::<[f64; 6]>(COORDS)?;
                     // Table 81 defines two literal zero radii as no paint, even
                     // for identical centers. Preserve that geometry and its Background.
-                    let zero_radii = source[2] == 0.0 && source[5] == 0.0;
+                    let zero_radii = read[2] == 0.0 && read[5] == 0.0;
                     let invalid = read[0] == read[3]
                         && read[1] == read[4]
                         && read[2] == read[5]

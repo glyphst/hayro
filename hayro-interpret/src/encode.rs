@@ -303,7 +303,7 @@ impl ShadingPattern {
 }
 
 fn encode_axial_shading(
-    coords: [f32; 6],
+    coords: [f64; 6],
     domain: [f32; 2],
     function: &ShadingFunction,
     extend: [bool; 2],
@@ -315,8 +315,8 @@ fn encode_axial_shading(
         let [x_0, y_0, x_1, y_1, _, _] = coords;
 
         initial_transform = ts_from_line_to_line(
-            Point::new(x_0 as f64, y_0 as f64),
-            Point::new(x_1 as f64, y_1 as f64),
+            Point::new(x_0, y_0),
+            Point::new(x_1, y_1),
             Point::ZERO,
             Point::new(1.0, 0.0),
         );
@@ -325,12 +325,12 @@ fn encode_axial_shading(
     } else {
         let [x_0, y_0, r0, x_1, y_1, r_1] = coords;
 
-        initial_transform = Affine::translate((-x_0 as f64, -y_0 as f64));
+        initial_transform = Affine::translate((-x_0, -y_0));
         let new_x1 = x_1 - x_0;
         let new_y1 = y_1 - y_0;
 
-        let p1 = Point::new(new_x1 as f64, new_y1 as f64);
-        let r = Point::new(r0 as f64, r_1 as f64);
+        let p1 = Point::new(new_x1, new_y1);
+        let r = Point::new(r0, r_1);
 
         RadialAxialParams::Radial { p1, r }
     };

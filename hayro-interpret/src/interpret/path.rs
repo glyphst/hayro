@@ -9,7 +9,7 @@ pub(crate) fn fill_path<'a>(
     device: &mut impl Device<'a>,
     fill_rule: FillRule,
 ) {
-    fill_path_impl(context, device, fill_rule, None);
+    fill_path_impl(context, device, fill_rule, None, false);
 
     end_path(context, device);
 }
@@ -26,7 +26,9 @@ pub(crate) fn fill_stroke_path<'a>(
     fill_rule: FillRule,
 ) {
     device.begin_combined_fill_stroke();
-    fill_path_impl(context, device, fill_rule, None);
+    // Both stages retain the same contour so devices can recognize one
+    // combined object without losing the stroke's source traversal.
+    fill_path_impl(context, device, fill_rule, None, true);
     stroke_path_impl(context, device, None);
     device.end_combined_fill_stroke();
 
@@ -59,6 +61,7 @@ pub(crate) fn fill_path_impl<'a>(
     device: &mut impl Device<'a>,
     fill_rule: FillRule,
     path: Option<&BezPath>,
+    preserve_path: bool,
 ) {
     if !context.ocg_state.is_visible() {
         return;
@@ -75,7 +78,7 @@ pub(crate) fn fill_path_impl<'a>(
         match (bbox.width() == 0.0, bbox.height() == 0.0) {
             (false, false) => {
                 let draw_mode = DrawMode::Fill(fill_rule);
-                if let Some(rect) = path_as_rect(path) {
+                if !preserve_path && let Some(rect) = path_as_rect(path) {
                     device.draw_rect(&rect, props.clone(), &draw_mode);
                 } else {
                     device.draw_path(path, props.clone(), &draw_mode);
@@ -120,9 +123,11 @@ pub(crate) fn stroke_path_impl<'a>(
     let path = path.unwrap_or(context.path());
     let draw_mode = DrawMode::Stroke(stroke_props);
 
-    if let Some(rect) = path_as_rect(path) {
-        device.draw_rect(&rect, props, &draw_mode);
-    } else {
-        device.draw_path(path, props, &draw_mode);
-    }
+    // A rectangle's start, direction and explicit closure affect dash phase
+    // and caps. A normalized Rect cannot preserve those stroke semantics.
+    device.draw_path(path, props, &draw_mode);
 }
+
+#[cfg(test)]
+#[path = "path_tests.rs"]
+mod tests;

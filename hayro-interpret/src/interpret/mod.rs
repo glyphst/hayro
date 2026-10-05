@@ -1147,7 +1147,13 @@ pub fn interpret<'a>(
 
                     let bbox = context.bbox().to_path(0.1);
                     let inverted_bbox = context.get().ctm.inverse() * bbox;
-                    fill_path_impl(context, device, FillRule::NonZero, Some(&inverted_bbox));
+                    fill_path_impl(
+                        context,
+                        device,
+                        FillRule::NonZero,
+                        Some(&inverted_bbox),
+                        false,
+                    );
 
                     context.pop_root_transform();
                     context.restore_state(device);

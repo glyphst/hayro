@@ -5,7 +5,7 @@ use crate::font::outline::OutlineFont;
 use crate::font::{Font, PositionedGlyph, StandardFont};
 use crate::interpret::state::{ClipType, State, TextStateFont};
 use crate::ocg::OcgState;
-use crate::util::{BezPathExt, Float64Ext};
+use crate::util::BezPathExt;
 use crate::{ClipPath, Device, DrawProps, FillRule, InterpreterSettings, Paint, StrokeProps};
 use hayro_syntax::content::ops::Transform;
 use hayro_syntax::object::Name;
@@ -500,15 +500,12 @@ impl<'a> Context<'a> {
         if let Some(clip_rect) = path_as_rect(&clip_path) {
             let cur_bbox = self.bbox();
 
-            // If the clip path is a rect and completely covers the current bbox, don't emit it.
-            if cur_bbox
-                .min_x()
-                .is_nearly_greater_or_equal(clip_rect.min_x())
-                && cur_bbox
-                    .min_y()
-                    .is_nearly_greater_or_equal(clip_rect.min_y())
-                && cur_bbox.max_x().is_nearly_less_or_equal(clip_rect.max_x())
-                && cur_bbox.max_y().is_nearly_less_or_equal(clip_rect.max_y())
+            // Elide only a containing clip. A source-space epsilon can
+            // discard visible coverage after the device magnifies this page.
+            if cur_bbox.min_x() >= clip_rect.min_x()
+                && cur_bbox.min_y() >= clip_rect.min_y()
+                && cur_bbox.max_x() <= clip_rect.max_x()
+                && cur_bbox.max_y() <= clip_rect.max_y()
             {
                 self.get_mut().clips.push(ClipType::Dummy);
                 return;
@@ -798,16 +795,16 @@ pub(crate) fn path_as_rect(path: &BezPath) -> Option<Rect> {
             PathEl::LineTo(third),
             PathEl::LineTo(fourth),
             PathEl::LineTo(last),
-        ] if first.x.is_nearly_equal(last.x) && first.y.is_nearly_equal(last.y) => {
-            [*first, *second, *third, *fourth, *last]
-        }
+        ] if first == last => [*first, *second, *third, *fourth, *last],
         _ => return None,
     };
 
+    // This shortcut must preserve geometry at every device scale. Nearby
+    // endpoints or nearly axis-aligned edges are still distinct geometry.
     let mut previous_axis = None;
     for edge in points.windows(2) {
-        let same_x = edge[0].x.is_nearly_equal(edge[1].x);
-        let same_y = edge[0].y.is_nearly_equal(edge[1].y);
+        let same_x = edge[0].x == edge[1].x;
+        let same_y = edge[0].y == edge[1].y;
         if same_x == same_y || previous_axis == Some(same_x) {
             return None;
         }

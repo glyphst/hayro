@@ -1145,15 +1145,12 @@ pub fn interpret<'a>(
                     st.graphics_state.non_stroke_pattern = Some(sp);
                     st.graphics_state.none_stroke_cs = ColorSpace::pattern();
 
+                    // The shading already retains its selecting matrix. Keep
+                    // the covering path in page space so a large user-space
+                    // origin cannot collapse it in a binary32 device backend.
                     let bbox = context.bbox().to_path(0.1);
-                    let inverted_bbox = context.get().ctm.inverse() * bbox;
-                    fill_path_impl(
-                        context,
-                        device,
-                        FillRule::NonZero,
-                        Some(&inverted_bbox),
-                        false,
-                    );
+                    context.get_mut().ctm = Affine::IDENTITY;
+                    fill_path_impl(context, device, FillRule::NonZero, Some(&bbox), false);
 
                     context.pop_root_transform();
                     context.restore_state(device);

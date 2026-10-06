@@ -36,7 +36,8 @@ impl<'a> BitReader<'a> {
 
     /// Read the given number of bits from the byte stream.
     ///
-    /// Returns `None` if `bit_size` > 32.
+    /// Returns `None` for sizes outside 1–32 or an incomplete field, without
+    /// advancing the reader.
     #[inline(always)]
     pub fn read(&mut self, bit_size: u8) -> Option<u32> {
         if !(1..=32).contains(&bit_size) {
@@ -50,7 +51,7 @@ impl<'a> BitReader<'a> {
         }
 
         let item = match bit_size {
-            8 => {
+            8 if self.bit_pos() == 0 => {
                 let item = self.data[byte_pos] as u32;
                 self.cur_pos += 8;
 
@@ -398,6 +399,48 @@ mod tests {
         assert_eq!(reader.read(8).unwrap(), 0x01);
         assert_eq!(reader.read(8).unwrap(), 0x02);
         assert_eq!(reader.read(8).unwrap(), 0x03);
+    }
+
+    #[test]
+    fn bit_reader_all_widths_and_offsets_match_individual_bits() {
+        let data = [0x97, 0xa5, 0x08, 0xfb, 0x4e];
+        for start in 0..=data.len() * 8 + 8 {
+            for width in 0_u8..=33 {
+                let expected =
+                    if (1..=32).contains(&width) && start + usize::from(width) <= data.len() * 8 {
+                        Some(
+                            (start..start + usize::from(width)).fold(0_u32, |value, bit| {
+                                (value << 1) | u32::from((data[bit / 8] >> (7 - bit % 8)) & 1)
+                            }),
+                        )
+                    } else {
+                        None
+                    };
+                let mut reader = BitReader::new_with(&data, start);
+                assert_eq!(reader.peak(width), expected, "peek: {start}, {width}");
+                assert_eq!(reader.cur_pos(), start);
+                assert_eq!(reader.read(width), expected, "read: {start}, {width}");
+                assert_eq!(
+                    reader.cur_pos(),
+                    start + expected.map_or(0, |_| usize::from(width)),
+                    "position: {start}, {width}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bit_reader_byte_fields_follow_subbyte_flags() {
+        // Two flag bits, two eight-bit fields, and six trailing bits.
+        // The literal stream is independent of BitWriter.
+        let mut reader = BitReader::new(&[0xaa, 0xcf, 0x15]);
+        assert_eq!(reader.read(2), Some(2));
+        assert_eq!(reader.read(8), Some(0xab));
+        assert_eq!(reader.read(8), Some(0x3c));
+        assert_eq!(reader.read(6), Some(0x15));
+        assert!(reader.at_end());
+        assert_eq!(reader.read(8), None);
+        assert_eq!(reader.cur_pos(), 24);
     }
 
     #[test]

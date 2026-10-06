@@ -2,6 +2,113 @@ use super::{InterpolationHelpers, read_free_form_triangles};
 use hayro_syntax::bit_reader::BitReader;
 use kurbo::Point;
 
+fn append_mesh_bits(bytes: &mut Vec<u8>, position: &mut usize, value: u32, width: u8) {
+    for shift in (0..width).rev() {
+        if (*position).is_multiple_of(8) {
+            bytes.push(0);
+        }
+        let last = bytes.last_mut().unwrap();
+        *last |= (((value >> shift) & 1) as u8) << (7 - *position % 8);
+        *position += 1;
+    }
+}
+
+#[test]
+fn free_form_mesh_fields_follow_subbyte_flags_and_vertex_padding() {
+    for flag_bits in [2, 4] {
+        for coordinate_bits in [1, 2, 4, 8, 12, 16, 24, 32] {
+            for component_bits in [1, 2, 4, 8, 12, 16] {
+                let coordinate_max = u32::MAX >> (32 - coordinate_bits);
+                let component_max = u32::MAX >> (32 - component_bits);
+                let mut data = Vec::new();
+                let mut position = 0;
+                for (x, y, color) in [
+                    (0, 0, 0),
+                    (coordinate_max, 0, component_max),
+                    (coordinate_max, coordinate_max, component_max),
+                ] {
+                    for (value, width) in [
+                        (0, flag_bits),
+                        (x, coordinate_bits),
+                        (y, coordinate_bits),
+                        (color, component_bits),
+                    ] {
+                        append_mesh_bits(&mut data, &mut position, value, width);
+                    }
+                    // Type 4 vertex padding carries no semantics, including ones.
+                    let padding = (8 - position % 8) % 8;
+                    append_mesh_bits(&mut data, &mut position, u32::MAX, padding as u8);
+                }
+                for function in [false, true] {
+                    let triangles = read_free_form_triangles(
+                        &data,
+                        flag_bits,
+                        coordinate_bits,
+                        component_bits,
+                        function,
+                        &[-11.0, 51.0, -7.0, 83.0, 0.0, 1.0],
+                    )
+                    .expect("packed triangle");
+                    assert_eq!(triangles.len(), 1);
+                    let t = &triangles[0];
+                    assert_eq!(t.p0.point, Point::new(-11.0, -7.0));
+                    assert_eq!(t.p1.point, Point::new(51.0, -7.0));
+                    assert_eq!(t.p2.point, Point::new(51.0, 83.0));
+                    assert_eq!(t.p0.colors.as_slice(), &[0.0]);
+                    assert_eq!(t.p1.colors.as_slice(), &[1.0]);
+                    assert_eq!(t.p2.colors.as_slice(), &[1.0]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn patch_mesh_byte_fields_survive_successive_unaligned_records() {
+    for flag_bits in [2, 4] {
+        for count in [12, 16] {
+            let mut data = Vec::new();
+            let mut position = 0;
+            for patch in 0..4 {
+                append_mesh_bits(&mut data, &mut position, 0, flag_bits);
+                for index in 0..count {
+                    append_mesh_bits(&mut data, &mut position, 17 + patch * 31 + index, 8);
+                    append_mesh_bits(&mut data, &mut position, 239 - patch * 29 - index, 8);
+                }
+                for color in [17, 63, 129, 241] {
+                    append_mesh_bits(&mut data, &mut position, color, 8);
+                }
+            }
+            let patches = super::read_patch_mesh(
+                &data,
+                flag_bits,
+                8,
+                8,
+                false,
+                &[0.0, 255.0, 0.0, 255.0, 0.0, 1.0],
+                count as usize,
+                |points, colors| (points, colors),
+            )
+            .expect("packed patches");
+            assert_eq!(patches.len(), 4);
+            for (patch, (points, colors)) in patches.iter().enumerate() {
+                for (index, point) in points.iter().enumerate().take(count as usize) {
+                    assert_eq!(
+                        *point,
+                        Point::new(
+                            (17 + patch * 31 + index) as f64,
+                            (239 - patch * 29 - index) as f64,
+                        ),
+                    );
+                }
+                for (color, sample) in colors.iter().zip([17, 63, 129, 241]) {
+                    assert_eq!(color.as_slice(), &[sample as f32 / 255.0]);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn analytic_shading_coordinates_retain_source_origin_offsets() {
     use super::{Shading, ShadingType};

@@ -10,6 +10,7 @@ use crate::util::RectExt;
 use hayro_syntax::bit_reader::BitReader;
 use hayro_syntax::object::Array;
 use hayro_syntax::object::Dict;
+use hayro_syntax::object::Number;
 use hayro_syntax::object::Object;
 use hayro_syntax::object::Rect;
 use hayro_syntax::object::Stream;
@@ -258,14 +259,23 @@ impl Shading {
             5 => {
                 let stream = stream?;
                 let stream_data = stream.decoded().ok()?;
-                let bp_coord = dict.get::<u8>(BITS_PER_COORDINATE)?;
-                let bp_comp = dict.get::<u8>(BITS_PER_COMPONENT)?;
+                let bp_coord = dict
+                    .get::<Number>(BITS_PER_COORDINATE)?
+                    .as_i64_exact()
+                    .and_then(|value| u8::try_from(value).ok())?;
+                let bp_comp = dict
+                    .get::<Number>(BITS_PER_COMPONENT)?
+                    .as_i64_exact()
+                    .and_then(|value| u8::try_from(value).ok())?;
                 let function = read_function(dict, &color_space);
                 let decode = dict
                     .get::<Array<'_>>(DECODE)?
                     .iter::<f64>()
                     .collect::<Vec<_>>();
-                let vertices_per_row = dict.get::<u32>(VERTICES_PER_ROW)?;
+                let vertices_per_row = dict
+                    .get::<Number>(VERTICES_PER_ROW)?
+                    .as_i64_exact()
+                    .and_then(|value| u32::try_from(value).ok())?;
 
                 let triangles = read_lattice_triangles(
                     stream_data.as_ref(),
@@ -857,6 +867,12 @@ fn read_lattice_triangles(
     vertices_per_row: u32,
     decode: &[f64],
 ) -> Option<Vec<Triangle>> {
+    if vertices_per_row < 2
+        || !matches!(bp_cord, 1 | 2 | 4 | 8 | 12 | 16 | 24 | 32)
+        || !matches!(bp_comp, 1 | 2 | 4 | 8 | 12 | 16)
+    {
+        return None;
+    }
     let mut lattices = vec![];
 
     let ([x_min, x_max, y_min, y_max], decode) = split_decode(decode)?;

@@ -390,3 +390,156 @@ fn free_form_high_flag_bits_keep_coincident_connection_state() {
         }
     }
 }
+
+#[test]
+fn lattice_mesh_fields_and_row_geometry_follow_byte_padded_records() {
+    for coordinate_bits in [1, 2, 4, 8, 12, 16, 24, 32] {
+        for component_bits in [1, 2, 4, 8, 12, 16] {
+            for components in [1, 3, 4] {
+                for function in [false, true] {
+                    let samples = if function { 1 } else { components };
+                    let coordinate_max = u32::MAX >> (32 - coordinate_bits);
+                    let component_max = u32::MAX >> (32 - component_bits);
+                    let mut data = Vec::new();
+                    let mut position = 0;
+                    for (index, (x, y)) in [
+                        (0, 0),
+                        (coordinate_max, 0),
+                        (0, coordinate_max),
+                        (coordinate_max, coordinate_max),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        append_mesh_bits(&mut data, &mut position, x, coordinate_bits);
+                        append_mesh_bits(&mut data, &mut position, y, coordinate_bits);
+                        for sample in 0..samples {
+                            append_mesh_bits(
+                                &mut data,
+                                &mut position,
+                                if (index + sample).is_multiple_of(2) {
+                                    0
+                                } else {
+                                    component_max
+                                },
+                                component_bits,
+                            );
+                        }
+                        let padding = (8 - position % 8) % 8;
+                        append_mesh_bits(&mut data, &mut position, u32::MAX, padding as u8);
+                    }
+                    let mut decode = vec![-11.0, 51.0, -7.0, 83.0];
+                    for _ in 0..samples {
+                        decode.extend([0.0, 1.0]);
+                    }
+                    let triangles = super::read_lattice_triangles(
+                        &data,
+                        coordinate_bits,
+                        component_bits,
+                        function,
+                        2,
+                        &decode,
+                    )
+                    .expect("complete packed lattice");
+                    assert_eq!(triangles.len(), 2);
+                    let points = [
+                        Point::new(-11.0, -7.0),
+                        Point::new(51.0, -7.0),
+                        Point::new(-11.0, 83.0),
+                        Point::new(51.0, 83.0),
+                    ];
+                    // PDF 1.7 page 321 defines these two cell triplets. Vertex
+                    // order may rotate or reverse without changing a triangle.
+                    for (triangle, indices) in triangles.iter().zip([[0, 1, 2], [1, 2, 3]]) {
+                        let vertices = [&triangle.p0, &triangle.p1, &triangle.p2];
+                        for index in indices {
+                            let vertex = vertices
+                                .iter()
+                                .find(|vertex| vertex.point == points[index])
+                                .expect("specified cell vertex");
+                            let colors: Vec<_> = (0..samples)
+                                .map(|sample| ((index + sample) % 2) as f32)
+                                .collect();
+                            assert_eq!(vertex.colors.as_slice(), colors.as_slice());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lattice_mesh_row_width_guards_precede_reading() {
+    let decode = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+    for columns in [0, 1] {
+        assert!(super::read_lattice_triangles(&[], 8, 8, false, columns, &decode).is_none());
+        assert!(
+            super::read_lattice_triangles(&[0, 0, 0, 255, 0, 255], 8, 8, false, columns, &decode)
+                .is_none()
+        );
+    }
+    for [coord_bits, comp_bits] in [[0, 0], [0, 8], [8, 0], [3, 8], [8, 3], [255, 255]] {
+        assert!(
+            super::read_lattice_triangles(&[], coord_bits, comp_bits, false, 2, &decode).is_none()
+        );
+    }
+    for data in [&[][..], &[0, 0, 0, 255, 0, 255][..]] {
+        assert!(
+            super::read_lattice_triangles(data, 8, 8, false, 2, &decode)
+                .expect("empty or single complete row stays legal")
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn lattice_mesh_constructor_requires_actual_integer_layout_entries() {
+    use super::{Shading, ShadingType};
+    use crate::cache::Cache;
+    use hayro_syntax::object::{FromBytes, Stream};
+
+    let warning: crate::interpret::WarningSinkFn =
+        std::sync::Arc::new(|warning| panic!("unexpected shading warning: {warning:?}"));
+    let data = [0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255];
+    for layout in [
+        ["2", "8", "8"],
+        ["+2", "+8", "+8"],
+        ["0002", "008", "008"],
+        ["2.5", "8", "8"],
+        ["2.0", "8", "8"],
+        ["2", "8.5", "8"],
+        ["2", "8.0", "8"],
+        ["2", "8", "8.5"],
+        ["2", "8", "8.0"],
+        ["2", "0", "0"],
+        ["2", "3", "8"],
+        ["2", "8", "3"],
+        ["0", "8", "8"],
+        ["1", "8", "8"],
+    ] {
+        let [columns, coord_bits, comp_bits] = layout;
+        let valid = matches!(columns, "2" | "+2" | "0002");
+        let valid = valid
+            && matches!(coord_bits, "8" | "+8" | "008")
+            && matches!(comp_bits, "8" | "+8" | "008");
+        let mut bytes = format!(
+            "<< /Length {} /ShadingType 5 /ColorSpace /DeviceGray /BitsPerCoordinate {coord_bits} /BitsPerComponent {comp_bits} /VerticesPerRow {columns} /Decode [0 1 0 1 0 1] >>\nstream\n",
+            data.len(),
+        )
+        .into_bytes();
+        bytes.extend_from_slice(&data);
+        bytes.extend_from_slice(b"\nendstream");
+        let stream = Stream::from_bytes(&bytes).expect("independently authored lattice stream");
+        let shading = Shading::new(stream.dict(), Some(&stream), &Cache::new(), &warning);
+        if valid {
+            let shading = shading.expect("valid integer declarations");
+            let ShadingType::TriangleMesh { triangles, .. } = shading.shading_type.as_ref() else {
+                panic!("expected lattice triangles");
+            };
+            assert_eq!(triangles.len(), 2);
+        } else {
+            assert!(shading.is_none(), "malformed layout {layout:?}");
+        }
+    }
+}

@@ -287,3 +287,106 @@ fn mesh_coordinate_decode_retains_declared_endpoints() {
         }
     }
 }
+
+fn mesh_flag_records(records: &[(u32, u32, u32, u32)], flag_bits: u8, high_bits: u32) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mut position = 0;
+    for &(flag, x, y, color) in records {
+        for (value, width) in [(flag | high_bits, flag_bits), (x, 8), (y, 8), (color, 8)] {
+            append_mesh_bits(&mut data, &mut position, value, width);
+        }
+        let padding = (8 - position % 8) % 8;
+        append_mesh_bits(&mut data, &mut position, u32::MAX, padding as u8);
+    }
+    data
+}
+
+#[test]
+fn free_form_connections_ignore_high_flag_bits() {
+    // Literal decoded triangles independently cover initial/reset flag 0 and
+    // both connection flags. Every possible ignored prefix is exercised.
+    let records = [
+        (0, 16, 16, 17),
+        (0, 80, 16, 63),
+        (0, 80, 80, 129),
+        (1, 16, 80, 241),
+        (2, 16, 16, 17),
+        (0, 96, 16, 37),
+        (0, 144, 16, 127),
+        (0, 144, 80, 223),
+    ];
+    let expected = [
+        [(16, 16, 17), (80, 16, 63), (80, 80, 129)],
+        [(80, 16, 63), (80, 80, 129), (16, 80, 241)],
+        [(80, 16, 63), (16, 80, 241), (16, 16, 17)],
+        [(96, 16, 37), (144, 16, 127), (144, 80, 223)],
+    ];
+    for flag_bits in [2, 4, 8] {
+        for high_bits in (0..(1_u32 << flag_bits)).step_by(4) {
+            let data = mesh_flag_records(&records, flag_bits, high_bits);
+            for has_function in [false, true] {
+                let triangles = read_free_form_triangles(
+                    &data,
+                    flag_bits,
+                    8,
+                    8,
+                    has_function,
+                    &[0.0, 255.0, 0.0, 255.0, 0.0, 1.0],
+                )
+                .expect("connected mesh with ignored flag bits");
+                assert_eq!(
+                    triangles.len(),
+                    4,
+                    "flag bits {flag_bits}, prefix {high_bits}"
+                );
+                for (triangle, vertices) in triangles.iter().zip(expected) {
+                    for (actual, (x, y, color)) in [&triangle.p0, &triangle.p1, &triangle.p2]
+                        .into_iter()
+                        .zip(vertices)
+                    {
+                        assert_eq!(actual.point, Point::new(f64::from(x), f64::from(y)));
+                        assert_eq!(actual.colors.as_slice(), &[color as f32 / 255.0]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn free_form_high_flag_bits_keep_coincident_connection_state() {
+    for flag_bits in [2, 4, 8] {
+        for high_bits in (0..(1_u32 << flag_bits)).step_by(4) {
+            for connection in [1, 2] {
+                let second_x = if connection == 1 { 0 } else { 255 };
+                let records = [
+                    (0, 0, 0, 10),
+                    (0, second_x, 0, 20),
+                    (0, 255, 0, 30),
+                    (connection, 0, 255, 40),
+                ];
+                let data = mesh_flag_records(&records, flag_bits, high_bits);
+                for has_function in [false, true] {
+                    let triangles = read_free_form_triangles(
+                        &data,
+                        flag_bits,
+                        8,
+                        8,
+                        has_function,
+                        &[0.0, 255.0, 0.0, 255.0, 0.0, 1.0],
+                    )
+                    .expect("connected mesh seeded by an empty triangle");
+                    assert_eq!(triangles.len(), 1);
+                    let triangle = &triangles[0];
+                    assert_eq!(triangle.p0.point, Point::new(0.0, 0.0));
+                    assert_eq!(triangle.p1.point, Point::new(255.0, 0.0));
+                    assert_eq!(triangle.p2.point, Point::new(0.0, 255.0));
+                    let first_color = if connection == 1 { 20.0 } else { 10.0 };
+                    assert_eq!(triangle.p0.colors.as_slice(), &[first_color / 255.0]);
+                    assert_eq!(triangle.p1.colors.as_slice(), &[30.0 / 255.0]);
+                    assert_eq!(triangle.p2.colors.as_slice(), &[40.0 / 255.0]);
+                }
+            }
+        }
+    }
+}

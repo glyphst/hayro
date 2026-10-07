@@ -744,7 +744,8 @@ impl InterpolationHelpers {
         has_function: bool,
         decode: &[f64],
     ) -> Option<TriangleVertex> {
-        let flag = reader.read(bpf)?;
+        // PDF 1.7 Table 4.32 uses only the low two edge-flag bits.
+        let flag = reader.read(bpf)? & 0b11;
         let point = self.read_point(reader)?;
         let colors = self.read_colors(reader, has_function, decode)?;
         reader.align();

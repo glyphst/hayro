@@ -304,9 +304,18 @@ impl Shading {
             6 => {
                 let stream = stream?;
                 let stream_data = stream.decoded().ok()?;
-                let bp_coord = dict.get::<u8>(BITS_PER_COORDINATE)?;
-                let bp_comp = dict.get::<u8>(BITS_PER_COMPONENT)?;
-                let bpf = dict.get::<u8>(BITS_PER_FLAG)?;
+                let bp_coord = dict
+                    .get::<Number>(BITS_PER_COORDINATE)?
+                    .as_i64_exact()
+                    .and_then(|value| u8::try_from(value).ok())?;
+                let bp_comp = dict
+                    .get::<Number>(BITS_PER_COMPONENT)?
+                    .as_i64_exact()
+                    .and_then(|value| u8::try_from(value).ok())?;
+                let bpf = dict
+                    .get::<Number>(BITS_PER_FLAG)?
+                    .as_i64_exact()
+                    .and_then(|value| u8::try_from(value).ok())?;
                 let function = read_function(dict, &color_space);
                 let decode = dict
                     .get::<Array<'_>>(DECODE)?
@@ -327,9 +336,18 @@ impl Shading {
             7 => {
                 let stream = stream?;
                 let stream_data = stream.decoded().ok()?;
-                let bp_coord = dict.get::<u8>(BITS_PER_COORDINATE)?;
-                let bp_comp = dict.get::<u8>(BITS_PER_COMPONENT)?;
-                let bpf = dict.get::<u8>(BITS_PER_FLAG)?;
+                let bp_coord = dict
+                    .get::<Number>(BITS_PER_COORDINATE)?
+                    .as_i64_exact()
+                    .and_then(|value| u8::try_from(value).ok())?;
+                let bp_comp = dict
+                    .get::<Number>(BITS_PER_COMPONENT)?
+                    .as_i64_exact()
+                    .and_then(|value| u8::try_from(value).ok())?;
+                let bpf = dict
+                    .get::<Number>(BITS_PER_FLAG)?
+                    .as_i64_exact()
+                    .and_then(|value| u8::try_from(value).ok())?;
                 let function = read_function(dict, &color_space);
                 let decode = dict
                     .get::<Array<'_>>(DECODE)?
@@ -983,6 +1001,12 @@ fn read_patch_mesh<P, F>(
 where
     F: Fn([Point; 16], [ColorComponents; 4]) -> P,
 {
+    if !matches!(bpf, 2 | 4 | 8)
+        || !matches!(bp_coord, 1 | 2 | 4 | 8 | 12 | 16 | 24 | 32)
+        || !matches!(bp_comp, 1 | 2 | 4 | 8 | 12 | 16)
+    {
+        return None;
+    }
     let ([x_min, x_max, y_min, y_max], decode) = split_decode(decode)?;
     let mut reader = BitReader::new(data);
     let helpers = InterpolationHelpers::new(bp_coord, bp_comp, x_min, x_max, y_min, y_max);

@@ -636,3 +636,153 @@ fn free_form_mesh_layout_guards_precede_interpolation_and_reading() {
         }
     }
 }
+
+fn check_patch_constructor_layout(kind: u8, data: &[u8]) {
+    use super::{Shading, ShadingType};
+    use crate::cache::Cache;
+    use hayro_syntax::object::{FromBytes, Stream};
+
+    let warning: crate::interpret::WarningSinkFn =
+        std::sync::Arc::new(|warning| panic!("unexpected shading warning: {warning:?}"));
+    let expected = [
+        Point::new(0.0, 0.0),
+        Point::new(0.0, 85.0),
+        Point::new(0.0, 170.0),
+        Point::new(0.0, 255.0),
+        Point::new(85.0, 255.0),
+        Point::new(170.0, 255.0),
+        Point::new(255.0, 255.0),
+        Point::new(255.0, 170.0),
+        Point::new(255.0, 85.0),
+        Point::new(255.0, 0.0),
+        Point::new(170.0, 0.0),
+        Point::new(85.0, 0.0),
+        Point::new(85.0, 85.0),
+        Point::new(85.0, 170.0),
+        Point::new(170.0, 170.0),
+        Point::new(170.0, 85.0),
+    ];
+    for layout in [
+        ["2", "8", "8"],
+        ["+2", "+8", "+8"],
+        ["0002", "008", "008"],
+        ["2", "8.5", "8"],
+        ["2", "8.0", "8"],
+        ["2", "8", "8.5"],
+        ["2", "8", "8.0"],
+        ["2.5", "8", "8"],
+        ["2.0", "8", "8"],
+        ["1", "8", "8"],
+        ["2", "3", "8"],
+        ["2", "8", "3"],
+        ["0", "0", "0"],
+    ] {
+        let [flag_bits, coord_bits, comp_bits] = layout;
+        let valid = matches!(flag_bits, "2" | "+2" | "0002")
+            && matches!(coord_bits, "8" | "+8" | "008")
+            && matches!(comp_bits, "8" | "+8" | "008");
+        let mut bytes = format!(
+            "<< /Length {} /ShadingType {kind} /ColorSpace /DeviceGray /BitsPerCoordinate {coord_bits} /BitsPerComponent {comp_bits} /BitsPerFlag {flag_bits} /Decode [0 255 0 255 0 1] >>\nstream\n",
+            data.len(),
+        ).into_bytes();
+        bytes.extend_from_slice(data);
+        bytes.extend_from_slice(b"\nendstream");
+        let stream = Stream::from_bytes(&bytes).expect("independently authored patch stream");
+        let shading = Shading::new(stream.dict(), Some(&stream), &Cache::new(), &warning);
+        if valid {
+            let shading = shading.expect("valid integer patch declarations");
+            let (points, colors) = match shading.shading_type.as_ref() {
+                ShadingType::CoonsPatchMesh { patches, .. } if kind == 6 => {
+                    assert_eq!(patches.len(), 1);
+                    (&patches[0].control_points[..], &patches[0].colors)
+                }
+                ShadingType::TensorProductPatchMesh { patches, .. } if kind == 7 => {
+                    assert_eq!(patches.len(), 1);
+                    (&patches[0].control_points[..], &patches[0].colors)
+                }
+                _ => panic!("expected Type {kind} patch"),
+            };
+            assert_eq!(points, &expected[..if kind == 6 { 12 } else { 16 }]);
+            for (color, sample) in colors.iter().zip([0.0_f32, 1.0, 1.0, 0.0]) {
+                assert_eq!(color.as_slice(), &[sample]);
+            }
+        } else {
+            assert!(shading.is_none(), "Type {kind} malformed layout {layout:?}");
+        }
+    }
+}
+
+#[test]
+fn coons_patch_constructor_requires_actual_integer_layout_entries() {
+    // Literal two-bit flag, twelve eight-bit point pairs and four Gray samples.
+    // The six final padding bits are ones and carry no semantics.
+    let data = [
+        0, 0, 0, 21, 64, 42, 128, 63, 213, 127, 234, 191, 255, 255, 255, 234, 191, 213, 127, 192,
+        42, 128, 21, 64, 0, 63, 255, 192, 63,
+    ];
+    check_patch_constructor_layout(6, &data);
+}
+
+#[test]
+fn tensor_patch_constructor_requires_actual_integer_layout_entries() {
+    // A separate literal record includes the four interior point pairs.
+    let data = [
+        0, 0, 0, 21, 64, 42, 128, 63, 213, 127, 234, 191, 255, 255, 255, 234, 191, 213, 127, 192,
+        42, 128, 21, 64, 21, 85, 85, 106, 170, 170, 170, 149, 64, 63, 255, 192, 63,
+    ];
+    check_patch_constructor_layout(7, &data);
+}
+
+#[test]
+fn patch_mesh_layout_guards_precede_interpolation_and_reading() {
+    let decode = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+    for count in [12, 16] {
+        for function in [false, true] {
+            for [flag_bits, coord_bits, comp_bits] in [
+                [1, 8, 8],
+                [0, 8, 8],
+                [3, 8, 8],
+                [2, 0, 8],
+                [2, 3, 8],
+                [2, 8, 0],
+                [2, 8, 3],
+                [0, 0, 0],
+            ] {
+                assert!(
+                    super::read_patch_mesh(
+                        &[],
+                        flag_bits,
+                        coord_bits,
+                        comp_bits,
+                        function,
+                        &decode,
+                        count,
+                        |points, colors| (points, colors),
+                    )
+                    .is_none(),
+                    "illegal patch layout {count}/{function}/{flag_bits}/{coord_bits}/{comp_bits}"
+                );
+            }
+            for flag_bits in [2, 4, 8] {
+                for coord_bits in [1, 2, 4, 8, 12, 16, 24, 32] {
+                    for comp_bits in [1, 2, 4, 8, 12, 16] {
+                        assert!(
+                            super::read_patch_mesh(
+                                &[],
+                                flag_bits,
+                                coord_bits,
+                                comp_bits,
+                                function,
+                                &decode,
+                                count,
+                                |points, colors| (points, colors),
+                            )
+                            .expect("legal empty patch stream")
+                            .is_empty()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

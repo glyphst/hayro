@@ -13,6 +13,236 @@ fn append_mesh_bits(bytes: &mut Vec<u8>, position: &mut usize, value: u32, width
     }
 }
 
+fn check_shading_type_integer(kind: u8) {
+    use super::{Shading, ShadingType};
+    use crate::cache::Cache;
+    use hayro_syntax::Pdf;
+    use hayro_syntax::object::{Object, ObjectIdentifier};
+
+    let warning: crate::interpret::WarningSinkFn =
+        std::sync::Arc::new(|warning| panic!("unexpected shading warning: {warning:?}"));
+    let mut declarations = vec![
+        (kind.to_string(), true),
+        (format!("+{kind}"), true),
+        (format!("000{kind}"), true),
+        (format!("{kind}.5"), false),
+        (format!("{kind}.0"), false),
+    ];
+    declarations.extend(
+        [
+            "0", "8", "-1", "false", "null", "/Wrong", "(type)", "<< >>", "garbage", "nulljunk",
+            "99 0 R", "256",
+        ]
+        .map(|value| (value.to_owned(), false)),
+    );
+    declarations.extend([
+        (format!("[{kind}]"), false),
+        ("9".repeat(400), false),
+        (String::new(), false),
+    ]);
+    for (declaration, valid) in declarations {
+        for indirect in [false, true] {
+            let entry = if declaration.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "/ShadingType {}",
+                    if indirect { "6 0 R" } else { &declaration }
+                )
+            };
+            let stream = |entries: &str, data: &[u8]| {
+                let mut bytes =
+                    format!("<< {entries} /Length {} >>\nstream\n", data.len()).into_bytes();
+                bytes.extend_from_slice(data);
+                bytes.extend_from_slice(b"\nendstream");
+                bytes
+            };
+            let shading = match kind {
+                1 => format!("<< {entry} /ColorSpace /DeviceGray /Function 5 0 R >>").into_bytes(),
+                2 | 3 => {
+                    let coords = if kind == 2 {
+                        "0 0 1 0"
+                    } else {
+                        ".5 .5 0 .5 .5 .5"
+                    };
+                    format!("<< {entry} /ColorSpace /DeviceGray /Coords [{coords}] /Function << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [1] /N 1 >> >>").into_bytes()
+                }
+                _ => {
+                    let data = if kind == 4 {
+                        vec![0, 0, 0, 255, 0, 255, 0, 255, 0, 255, 255, 255]
+                    } else if kind == 5 {
+                        vec![0, 0, 255, 255, 0, 255, 0, 255, 255, 255, 255, 255]
+                    } else {
+                        let mut data = vec![0];
+                        for [x, y] in [
+                            [0, 0],
+                            [0, 85],
+                            [0, 170],
+                            [0, 255],
+                            [85, 255],
+                            [170, 255],
+                            [255, 255],
+                            [255, 170],
+                            [255, 85],
+                            [255, 0],
+                            [170, 0],
+                            [85, 0],
+                            [85, 85],
+                            [85, 170],
+                            [170, 170],
+                            [170, 85],
+                        ]
+                        .into_iter()
+                        .take(if kind == 6 { 12 } else { 16 })
+                        {
+                            data.extend_from_slice(&[x, y]);
+                        }
+                        data.extend_from_slice(&[255; 4]);
+                        data
+                    };
+                    let layout = if kind == 5 {
+                        "/VerticesPerRow 2"
+                    } else {
+                        "/BitsPerFlag 8"
+                    };
+                    stream(
+                        &format!(
+                            "{entry} /ColorSpace /DeviceGray /BitsPerCoordinate 8 /BitsPerComponent 8 {layout} /Decode [0 1 0 1 0 1]"
+                        ),
+                        &data,
+                    )
+                }
+            };
+            // Independently authored objects and offsets keep indirect declarations
+            // separate from the shading and the two-input calculator function.
+            let objects = [
+                b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] >>".to_vec(),
+                shading,
+                stream(
+                    "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1]",
+                    b"{ pop pop 1 }",
+                ),
+                if declaration.is_empty() {
+                    b"null".to_vec()
+                } else {
+                    declaration.as_bytes().to_vec()
+                },
+            ];
+            let mut bytes = b"%PDF-1.7\n".to_vec();
+            let mut offsets = Vec::new();
+            for (index, object) in objects.iter().enumerate() {
+                offsets.push(bytes.len());
+                bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+                bytes.extend_from_slice(object);
+                bytes.extend_from_slice(b"\nendobj\n");
+            }
+            let xref = bytes.len();
+            bytes.extend_from_slice(b"xref\n0 7\n0000000000 65535 f \n");
+            for (index, offset) in offsets.into_iter().enumerate() {
+                assert!(bytes[offset..].starts_with(format!("{} 0 obj\n", index + 1).as_bytes()));
+                bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+            }
+            bytes.extend_from_slice(
+                format!("trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n")
+                    .as_bytes(),
+            );
+            let pdf = Pdf::new(bytes).expect("literal shading declaration PDF");
+            let object = pdf
+                .xref()
+                .get::<Object<'_>>(ObjectIdentifier::new(4, 0))
+                .expect("shading object");
+            let shading = match &object {
+                Object::Dict(dict) => Shading::new(dict, None, &Cache::new(), &warning),
+                Object::Stream(stream) => {
+                    Shading::new(stream.dict(), Some(stream), &Cache::new(), &warning)
+                }
+                _ => panic!("literal shading object must be a dictionary or stream"),
+            };
+            if !valid {
+                assert!(
+                    shading.is_none(),
+                    "Type {kind} malformed declaration {declaration:?}, indirect={indirect}"
+                );
+                continue;
+            }
+            let shading = shading.expect("legal integer shading kind");
+            match (kind, shading.shading_type.as_ref()) {
+                (1, ShadingType::FunctionBased { function, .. }) => {
+                    assert_eq!(
+                        function
+                            .eval(&smallvec::smallvec![0.25, 0.75])
+                            .unwrap()
+                            .as_slice(),
+                        &[1.0]
+                    );
+                }
+                (
+                    2 | 3,
+                    ShadingType::RadialAxial {
+                        axial, function, ..
+                    },
+                ) => {
+                    assert_eq!(*axial, kind == 2);
+                    assert_eq!(
+                        function
+                            .eval(&smallvec::smallvec![0.25])
+                            .unwrap()
+                            .as_slice(),
+                        &[1.0]
+                    );
+                }
+                (
+                    4 | 5,
+                    ShadingType::TriangleMesh {
+                        shading_type,
+                        triangles,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(*shading_type, kind);
+                    assert_eq!(triangles.len(), if kind == 4 { 1 } else { 2 });
+                }
+                (6, ShadingType::CoonsPatchMesh { patches, .. }) => assert_eq!(patches.len(), 1),
+                (7, ShadingType::TensorProductPatchMesh { patches, .. }) => {
+                    assert_eq!(patches.len(), 1)
+                }
+                _ => panic!("integer declaration must preserve literal shading kind {kind}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn shading_type_integer_type1_constructor_rejects_real_declarations() {
+    check_shading_type_integer(1);
+}
+#[test]
+fn shading_type_integer_type2_constructor_rejects_real_declarations() {
+    check_shading_type_integer(2);
+}
+#[test]
+fn shading_type_integer_type3_constructor_rejects_real_declarations() {
+    check_shading_type_integer(3);
+}
+#[test]
+fn shading_type_integer_type4_constructor_rejects_real_declarations() {
+    check_shading_type_integer(4);
+}
+#[test]
+fn shading_type_integer_type5_constructor_rejects_real_declarations() {
+    check_shading_type_integer(5);
+}
+#[test]
+fn shading_type_integer_type6_constructor_rejects_real_declarations() {
+    check_shading_type_integer(6);
+}
+#[test]
+fn shading_type_integer_type7_constructor_rejects_real_declarations() {
+    check_shading_type_integer(7);
+}
+
 #[test]
 fn free_form_mesh_fields_follow_subbyte_flags_and_vertex_padding() {
     for flag_bits in [2, 4] {

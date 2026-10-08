@@ -168,7 +168,7 @@ impl Shading {
     ) -> Option<Self> {
         let cache_key = dict.cache_key();
 
-        let shading_num = dict.get::<u8>(SHADING_TYPE)?;
+        let shading_num = u8::try_from(dict.get::<Number>(SHADING_TYPE)?.as_i64_exact()?).ok()?;
 
         let color_space = dict
             .get(COLORSPACE)

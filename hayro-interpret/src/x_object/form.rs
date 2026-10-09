@@ -1603,6 +1603,73 @@ mod tests {
     }
 
     #[test]
+    fn marked_membership_requires_oc_tag_and_the_property_dictionary_itself() {
+        for tag in ["Span", "OC"] {
+            for (binding, private) in [("5 0 R", false), ("6 0 R", false), ("7 0 R", true)] {
+                let content = format!("/{tag} /P BDC 0 0 10 10 re f EMC 20 0 10 10 re f");
+                let bytes = format!(
+                    "%PDF-1.7\n\
+                     1 0 obj <</Type/Catalog/Pages 2 0 R/OCProperties<</OCGs[5 0 R]/D<</OFF[5 0 R]>>>>>> endobj\n\
+                     2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n\
+                     3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 32 32]/Resources<</Properties<</P {binding}>>>>/Contents 4 0 R>> endobj\n\
+                     4 0 obj <</Length {}>> stream\n{content}\nendstream endobj\n\
+                     5 0 obj <</Type/OCG/Name(Hidden)>> endobj\n\
+                     6 0 obj <</Type/OCMD/OCGs[5 0 R]/P/AllOn>> endobj\n\
+                     7 0 obj <</Type/Layout/OC 5 0 R>> endobj\n\
+                     trailer <</Root 1 0 R>>\n%%EOF",
+                    content.len(),
+                ).into_bytes();
+                for preserve in [false, true] {
+                    let device = interpret_bytes_with_settings(
+                        bytes.clone(),
+                        false,
+                        InterpreterSettings {
+                            preserve_optional_content: preserve,
+                            ..InterpreterSettings::default()
+                        },
+                    );
+                    let active = tag == "OC" && !private;
+                    assert_eq!(
+                        device.path_transforms.len(),
+                        if active && !preserve { 1 } else { 2 },
+                        "{tag} {binding} preserve {preserve}"
+                    );
+                    assert_eq!(
+                        device
+                            .events
+                            .iter()
+                            .filter(|event| **event == "begin-oc")
+                            .count(),
+                        usize::from(active && preserve),
+                        "{tag} {binding} preserve {preserve}"
+                    );
+                    assert_eq!(
+                        device
+                            .events
+                            .iter()
+                            .filter(|event| **event == "end-oc")
+                            .count(),
+                        usize::from(active && preserve)
+                    );
+                    assert_eq!(device.events.last(), Some(&"path"));
+                    if private {
+                        assert!(
+                            device.marked_properties[0]
+                                .additional_properties
+                                .iter()
+                                .any(|property| property.key == b"OC"
+                                    && matches!(
+                                        property.value,
+                                        MarkedContentPropertyValue::Dictionary(_)
+                                    ))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn marked_content_exposes_unresolved_named_property_list_identity() {
         let device = interpret_bytes(missing_marked_content_properties_pdf(), false);
         let properties = &device.marked_properties[0];

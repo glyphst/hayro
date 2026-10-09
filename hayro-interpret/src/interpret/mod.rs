@@ -45,7 +45,7 @@ pub(crate) mod text;
 pub use dash::DashPattern;
 pub use state::{ActiveTransferFunction, read_alpha_constant, read_blend_mode};
 
-const KNOWN_MARKED_CONTENT_KEYS: [&[u8]; 11] = [
+const KNOWN_MARKED_CONTENT_KEYS: [&[u8]; 10] = [
     MCID,
     ACTUAL_TEXT,
     ALT,
@@ -56,7 +56,6 @@ const KNOWN_MARKED_CONTENT_KEYS: [&[u8]; 11] = [
     O,
     BBOX,
     METADATA,
-    OC,
 ];
 
 struct MarkedPropertyBudget {
@@ -912,12 +911,14 @@ pub fn interpret<'a>(
                 marked_properties.property_list_resolved = resolved_properties.is_some();
 
                 device.begin_marked_content_with_properties(bdc.0, marked_properties);
+                // PDF 1.7 8.11.3.2: both the OC tag and an OCG/OCMD
+                // property dictionary are required. An OC entry inside a
+                // different property dictionary is private marked metadata.
                 let membership = resolved_properties.as_ref().and_then(|props| {
-                    if let Some(dict) = props.get::<Dict<'_>>(OC) {
-                        Some((dict, props.get_ref(OC).map(ObjectIdentifier::from)))
-                    } else if props
-                        .get::<Name<'_>>(TYPE)
-                        .is_some_and(|kind| kind.as_ref() == OCG || kind.as_ref() == OCMD)
+                    if bdc.0.as_ref() == OC
+                        && props
+                            .get::<Name<'_>>(TYPE)
+                            .is_some_and(|kind| kind.as_ref() == OCG || kind.as_ref() == OCMD)
                     {
                         Some((props.clone(), property_ref))
                     } else {

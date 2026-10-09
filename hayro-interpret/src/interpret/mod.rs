@@ -25,7 +25,8 @@ use hayro_syntax::object::dict::keys::{
     ACTUAL_TEXT, ALT, ANNOTS, BBOX, LANG, MCID, METADATA, NAME, O, OC, OCG, OCMD, SUBTYPE, TYPE,
 };
 use hayro_syntax::object::{
-    Array, Dict, Name, Object, ObjectIdentifier, Stream, String as PdfString, dict_or_stream,
+    Array, Dict, Name, Number, Object, ObjectIdentifier, Stream, String as PdfString,
+    dict_or_stream,
 };
 use hayro_syntax::page::{Page, Resources};
 use kurbo::{Affine, Point, Shape};
@@ -35,6 +36,8 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 mod dash;
+#[cfg(test)]
+mod marked_property_tests;
 pub(crate) mod path;
 pub(crate) mod state;
 pub(crate) mod text;
@@ -155,11 +158,23 @@ fn marked_property_dictionary(
 
 fn marked_content_properties(
     props: &Dict<'_>,
+    tag: &[u8],
+    named: bool,
     max_metadata_bytes: u64,
     max_property_bytes: u64,
     max_property_depth: u32,
 ) -> MarkedContentProperties {
-    let mcid = props.get::<i32>(MCID);
+    let omitted = |key| {
+        // PDF 1.7 14.6.2 permits indirect values only in named property lists.
+        (named || props.get_ref(key).is_none())
+            && props.is_null_or_absent(key)
+            && (props.get::<Object<'_>>(key).is_none()
+                || props.get::<hayro_syntax::object::Null>(key).is_some())
+    };
+    let mcid = props
+        .get::<Number>(MCID)
+        .and_then(|value| value.as_i64_exact())
+        .and_then(|value| i32::try_from(value).ok());
     let actual_text = props
         .get::<PdfString<'_>>(ACTUAL_TEXT)
         .map(|value| value.as_bytes().to_vec());
@@ -201,6 +216,7 @@ fn marked_content_properties(
         })
     });
     let mut unavailable_keys = Vec::new();
+    let background_artifact = tag == b"Artifact" && property_type.as_deref() == Some(b"Background");
     for (key, available) in [
         (MCID, mcid.is_some()),
         (ACTUAL_TEXT, actual_text.is_some()),
@@ -213,7 +229,7 @@ fn marked_content_properties(
         (BBOX, bounding_box.is_some()),
         (METADATA, metadata.is_some()),
     ] {
-        if props.contains_key(key) && !available {
+        if ((key == BBOX && background_artifact) || !omitted(key)) && !available {
             unavailable_keys.push(key.to_vec());
         }
     }
@@ -858,7 +874,7 @@ pub fn interpret<'a>(
             TypedInstruction::BeginMarkedContentWithProperties(bdc) => {
                 // Properties can be either:
                 // 1. A Name that references an entry in the Resources/Properties dictionary
-                // 2. An inline dictionary with an OC key
+                // 2. An inline property dictionary containing direct values
 
                 let property_name = bdc.1.clone().into_name();
                 let property_ref = property_name
@@ -875,6 +891,8 @@ pub fn interpret<'a>(
                     .map(|properties| {
                         marked_content_properties(
                             properties,
+                            bdc.0,
+                            property_name.is_some(),
                             context.settings.max_marked_content_metadata_bytes,
                             context.settings.max_marked_content_property_bytes,
                             context.settings.max_marked_content_property_depth,

@@ -611,11 +611,19 @@ impl<'a> Resources<'a> {
 
     /// Find a named property binding and the resource layer that defines it.
     /// A defined but unreadable binding keeps its owner and returns no object;
-    /// missing names and undefined references continue through the parent chain.
+    /// missing names, actual null and undefined references continue through the
+    /// parent chain. Recovered words are still defined malformed bindings.
     pub fn get_property_binding(&self, name: &Name<'_>) -> Option<(Option<Object<'a>>, &Self)> {
         if self.properties.contains_key(name.as_ref()) {
             let object = self.get_resource::<Object<'_>>(name, &self.properties);
-            if object.is_some() || !self.properties.is_null_or_absent(name.as_ref()) {
+            let omitted = match &object {
+                Some(Object::Null(_)) => self
+                    .get_resource::<crate::object::Null>(name, &self.properties)
+                    .is_some(),
+                None => self.properties.is_null_or_absent(name.as_ref()),
+                _ => false,
+            };
+            if !omitted {
                 return Some((object, self));
             }
         }

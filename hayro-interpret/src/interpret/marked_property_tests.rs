@@ -75,12 +75,16 @@ fn property_resource_bindings_retain_parent_ownership_and_declared_local_shadowi
             "<< /Properties << /P 8 0 R >> >>".to_owned(),
             value.to_owned(),
             "<< /Properties << /P 999 0 R >> >>".to_owned(),
+            "<< /Properties << /P null >> >>".to_owned(),
         ]);
         let parent = pdf.pages()[0].resources().clone();
         for resources in [
             Dict::empty(),
             pdf.xref()
                 .get::<Dict<'_>>(ObjectIdentifier::new(9, 0))
+                .unwrap(),
+            pdf.xref()
+                .get::<Dict<'_>>(ObjectIdentifier::new(10, 0))
                 .unwrap(),
         ] {
             let inherited = Resources::from_parent(resources, parent.clone());
@@ -120,6 +124,17 @@ fn property_resource_bindings_retain_parent_ownership_and_declared_local_shadowi
         let (object, owner) = malformed
             .get_property_binding(&name)
             .expect("declared local binding");
+        if value == "null" {
+            let Some(Object::Dict(dict)) = object else {
+                panic!("actual-null binding inherits")
+            };
+            assert_eq!(dict.get::<i32>(MCID), Some(41));
+            assert_eq!(
+                owner.properties.get_ref(b"P").map(ObjectIdentifier::from),
+                Some(ObjectIdentifier::new(4, 0))
+            );
+            continue;
+        }
         assert!(!matches!(object, Some(Object::Dict(_))), "{value}");
         assert_eq!(
             owner.properties.get_ref(b"P").map(ObjectIdentifier::from),

@@ -1,4 +1,6 @@
 mod geometric;
+#[cfg(test)]
+mod type_tests;
 pub use geometric::{
     AnnotationGeometryBudget, GeometricAnnotation, GeometricAnnotationError,
     GeometricAnnotationPath, resolve_geometric_annotation,
@@ -10,7 +12,7 @@ use crate::x_object::FormXObject;
 use hayro_syntax::object::dict::keys::{
     AP, AS, BORDER, BS, C, CA, D, F, FORMTYPE, N, QUADPOINTS, RECT, RESOURCES, S, SUBTYPE, TYPE, W,
 };
-use hayro_syntax::object::{Array, Dict, Name, Number, Object, Rect, Stream};
+use hayro_syntax::object::{Array, Dict, Name, Null, Number, Object, Rect, Stream};
 use kurbo::{Affine, Shape};
 use smallvec::smallvec;
 
@@ -899,7 +901,11 @@ pub(crate) fn resolve_annotation_appearance<'a>(
     {
         return Err(AnnotationAppearanceError::InvalidFormSubtype);
     }
-    if dict.contains_key(TYPE)
+    // Optional Type needs actual null/undefined omission. Generic Object
+    // recovery turns unknown words into null, which cannot waive this check.
+    let type_omitted = dict.is_null_or_absent(TYPE)
+        && (dict.get::<Object<'_>>(TYPE).is_none() || dict.get::<Null>(TYPE).is_some());
+    if !type_omitted
         && dict
             .get::<Name<'_>>(TYPE)
             .as_ref()

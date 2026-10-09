@@ -2,10 +2,14 @@ use super::*;
 use hayro_syntax::Pdf;
 
 fn resolve(entry: &str, value: &str) -> Result<Affine, AnnotationAppearanceError> {
+    resolve_entry("Type", entry, value)
+}
+
+fn resolve_entry(key: &str, entry: &str, value: &str) -> Result<Affine, AnnotationAppearanceError> {
     let declaration = if entry.is_empty() {
         String::new()
     } else {
-        format!("/Type {entry}")
+        format!("/{key} {entry}")
     };
     let art = "1 0 0 rg 0 0 8 8 re f";
     let objects = [
@@ -45,6 +49,61 @@ fn resolve(entry: &str, value: &str) -> Result<Affine, AnnotationAppearanceError
         .expect("appearance annotation");
     resolve_annotation_appearance(&annotation)
         .map(|appearance| appearance.expect("appearance").transform)
+}
+
+#[test]
+fn optional_appearance_form_type_and_resources_omission_keep_the_exact_mapping() {
+    for (key, explicit) in [("FormType", "1"), ("Resources", "<< >>")] {
+        for (entry, value) in [
+            ("", "null"),
+            (explicit, "null"),
+            ("6 0 R", explicit),
+            ("null", "null"),
+            ("7 0 R", "null"),
+            ("999 0 R", "null"),
+            ("6 0 R", "null"),
+        ] {
+            let actual = resolve_entry(key, entry, value).expect("optional declaration default");
+            assert_eq!(actual.as_coeffs(), [2.0, 0.0, 0.0, 2.0, 4.0, 8.0]);
+        }
+    }
+}
+
+#[test]
+fn defined_malformed_appearance_defaults_are_not_parser_recovery_omissions() {
+    for key in ["FormType", "Resources"] {
+        for value in [
+            "false",
+            "2",
+            "/Default",
+            "(default)",
+            "[]",
+            "garbage",
+            "nulljunk",
+            "(",
+            "<<",
+        ] {
+            let entries = if value == "(" || value == "<<" {
+                vec!["6 0 R"]
+            } else {
+                vec![value, "6 0 R"]
+            };
+            for entry in entries {
+                let actual = resolve_entry(key, entry, value);
+                assert!(
+                    matches!(
+                        (&actual, key),
+                        (Err(AnnotationAppearanceError::InvalidFormType), "FormType")
+                            | (
+                                Err(AnnotationAppearanceError::InvalidFormResources),
+                                "Resources"
+                            )
+                    ),
+                    "{key}: {entry}: {value}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

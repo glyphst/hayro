@@ -901,11 +901,13 @@ pub(crate) fn resolve_annotation_appearance<'a>(
     {
         return Err(AnnotationAppearanceError::InvalidFormSubtype);
     }
-    // Optional Type needs actual null/undefined omission. Generic Object
+    // Optional declarations need actual null/undefined omission. Generic Object
     // recovery turns unknown words into null, which cannot waive this check.
-    let type_omitted = dict.is_null_or_absent(TYPE)
-        && (dict.get::<Object<'_>>(TYPE).is_none() || dict.get::<Null>(TYPE).is_some());
-    if !type_omitted
+    let omitted = |key| {
+        dict.is_null_or_absent(key)
+            && (dict.get::<Object<'_>>(key).is_none() || dict.get::<Null>(key).is_some())
+    };
+    if !omitted(TYPE)
         && dict
             .get::<Name<'_>>(TYPE)
             .as_ref()
@@ -913,10 +915,10 @@ pub(crate) fn resolve_annotation_appearance<'a>(
     {
         return Err(AnnotationAppearanceError::InvalidFormType);
     }
-    if dict.contains_key(FORMTYPE) && dict.get::<i32>(FORMTYPE) != Some(1) {
+    if !omitted(FORMTYPE) && dict.get::<i32>(FORMTYPE) != Some(1) {
         return Err(AnnotationAppearanceError::InvalidFormType);
     }
-    if dict.contains_key(RESOURCES) && dict.get::<Dict<'_>>(RESOURCES).is_none() {
+    if !omitted(RESOURCES) && dict.get::<Dict<'_>>(RESOURCES).is_none() {
         return Err(AnnotationAppearanceError::InvalidFormResources);
     }
 

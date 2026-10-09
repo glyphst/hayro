@@ -609,6 +609,21 @@ impl<'a> Resources<'a> {
         self.parent.as_deref()
     }
 
+    /// Find a named property binding and the resource layer that defines it.
+    /// A defined but unreadable binding keeps its owner and returns no object;
+    /// missing names and undefined references continue through the parent chain.
+    pub fn get_property_binding(&self, name: &Name<'_>) -> Option<(Option<Object<'a>>, &Self)> {
+        if self.properties.contains_key(name.as_ref()) {
+            let object = self.get_resource::<Object<'_>>(name, &self.properties);
+            if object.is_some() || !self.properties.is_null_or_absent(name.as_ref()) {
+                return Some((object, self));
+            }
+        }
+        self.parent
+            .as_ref()
+            .and_then(|parent| parent.get_property_binding(name))
+    }
+
     /// Get an external graphics state by name.
     pub fn get_ext_g_state(&self, name: &Name<'_>) -> Option<Dict<'a>> {
         self.get_resource::<Dict<'_>>(name, &self.ext_g_states)

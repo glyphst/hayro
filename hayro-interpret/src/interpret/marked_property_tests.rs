@@ -26,6 +26,20 @@ fn properties(tag: &[u8], entries: &str, value: &str, named: bool) -> MarkedCont
         "null".to_owned(),
         "<< /Type /Metadata /Subtype /XML /Length 4 >>\nstream\n<x/>\nendstream".to_owned(),
     ];
+    let pdf = authored_pdf(&objects);
+    let dict = if named {
+        pdf.xref()
+            .get::<Dict<'_>>(ObjectIdentifier::new(4, 0))
+            .expect("named dictionary")
+    } else {
+        Reader::new(dictionary.as_bytes())
+            .read_without_context::<Dict<'_>>()
+            .expect("inline dictionary")
+    };
+    marked_content_properties(&dict, tag, named, 1 << 20, 1 << 20, 32)
+}
+
+fn authored_pdf(objects: &[String]) -> Pdf {
     let mut bytes = b"%PDF-1.7\n".to_vec();
     let mut offsets = vec![0];
     for (index, object) in objects.iter().enumerate() {
@@ -44,17 +58,75 @@ fn properties(tag: &[u8], entries: &str, value: &str, named: bool) -> MarkedCont
         )
         .as_bytes(),
     );
-    let pdf = Pdf::new(bytes).expect("authored marked-property PDF");
-    let dict = if named {
-        pdf.xref()
-            .get::<Dict<'_>>(ObjectIdentifier::new(4, 0))
-            .expect("named dictionary")
-    } else {
-        Reader::new(dictionary.as_bytes())
-            .read_without_context::<Dict<'_>>()
-            .expect("inline dictionary")
-    };
-    marked_content_properties(&dict, tag, named, 1 << 20, 1 << 20, 32)
+    Pdf::new(bytes).expect("authored marked-property PDF")
+}
+
+#[test]
+fn property_resource_bindings_retain_parent_ownership_and_declared_local_shadowing() {
+    let name = Name::new(b"P").expect("property name");
+    for value in ["null", "false", "[]", "garbage", "nulljunk", "(", "<<"] {
+        let pdf = authored_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 32 32] /Resources << /Properties << /P 4 0 R >> >> >>".to_owned(),
+            "<< /MCID 41 >>".to_owned(),
+            "<< /Properties << /P 6 0 R >> >>".to_owned(),
+            "<< /MCID 42 >>".to_owned(),
+            "<< /Properties << /P 8 0 R >> >>".to_owned(),
+            value.to_owned(),
+            "<< /Properties << /P 999 0 R >> >>".to_owned(),
+        ]);
+        let parent = pdf.pages()[0].resources().clone();
+        for resources in [
+            Dict::empty(),
+            pdf.xref()
+                .get::<Dict<'_>>(ObjectIdentifier::new(9, 0))
+                .unwrap(),
+        ] {
+            let inherited = Resources::from_parent(resources, parent.clone());
+            let (object, owner) = inherited
+                .get_property_binding(&name)
+                .expect("inherited binding");
+            let Some(Object::Dict(dict)) = object else {
+                panic!("inherited dictionary")
+            };
+            assert_eq!(dict.get::<i32>(MCID), Some(41));
+            assert_eq!(
+                owner.properties.get_ref(b"P").map(ObjectIdentifier::from),
+                Some(ObjectIdentifier::new(4, 0))
+            );
+        }
+        let local = Resources::from_parent(
+            pdf.xref()
+                .get::<Dict<'_>>(ObjectIdentifier::new(5, 0))
+                .unwrap(),
+            parent.clone(),
+        );
+        let (object, owner) = local.get_property_binding(&name).expect("local binding");
+        let Some(Object::Dict(dict)) = object else {
+            panic!("local dictionary")
+        };
+        assert_eq!(dict.get::<i32>(MCID), Some(42));
+        assert_eq!(
+            owner.properties.get_ref(b"P").map(ObjectIdentifier::from),
+            Some(ObjectIdentifier::new(6, 0))
+        );
+        let malformed = Resources::from_parent(
+            pdf.xref()
+                .get::<Dict<'_>>(ObjectIdentifier::new(7, 0))
+                .unwrap(),
+            parent,
+        );
+        let (object, owner) = malformed
+            .get_property_binding(&name)
+            .expect("declared local binding");
+        assert!(!matches!(object, Some(Object::Dict(_))), "{value}");
+        assert_eq!(
+            owner.properties.get_ref(b"P").map(ObjectIdentifier::from),
+            Some(ObjectIdentifier::new(8, 0))
+        );
+        assert_eq!(object.is_none(), value == "(" || value == "<<");
+    }
 }
 
 fn declaration(key: &[u8], entry: &str) -> String {

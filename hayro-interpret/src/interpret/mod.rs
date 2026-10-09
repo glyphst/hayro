@@ -877,13 +877,21 @@ pub fn interpret<'a>(
                 // 2. An inline property dictionary containing direct values
 
                 let property_name = bdc.1.clone().into_name();
-                let property_ref = property_name
+                let property_binding = property_name
                     .as_ref()
-                    .and_then(|name| resources.properties.get_ref(name.as_ref()))
+                    .and_then(|name| resources.get_property_binding(name));
+                let property_ref = property_binding
+                    .as_ref()
+                    .and_then(|(_, owner)| {
+                        owner.properties.get_ref(property_name.as_ref()?.as_ref())
+                    })
                     .map(ObjectIdentifier::from);
-                let resolved_properties = property_name
+                let resolved_properties = property_binding
                     .as_ref()
-                    .and_then(|name| resources.properties.get::<Dict<'_>>(name.as_ref()))
+                    .and_then(|(object, _)| match object {
+                        Some(Object::Dict(dict)) => Some(dict.clone()),
+                        _ => None,
+                    })
                     .or_else(|| dict_or_stream(bdc.1).map(|(props, _)| props.clone()));
 
                 let mut marked_properties = resolved_properties

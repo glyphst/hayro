@@ -36,7 +36,7 @@ fn properties(tag: &[u8], entries: &str, value: &str, named: bool) -> MarkedCont
             .read_without_context::<Dict<'_>>()
             .expect("inline dictionary")
     };
-    marked_content_properties(&dict, tag, named, 1 << 20, 1 << 20, 32)
+    marked_content_properties(&dict, Some(tag), named, 1 << 20, 1 << 20, 32)
 }
 
 fn authored_pdf(objects: &[String]) -> Pdf {

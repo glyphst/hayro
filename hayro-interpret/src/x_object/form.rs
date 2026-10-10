@@ -1677,7 +1677,7 @@ mod tests {
 
     #[test]
     fn marked_points_retain_properties_without_opening_content_or_layer_scopes() {
-        let content = "/Start MP /Span << /MCID 42 >> BDC /OC /Hidden DP 0 0 10 10 re f /Point /Layout DP /OC /Missing DP EMC /End MP 20 0 10 10 re f";
+        let content = "/Start MP /Span << /MCID 42 >> BDC /OC /Hidden DP 0 0 10 10 re f /Point /Layout DP /OC /Missing DP /Artifact << /Type /Background >> DP EMC /End MP 20 0 10 10 re f";
         let bytes = format!(
             "%PDF-1.7\n\
              1 0 obj << /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << /BaseState /OFF >> >> >> endobj\n\
@@ -1708,6 +1708,7 @@ mod tests {
                     "path",
                     "point",
                     "point",
+                    "point",
                     "end-marked",
                     "point",
                     "path"
@@ -1719,7 +1720,14 @@ mod tests {
                     .iter()
                     .map(|(tag, _)| tag.as_slice())
                     .collect::<Vec<_>>(),
-                [b"Start".as_slice(), b"OC", b"Point", b"OC", b"End"]
+                [
+                    b"Start".as_slice(),
+                    b"OC",
+                    b"Point",
+                    b"OC",
+                    b"Artifact",
+                    b"End"
+                ]
             );
             assert!(device.marked_points[0].1.property_list_resolved);
             assert_eq!(device.marked_points[2].1.mcid, Some(7));
@@ -1740,6 +1748,8 @@ mod tests {
                 Some(b"Missing".as_slice())
             );
             assert!(!device.marked_points[3].1.property_list_resolved);
+            assert!(device.marked_points[4].1.unavailable_keys.is_empty());
+            assert!(device.marked_points[4].1.bounding_box.is_none());
             assert_eq!(device.marked_properties.len(), 1);
             assert_eq!(device.marked_properties[0].mcid, Some(42));
         }

@@ -156,7 +156,7 @@ fn marked_property_dictionary(
 }
 
 fn resolved_marked_properties<'a>(
-    tag: &[u8],
+    sequence_tag: Option<&[u8]>,
     object: &Object<'a>,
     resources: &Resources<'a>,
     settings: &InterpreterSettings,
@@ -186,7 +186,7 @@ fn resolved_marked_properties<'a>(
         .map(|properties| {
             marked_content_properties(
                 properties,
-                tag,
+                sequence_tag,
                 property_name.is_some(),
                 settings.max_marked_content_metadata_bytes,
                 settings.max_marked_content_property_bytes,
@@ -202,7 +202,7 @@ fn resolved_marked_properties<'a>(
 
 fn marked_content_properties(
     props: &Dict<'_>,
-    tag: &[u8],
+    sequence_tag: Option<&[u8]>,
     named: bool,
     max_metadata_bytes: u64,
     max_property_bytes: u64,
@@ -260,7 +260,8 @@ fn marked_content_properties(
         })
     });
     let mut unavailable_keys = Vec::new();
-    let background_artifact = tag == b"Artifact" && property_type.as_deref() == Some(b"Background");
+    let background_artifact = sequence_tag == Some(b"Artifact".as_slice())
+        && property_type.as_deref() == Some(b"Background");
     for (key, available) in [
         (MCID, mcid.is_some()),
         (ACTUAL_TEXT, actual_text.is_some()),
@@ -917,7 +918,7 @@ pub fn interpret<'a>(
             }
             TypedInstruction::BeginMarkedContentWithProperties(bdc) => {
                 let (marked_properties, resolved_properties, property_ref) =
-                    resolved_marked_properties(bdc.0, bdc.1, resources, &context.settings);
+                    resolved_marked_properties(Some(bdc.0), bdc.1, resources, &context.settings);
 
                 device.begin_marked_content_with_properties(bdc.0, marked_properties);
                 // PDF 1.7 8.11.3.2: both the OC tag and an OCG/OCMD
@@ -967,7 +968,7 @@ pub fn interpret<'a>(
             }
             TypedInstruction::MarkedContentPointWithProperties(dp) => {
                 let (properties, _, _) =
-                    resolved_marked_properties(dp.0, dp.1, resources, &context.settings);
+                    resolved_marked_properties(None, dp.1, resources, &context.settings);
                 device.marked_content_point(dp.0, properties);
             }
             TypedInstruction::EndMarkedContent(_) => {

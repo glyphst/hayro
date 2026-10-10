@@ -155,6 +155,51 @@ fn marked_property_dictionary(
     Some(entries)
 }
 
+fn resolved_marked_properties<'a>(
+    tag: &[u8],
+    object: &Object<'a>,
+    resources: &Resources<'a>,
+    settings: &InterpreterSettings,
+) -> (
+    MarkedContentProperties,
+    Option<Dict<'a>>,
+    Option<ObjectIdentifier>,
+) {
+    let property_name = object.clone().into_name();
+    let property_binding = property_name
+        .as_ref()
+        .and_then(|name| resources.get_property_binding(name));
+    let property_ref = property_binding
+        .as_ref()
+        .and_then(|(_, owner)| owner.properties.get_ref(property_name.as_ref()?.as_ref()))
+        .map(ObjectIdentifier::from);
+    let resolved_properties = property_binding
+        .as_ref()
+        .and_then(|(object, _)| match object {
+            Some(Object::Dict(dict)) => Some(dict.clone()),
+            _ => None,
+        })
+        .or_else(|| dict_or_stream(object).map(|(props, _)| props.clone()));
+
+    let mut marked_properties = resolved_properties
+        .as_ref()
+        .map(|properties| {
+            marked_content_properties(
+                properties,
+                tag,
+                property_name.is_some(),
+                settings.max_marked_content_metadata_bytes,
+                settings.max_marked_content_property_bytes,
+                settings.max_marked_content_property_depth,
+            )
+        })
+        .unwrap_or_default();
+    marked_properties.property_list_name =
+        property_name.as_ref().map(|name| name.as_ref().to_vec());
+    marked_properties.property_list_resolved = resolved_properties.is_some();
+    (marked_properties, resolved_properties, property_ref)
+}
+
 fn marked_content_properties(
     props: &Dict<'_>,
     tag: &[u8],
@@ -871,44 +916,8 @@ pub fn interpret<'a>(
                     n.1.and_then(|name| Pattern::from_resource(name, context, resources));
             }
             TypedInstruction::BeginMarkedContentWithProperties(bdc) => {
-                // Properties can be either:
-                // 1. A Name that references an entry in the Resources/Properties dictionary
-                // 2. An inline property dictionary containing direct values
-
-                let property_name = bdc.1.clone().into_name();
-                let property_binding = property_name
-                    .as_ref()
-                    .and_then(|name| resources.get_property_binding(name));
-                let property_ref = property_binding
-                    .as_ref()
-                    .and_then(|(_, owner)| {
-                        owner.properties.get_ref(property_name.as_ref()?.as_ref())
-                    })
-                    .map(ObjectIdentifier::from);
-                let resolved_properties = property_binding
-                    .as_ref()
-                    .and_then(|(object, _)| match object {
-                        Some(Object::Dict(dict)) => Some(dict.clone()),
-                        _ => None,
-                    })
-                    .or_else(|| dict_or_stream(bdc.1).map(|(props, _)| props.clone()));
-
-                let mut marked_properties = resolved_properties
-                    .as_ref()
-                    .map(|properties| {
-                        marked_content_properties(
-                            properties,
-                            bdc.0,
-                            property_name.is_some(),
-                            context.settings.max_marked_content_metadata_bytes,
-                            context.settings.max_marked_content_property_bytes,
-                            context.settings.max_marked_content_property_depth,
-                        )
-                    })
-                    .unwrap_or_default();
-                marked_properties.property_list_name =
-                    property_name.as_ref().map(|name| name.as_ref().to_vec());
-                marked_properties.property_list_resolved = resolved_properties.is_some();
+                let (marked_properties, resolved_properties, property_ref) =
+                    resolved_marked_properties(bdc.0, bdc.1, resources, &context.settings);
 
                 device.begin_marked_content_with_properties(bdc.0, marked_properties);
                 // PDF 1.7 8.11.3.2: both the OC tag and an OCG/OCMD
@@ -956,7 +965,11 @@ pub fn interpret<'a>(
                     }
                 }
             }
-            TypedInstruction::MarkedContentPointWithProperties(_) => {}
+            TypedInstruction::MarkedContentPointWithProperties(dp) => {
+                let (properties, _, _) =
+                    resolved_marked_properties(dp.0, dp.1, resources, &context.settings);
+                device.marked_content_point(dp.0, properties);
+            }
             TypedInstruction::EndMarkedContent(_) => {
                 if context.ocg_state.marked_content_depth() > initial_marked_content_depth {
                     if context.ocg_state.end_marked_content() {
@@ -968,7 +981,15 @@ pub fn interpret<'a>(
                     warned_unmatched_marked_content_end = true;
                 }
             }
-            TypedInstruction::MarkedContentPoint(_) => {}
+            TypedInstruction::MarkedContentPoint(mp) => {
+                device.marked_content_point(
+                    mp.0,
+                    MarkedContentProperties {
+                        property_list_resolved: true,
+                        ..MarkedContentProperties::default()
+                    },
+                );
+            }
             TypedInstruction::BeginMarkedContent(bmc) => {
                 context.ocg_state.begin_marked_content();
                 device.begin_marked_content(bmc.0, None);

@@ -728,6 +728,7 @@ mod tests {
         group_color_spaces: Vec<Option<ColorSpaceKind>>,
         soft_masks: Vec<(MaskType, ColorSpaceKind, bool, Vec<f32>)>,
         marked_properties: Vec<MarkedContentProperties>,
+        marked_points: Vec<(Vec<u8>, MarkedContentProperties)>,
         link_borders: Vec<(LinkBorder, Affine)>,
         text_markups: Vec<(crate::TextMarkup, Affine)>,
         events: Vec<&'static str>,
@@ -809,6 +810,11 @@ mod tests {
         ) {
             self.events.push("begin-marked");
             self.marked_properties.push(properties);
+        }
+
+        fn marked_content_point(&mut self, tag: &[u8], properties: MarkedContentProperties) {
+            self.events.push("point");
+            self.marked_points.push((tag.to_vec(), properties));
         }
 
         fn end_marked_content(&mut self) {
@@ -1666,6 +1672,76 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn marked_points_retain_properties_without_opening_content_or_layer_scopes() {
+        let content = "/Start MP /Span << /MCID 42 >> BDC /OC /Hidden DP 0 0 10 10 re f /Point /Layout DP /OC /Missing DP EMC /End MP 20 0 10 10 re f";
+        let bytes = format!(
+            "%PDF-1.7\n\
+             1 0 obj << /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << /BaseState /OFF >> >> >> endobj\n\
+             2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+             3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Properties << /Hidden 5 0 R /Layout 6 0 R >> >> /Contents 4 0 R >> endobj\n\
+             4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\n\
+             5 0 obj << /Type /OCG /Name (Hidden) >> endobj\n\
+             6 0 obj << /MCID 7 /ActualText (Z) /Exact 9007199254740993 >> endobj\n\
+             trailer << /Root 1 0 R >>\n%%EOF",
+            content.len(),
+        ).into_bytes();
+        for preserve in [false, true] {
+            let device = interpret_bytes_with_settings(
+                bytes.clone(),
+                false,
+                InterpreterSettings {
+                    preserve_optional_content: preserve,
+                    ..InterpreterSettings::default()
+                },
+            );
+            assert_eq!(device.path_transforms.len(), 2);
+            assert_eq!(
+                device.events,
+                [
+                    "point",
+                    "begin-marked",
+                    "point",
+                    "path",
+                    "point",
+                    "point",
+                    "end-marked",
+                    "point",
+                    "path"
+                ]
+            );
+            assert_eq!(
+                device
+                    .marked_points
+                    .iter()
+                    .map(|(tag, _)| tag.as_slice())
+                    .collect::<Vec<_>>(),
+                [b"Start".as_slice(), b"OC", b"Point", b"OC", b"End"]
+            );
+            assert!(device.marked_points[0].1.property_list_resolved);
+            assert_eq!(device.marked_points[2].1.mcid, Some(7));
+            assert_eq!(
+                device.marked_points[2].1.actual_text.as_deref(),
+                Some(b"Z".as_slice())
+            );
+            assert!(
+                device.marked_points[2]
+                    .1
+                    .additional_properties
+                    .iter()
+                    .any(|property| property.key == b"Exact"
+                        && property.value == MarkedContentPropertyValue::Integer(9007199254740993))
+            );
+            assert_eq!(
+                device.marked_points[3].1.property_list_name.as_deref(),
+                Some(b"Missing".as_slice())
+            );
+            assert!(!device.marked_points[3].1.property_list_resolved);
+            assert_eq!(device.marked_properties.len(), 1);
+            assert_eq!(device.marked_properties[0].mcid, Some(42));
         }
     }
 

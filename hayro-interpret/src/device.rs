@@ -45,13 +45,13 @@ pub enum MarkedContentPropertyValue {
     Dictionary(Vec<MarkedContentProperty>),
 }
 
-/// Resolved properties attached to a marked-content sequence.
+/// Resolved properties attached to a marked-content sequence or point.
 ///
 /// Text strings remain as decoded PDF-string bytes. Consumers can apply the
 /// PDF text-string encoding rules without retaining syntax-layer lifetimes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MarkedContentProperties {
-    /// Raw name of a named property-list resource used by BDC.
+    /// Raw name of a named property-list resource used by BDC or DP.
     pub property_list_name: Option<Vec<u8>>,
     /// Whether the named or inline property-list operand resolved to a
     /// dictionary. A missing named resource remains observable to retaining
@@ -76,7 +76,7 @@ pub struct MarkedContentProperties {
     pub owner: Option<Vec<u8>>,
     /// Finite four-number `/BBox` property in its declared coordinate space.
     pub bounding_box: Option<[f64; 4]>,
-    /// Exact decoded XML metadata attached to the marked-content sequence.
+    /// Exact decoded XML metadata attached to the marked-content element.
     pub metadata: Option<MarkedContentMetadata>,
     /// Additional producer-defined entries, sorted by raw PDF name bytes.
     pub additional_properties: Vec<MarkedContentProperty>,
@@ -245,6 +245,11 @@ pub trait Device<'a> {
     ) {
         self.begin_marked_content(tag, properties.mcid);
     }
+    /// Called for one MP/DP point after resolving any inline or named properties.
+    ///
+    /// A point does not open a marked-content or optional-content scope. Its
+    /// properties do not replace, label or hide subsequent drawing operations.
+    fn marked_content_point(&mut self, _tag: &[u8], _properties: MarkedContentProperties) {}
     /// Called before content controlled by an OCG or OCMD visibility expression.
     ///
     /// This callback is emitted only when

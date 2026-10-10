@@ -463,6 +463,10 @@ impl<'a, T: Device<'a>> Device<'a> for Type3ShapeGlyphDevice<'a, '_, T> {
             .begin_marked_content_with_properties(tag, properties);
     }
 
+    fn marked_content_point(&mut self, tag: &[u8], properties: crate::MarkedContentProperties) {
+        self.inner.marked_content_point(tag, properties);
+    }
+
     fn end_marked_content(&mut self) {
         self.inner.end_marked_content();
     }

@@ -79,6 +79,7 @@ struct Capture {
     keys: Vec<(&'static str, u128)>,
     image_bytes: Vec<Vec<u8>>,
     gradient_colors: Vec<[f32; 4]>,
+    marked_points: Vec<(Vec<u8>, crate::MarkedContentProperties)>,
 }
 
 impl Capture {
@@ -129,6 +130,9 @@ impl Capture {
 }
 
 impl<'a> Device<'a> for Capture {
+    fn marked_content_point(&mut self, tag: &[u8], properties: crate::MarkedContentProperties) {
+        self.marked_points.push((tag.to_vec(), properties));
+    }
     fn draw_path(&mut self, _: &BezPath, props: DrawProps<'a>, mode: &DrawMode) {
         self.paint(
             props.paint,
@@ -610,4 +614,62 @@ fn inline_images_preserve_selected_transfer_and_raw_samples() {
             .components()[0],
         0.25
     );
+}
+
+#[test]
+fn colored_and_uncolored_programs_forward_points_with_owned_properties() {
+    let points =
+        "/Start MP /Point << /MCID 7 /ActualText (Z) /Exact 9007199254740993 >> DP /End MP";
+    let mut inputs = Vec::new();
+    for colored in [false, true] {
+        inputs.push(pattern_pdf(
+            colored,
+            false,
+            &format!("{points} 0 0 8 8 re f"),
+        ));
+        let font = b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 8 8] /FontMatrix [1 0 0 1 0 0] /FirstChar 65 /LastChar 65 /Widths [8] /Encoding << /Differences [65 /A] >> /CharProcs << /A 8 0 R >> /Resources << >> >>".to_vec();
+        let prefix = if colored { "8 0 d0" } else { "8 0 0 0 8 8 d1" };
+        inputs.push(pdf(
+            "/Font << /F 7 0 R >>",
+            "BT /F 1 Tf (AA) Tj ET",
+            vec![
+                font,
+                stream("", format!("{prefix} {points} 0 0 8 8 re f").as_bytes()),
+            ],
+        ));
+    }
+    for input in inputs {
+        for deferred in [false, true] {
+            let result = capture(
+                &input,
+                deferred,
+                &SharedInterpreterCache::new(crate::InterpreterCacheLimits::default()),
+            );
+            assert_eq!(result.marks.len(), 2);
+            assert_eq!(result.marked_points.len(), 6);
+            for invocation in result.marked_points.chunks_exact(3) {
+                assert_eq!(
+                    invocation
+                        .iter()
+                        .map(|(tag, _)| tag.as_slice())
+                        .collect::<Vec<_>>(),
+                    [b"Start".as_slice(), b"Point", b"End"]
+                );
+                assert_eq!(invocation[1].1.mcid, Some(7));
+                assert_eq!(
+                    invocation[1].1.actual_text.as_deref(),
+                    Some(b"Z".as_slice())
+                );
+                assert!(
+                    invocation[1]
+                        .1
+                        .additional_properties
+                        .iter()
+                        .any(|p| p.key == b"Exact"
+                            && p.value
+                                == crate::MarkedContentPropertyValue::Integer(9007199254740993))
+                );
+            }
+        }
+    }
 }

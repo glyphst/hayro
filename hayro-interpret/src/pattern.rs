@@ -551,6 +551,10 @@ impl<'a, T: Device<'a>> Device<'a> for StencilPatternDevice<'a, '_, T> {
         self.inner.draw_glyph_run(glyph_run, props, draw_mode);
     }
 
+    fn marked_content_point(&mut self, tag: &[u8], properties: crate::MarkedContentProperties) {
+        self.inner.marked_content_point(tag, properties);
+    }
+
     fn begin_text_object(&mut self, text_knockout: bool) {
         self.inner.begin_text_object(text_knockout);
     }
